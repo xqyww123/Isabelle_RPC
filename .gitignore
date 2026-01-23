@@ -1,0 +1,11 @@
+*.swp
+*.swo
+.~lock*
+*~
+\#*#
+__pycache__
+.vscode
+.venv
+.archive
+/dist
+*.egg-info
