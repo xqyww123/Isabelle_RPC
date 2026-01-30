@@ -10,12 +10,13 @@ exception Remote_Calling_Failure of {func_name: string option, message: string}
 val read : connection -> 'a MessagePackBinIO.Unpack.unpacker -> 'a
 val write : connection -> 'a MessagePackBinIO.Pack.packer -> 'a -> unit
 val write_error : connection -> exn -> unit
-val write_error': connection -> string list -> unit
+val write_error': connection -> 'a MessagePackBinIO.Pack.packer -> {message: string list, errobj: 'a} -> unit
 
 type ('a,'b) command = {
   name : string,
   arg_schema : 'a MessagePackBinIO.Pack.packer,
   ret_schema : 'b MessagePackBinIO.Unpack.unpacker,
+  callback : (connection -> unit) option,
   timeout : Time.time option
 }
 
@@ -213,9 +214,12 @@ fun make_connection () : connection =
 (** IO Infrastructure **)
 
 
-fun read (cin,_,_) packer =
+fun read (cin,_,timeout) packer =
   let open MessagePackBinIO.Unpack
-      val ((ret, err), cin') = doUnpack (unpackPair (unpackOption packer, unpackOption unpackString)) (!cin)
+      val timeout = !timeout
+      val ((ret, err), cin') =
+          (case timeout of SOME t => Timeout.apply t | NONE => I)
+              (doUnpack (unpackPair (unpackOption packer, unpackOption unpackString))) (!cin)
    in cin := cin'
     ; case (ret, err)
         of (SOME ret, NONE) => ret
@@ -225,24 +229,27 @@ fun read (cin,_,_) packer =
 
 fun write (_,cout,_) packer data =
   let open MessagePackBinIO.Pack
-   in doPack (packPair (packer, packList packString)) (data, []) cout
+   in doPack (packPair (packer, packUnit)) (data, ()) cout
     ; BinIO.StreamIO.flushOut cout
   end
 
-fun write_error' (_,cout,_) msgs =
+fun write_error' (_,cout,_) packer {message, errobj} =
   let open MessagePackBinIO.Pack
-   in doPack (packPair (packOption packUnit, packList packString))
-             (NONE, msgs) cout
+   in doPack (packPair (packOption packUnit, packPair (packList packString, packer)))
+             (NONE, (message, errobj)) cout
     ; BinIO.StreamIO.flushOut cout
   end
 
-fun write_error conn exn = write_error' conn (Runtime.exn_message_list exn)
+fun write_error conn exn =
+      write_error' conn MessagePackBinIO.Pack.packUnit
+                        {message=Runtime.exn_message_list exn, errobj=()}
 
 
 type ('a,'b) command = {
   name : string,
   arg_schema : 'a MessagePackBinIO.Pack.packer,
   ret_schema : 'b MessagePackBinIO.Unpack.unpacker,
+  callback : (connection -> unit) option,
   timeout : Time.time option
 }
 
@@ -251,11 +258,12 @@ type ('a,'b) command = {
 
 exception RPC_Fail of string
 
-fun call_command' {name, arg_schema, ret_schema, timeout} conn arg =
+fun call_command' {name, arg_schema, ret_schema, callback, timeout} conn arg =
   let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
       val _ = (#3 conn) := timeout
       val _ = write conn (packPair (packString, arg_schema)) (name, arg)
-   in read conn ret_schema
+   in (case callback of SOME C => C conn | NONE => ())
+    ; read conn ret_schema
   end handle MessagePackBinIO.Unpack.Unpack =>
       raise Remote_Calling_Failure {func_name=SOME name, message="Invalid response, protocal error"}
   
@@ -266,6 +274,7 @@ val heartbeat_cmd = {
   name = "heartbeat",
   arg_schema = packUnit,
   ret_schema = unpackUnit,
+  callback = NONE,
   timeout = SOME (Time.fromSeconds 10)
 }
 
@@ -275,6 +284,7 @@ val load_cmd = {
   name = "load_pymodule",
   arg_schema = packList packString,
   ret_schema = unpackPairList (unpackString, unpackOption unpackString),
+  callback = NONE,
   timeout = SOME (Time.fromSeconds 30)
 }
 

@@ -18,8 +18,9 @@ class ColorFormatter(logging.Formatter):
     RESET = '\033[0m'
 
 class IsabelleError(Exception):
-    def __init__(self, messages : list[str]):
+    def __init__(self, messages : list[str], errobj: Any):
         self.messages = messages
+        self.obj = errobj
         super().__init__(self.messages)
 
 
@@ -34,8 +35,8 @@ class Connection:
     
     def read(self):
         (ret, err) = self.unpack.unpack()
-        if err:
-            raise IsabelleError(err)
+        if err is not None:
+            raise IsabelleError(*err)
         return ret
     
     def write(self, data):
@@ -69,6 +70,12 @@ class Connection:
 
 RemoteProcedure: TypeAlias = Callable[[Any, Connection], Any]
 Remote_Procedures: dict[str, RemoteProcedure] = {}
+
+def isabelle_remote_procedure(name: str):
+    def decorator(func: Callable[[Any, Connection], Any]):
+        Remote_Procedures[name] = func
+        return func
+    return decorator
 
 class Server:
 
