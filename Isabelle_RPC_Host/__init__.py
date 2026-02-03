@@ -18,10 +18,10 @@ class ColorFormatter(logging.Formatter):
     RESET = '\033[0m'
 
 class IsabelleError(Exception):
-    def __init__(self, messages : list[str], errobj: Any):
-        self.messages = messages
+    def __init__(self, errors : list[str], errobj: Any):
+        self.errors = errors
         self.obj = errobj
-        super().__init__(self.messages)
+        super().__init__(self.errors)
 
 
 class Connection:
