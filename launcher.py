@@ -16,7 +16,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 2:
         log_file = sys.argv[2]
     logger = Isabelle_RPC_Host.mk_logger_(addr, log_file)
-    Isabelle_RPC_Host.load_remote_procedures(logger)
+    Isabelle_RPC_Host._load_remote_procedures(logger)
     print(Isabelle_RPC_Host.Remote_Procedures)
 
     # Create and start the server

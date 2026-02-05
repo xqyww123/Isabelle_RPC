@@ -25,7 +25,7 @@ class IsabelleError(Exception):
 
 
 class Connection:
-    def __init__(self, socket, client_addr, server):
+    def __init__(self, socket: socket.socket, client_addr: tuple[str, int], server: 'Server'):
         self.sock = socket
         self.client_addr = client_addr
         self.server = server
@@ -33,17 +33,17 @@ class Connection:
         self.cin = self.sock.makefile('rb', buffering=0)
         self.unpack = mp.Unpacker(self.cin)
     
-    def read(self):
+    def read(self) -> Any:
         (ret, err) = self.unpack.unpack()
         if err is not None:
             raise IsabelleError(*err)
         return ret
     
-    def write(self, data):
+    def write(self, data: Any) -> None:
         mp.pack((data, None), self.cout)
         self.cout.flush()
     
-    def write_error(self, error):
+    def write_error(self, error: Any) -> None:
         mp.pack((None, str(error)), self.cout)
         self.cout.flush()
     
@@ -61,10 +61,10 @@ class Connection:
         except:
             pass
     
-    def __enter__(self):
+    def __enter__(self) -> 'Connection':
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         self.close()
         return False
 
@@ -79,7 +79,7 @@ def isabelle_remote_procedure(name: str):
 
 class Server:
 
-    def __init__(self, addr, logger: logging.Logger):
+    def __init__(self, addr: str, logger: logging.Logger, debugging: bool = False):
         self.addr = addr
         self.host, port_str = addr.split(':')
         self.port = int(port_str)
@@ -87,8 +87,9 @@ class Server:
         self.running = False
         self.clients = {}
         self.logger = logger
+        self.debugging = debugging
 
-    def handle_client(self, client_socket, client_addr):
+    def handle_client(self, client_socket: socket.socket, client_addr: tuple[str, int]) -> None:
         """Handle a client connection."""
         with Connection(client_socket, client_addr, self) as connection:
             while self.running:
@@ -105,18 +106,27 @@ class Server:
                         self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
                         connection.write_error(f"Unknown procedure {func_name}")
                         continue
-                    try:
+                    if self.debugging:
                         result = func(arg, connection)
-                    except Exception as e:
-                        self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
-                        connection.write_error(e)
-                        continue
+                    else:
+                        try:
+                            result = func(arg, connection)
+                        except Exception as e:
+                            self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
+                            connection.write_error(e)
+                            continue
                     connection.write(result)
                 except Exception as e:
-                    self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
-                    return
+                    if self.debugging:
+                        import traceback
+                        traceback.print_exc()
+                        self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                        raise
+                    else:
+                        self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                        return
 
-    def stop_server(self):
+    def stop_server(self) -> None:
         """Stop the TCP server."""
         self.logger.info(f"Stopping server {self.addr}...")
         self.running = False
@@ -127,7 +137,7 @@ class Server:
                 pass
         self.logger.info(f"Server {self.addr} stopped")
         
-    def run_server(self):
+    def run_server(self) -> None:
         if self.running:
             raise RuntimeError(f"Isabelle RPC Host {self.addr} is already running")
         try:
@@ -158,15 +168,15 @@ class Server:
         except Exception as e:
             self.logger.error(f"Failed to start: {e}")
 
-    def __enter__(self):
+    def __enter__(self) -> 'Server':
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         self.stop_server()
         return False
 
 # Example usage
-def _heartbeat_(arg, connection : Connection):
+def _heartbeat_(arg, connection : Connection) -> None:
     connection.server.logger.info(f"Heartbeat from {connection.client_addr}")
     return None
 
@@ -189,7 +199,7 @@ def _load_remote_procedures_(arg, connection : Connection):
 
 Remote_Procedures["load_pymodule"] = _load_remote_procedures_
 
-def isabelle_home():
+def isabelle_home() -> str:
     isabelle_home = os.environ.get("ISABELLE_HOME_USER")
     if not isabelle_home:
         isabelle_home = os.popen("isabelle getenv -b ISABELLE_HOME_USER").read().strip()
@@ -198,7 +208,7 @@ def isabelle_home():
         sys.exit(1)
     return isabelle_home
 
-def load_remote_procedures(logger: logging.Logger):
+def _load_remote_procedures(logger: logging.Logger) -> None:
     home = isabelle_home()
     rpc_components_path = os.path.join(home, 'etc', 'rpc_components')
     logger.info(f"Loading RPC components from {rpc_components_path}")
@@ -212,7 +222,7 @@ def load_remote_procedures(logger: logging.Logger):
             logger.info(f"Loading RPC component: {line}")
             importlib.import_module(line)
 
-def mk_logger_(addr, log_file):
+def mk_logger_(addr: str, log_file: str | None) -> logging.Logger:
     # Configure logging
     logger = logging.getLogger(__name__)
     logger.propagate = False  # Prevent duplicate logging to root logger
@@ -234,7 +244,11 @@ def mk_logger_(addr, log_file):
         logger.addHandler(stream_handler)
     logger.setLevel(logging.DEBUG)
     return logger
-        
+
+def launch_server_(addr: str, logger: logging.Logger, debugging: bool = False) -> None:
+    _load_remote_procedures(logger)
+    with Server(addr, logger, debugging) as server:
+        server.run_server()
 
 def fork_and_launch__():
     """
@@ -244,9 +258,6 @@ def fork_and_launch__():
         sys.stderr.write("fork_and_launch__ is an internal function and should not be called directly")
     addr = sys.argv[1]
     log_file = sys.argv[2]
-
-    logger = mk_logger_(addr, log_file)
-    load_remote_procedures(logger)
 
     # First fork
     try:
@@ -290,6 +301,5 @@ def fork_and_launch__():
     so.close()
     se.close()
     
-    # Launch the server in the daemon process
-    with Server(addr, logger) as server:
-        server.run_server()
+    logger = mk_logger_(addr, log_file)
+    launch_server_(addr, logger)
