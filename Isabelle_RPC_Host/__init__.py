@@ -4,7 +4,7 @@ import sys
 import socket
 import threading
 import os
-from typing import Callable, TypeAlias, Any
+from typing import Callable, TypeAlias, Any, Optional
 import importlib
 
 class ColorFormatter(logging.Formatter):
@@ -16,6 +16,34 @@ class ColorFormatter(logging.Formatter):
         'CRITICAL': '\033[95m', # Magenta
     }
     RESET = '\033[0m'
+
+class DebugStream:
+    """Wraps a stream and buffers all bytes read for debugging unpack failures."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._buffer = bytearray()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._stream.read(size) if size >= 0 else self._stream.read()
+        self._buffer.extend(data)
+        return data
+
+    def readinto(self, b: bytearray) -> Optional[int]:
+        n = self._stream.readinto(b)
+        if n:
+            self._buffer.extend(b[:n])
+        return n
+
+    def close(self):
+        self._stream.close()
+
+    def get_buffer_hex(self) -> str:
+        return self._buffer.hex()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
 
 class IsabelleError(Exception):
     def __init__(self, errors : list[str], errobj: Any):
@@ -30,7 +58,9 @@ class Connection:
         self.client_addr = client_addr
         self.server = server
         self.cout = self.sock.makefile('wb')
-        self.cin = self.sock.makefile('rb', buffering=0)
+        raw_cin = self.sock.makefile('rb', buffering=0)
+        self.debug_stream: DebugStream | None = DebugStream(raw_cin) if server.debugging else None
+        self.cin = self.debug_stream if self.debug_stream else raw_cin
         self.unpack = mp.Unpacker(self.cin)
     
     def read(self) -> Any:
@@ -97,7 +127,17 @@ class Server:
                     try:
                         (func_name, arg) = connection.read()
                     except mp.UnpackException as e:
-                        self.logger.error(f"From {client_addr}, invalid RPC request")
+                        err_details = f"{type(e).__name__}: {e}"
+                        if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
+                            err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})"
+                        elif hasattr(connection.unpack, 'tell'):
+                            try:
+                                err_details += f" (stream_pos={connection.unpack.tell()})"
+                            except Exception:
+                                pass
+                        if connection.debug_stream:
+                            err_details += f" [debug: binary_hex={connection.debug_stream.get_buffer_hex()!s}]"
+                        self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
                         connection.write_error("Invalid RPC request")
                         return
                     try:
@@ -148,7 +188,7 @@ class Server:
             self.running = True
             
             # Create thread pool executor for handling client connections
-            self.logger.info(f"Start")
+            self.logger.info(f"Start" + (" (debug mode: binary capture on unpack errors)" if self.debugging else ""))
             
             while self.running:
                 try:
@@ -302,4 +342,5 @@ def fork_and_launch__():
     se.close()
     
     logger = mk_logger_(addr, log_file)
-    launch_server_(addr, logger)
+    debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
+    launch_server_(addr, logger, debugging)
