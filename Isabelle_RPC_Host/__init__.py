@@ -4,6 +4,7 @@ import sys
 import socket
 import threading
 import os
+import tempfile
 from typing import Callable, TypeAlias, Any, Optional
 import importlib
 
@@ -38,8 +39,12 @@ class DebugStream:
     def close(self):
         self._stream.close()
 
-    def get_buffer_hex(self) -> str:
-        return self._buffer.hex()
+    def get_buffer_bytes(self) -> bytes:
+        return bytes(self._buffer)
+
+    def clear_buffer(self) -> None:
+        """Clear buffer after successful read; keeps only the current message for error reporting."""
+        self._buffer.clear()
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
@@ -67,6 +72,8 @@ class Connection:
         (ret, err) = self.unpack.unpack()
         if err is not None:
             raise IsabelleError(*err)
+        if self.debug_stream:
+            self.debug_stream.clear_buffer()  # only keep failed message bytes for error log
         return ret
     
     def write(self, data: Any) -> None:
@@ -136,7 +143,13 @@ class Server:
                             except Exception:
                                 pass
                         if connection.debug_stream:
-                            err_details += f" [debug: binary_hex={connection.debug_stream.get_buffer_hex()!s}]"
+                            try:
+                                fd, dump_path = tempfile.mkstemp(suffix='.bin', prefix='isabelle_rpc_unpack_error_')
+                                with os.fdopen(fd, 'wb') as f:
+                                    f.write(connection.debug_stream.get_buffer_bytes())
+                                err_details += f" [debug: binary written to {dump_path}]"
+                            except Exception as dump_err:
+                                err_details += f" [debug: failed to write binary: {dump_err}]"
                         self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
                         connection.write_error("Invalid RPC request")
                         return
