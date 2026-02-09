@@ -302,7 +302,13 @@ fun get_connection () =
         fn [] => (NONE, [])
          | (x,_)::L => (SOME x, L) )
     of SOME conn =>
-          if can heartbeat conn then conn else get_connection ()
+          if can heartbeat conn
+          then conn
+          else let val (cin,cout,_) = conn
+                in BinIO.StreamIO.closeOut cout
+                 ; BinIO.StreamIO.closeIn (!cin)
+                 ; get_connection ()
+               end
      | NONE => make_connection ()
 
 val TTL = Time.fromSeconds 60
@@ -318,7 +324,7 @@ fun clean_connection_i conns =
                ; BinIO.StreamIO.closeIn (!cin)
                ; clean L
              end
-            else (x,t) :: L
+            else (x,t) :: clean L
    in clean conns
   end
 

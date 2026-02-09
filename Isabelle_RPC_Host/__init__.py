@@ -1,3 +1,4 @@
+import errno
 import msgpack as mp
 import logging
 import sys
@@ -105,6 +106,24 @@ class Connection:
         self.close()
         return False
 
+    def is_peer_closed(self) -> bool:
+        """True if the peer has closed the connection (no data and EOF)."""
+        old = self.sock.getblocking()
+        try:
+            self.sock.setblocking(False)
+            try:
+                n = len(self.sock.recv(1, socket.MSG_PEEK))
+                return n == 0
+            except BlockingIOError:
+                return False
+        except OSError:
+            return True
+        finally:
+            try:
+                self.sock.setblocking(old)
+            except OSError:
+                pass
+
 RemoteProcedure: TypeAlias = Callable[[Any, Connection], Any]
 Remote_Procedures: dict[str, RemoteProcedure] = {}
 
@@ -134,6 +153,10 @@ class Server:
                     try:
                         (func_name, arg) = connection.read()
                     except mp.UnpackException as e:
+                        if connection.is_peer_closed():
+                            self.logger.debug(f"From {client_addr}, connection closed by peer")
+                            return
+                        buf = connection.debug_stream.get_buffer_bytes() if connection.debug_stream else None
                         err_details = f"{type(e).__name__}: {e}"
                         if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
                             err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})"
@@ -142,11 +165,11 @@ class Server:
                                 err_details += f" (stream_pos={connection.unpack.tell()})"
                             except Exception:
                                 pass
-                        if connection.debug_stream:
+                        if buf is not None:
                             try:
                                 fd, dump_path = tempfile.mkstemp(suffix='.bin', prefix='isabelle_rpc_unpack_error_')
                                 with os.fdopen(fd, 'wb') as f:
-                                    f.write(connection.debug_stream.get_buffer_bytes())
+                                    f.write(buf)
                                 err_details += f" [debug: binary written to {dump_path}]"
                             except Exception as dump_err:
                                 err_details += f" [debug: failed to write binary: {dump_err}]"
@@ -169,6 +192,20 @@ class Server:
                             connection.write_error(e)
                             continue
                     connection.write(result)
+                except ConnectionResetError as e:
+                    self.logger.debug(f"From {client_addr}, connection reset by peer: {e}")
+                    return
+                except BrokenPipeError as e:
+                    self.logger.debug(f"From {client_addr}, broken pipe (peer closed): {e}")
+                    return
+                except OSError as e:
+                    if e.errno == errno.ECONNRESET:
+                        self.logger.debug(f"From {client_addr}, connection reset by peer (ECONNRESET): {e}")
+                        return
+                    if e.errno == errno.EPIPE:
+                        self.logger.debug(f"From {client_addr}, broken pipe (EPIPE, peer closed): {e}")
+                        return
+                    raise
                 except Exception as e:
                     if self.debugging:
                         import traceback
