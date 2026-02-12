@@ -182,15 +182,14 @@ class Server:
                         self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
                         connection.write_error(f"Unknown procedure {func_name}")
                         continue
-                    if self.debugging:
+                    try:
                         result = func(arg, connection)
-                    else:
-                        try:
-                            result = func(arg, connection)
-                        except Exception as e:
-                            self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
-                            connection.write_error(e)
-                            continue
+                    except Exception as e:
+                        self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
+                        connection.write_error(e)
+                        if self.debugging:
+                            raise
+                        continue
                     connection.write(result)
                 except ConnectionResetError as e:
                     self.logger.debug(f"From {client_addr}, connection reset by peer: {e}")
