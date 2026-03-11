@@ -103,6 +103,49 @@ class Connection:
         Raises:
             IsabelleError: If the callback is not found or execution fails
         """
+        def phase2_protocol(conn: 'Connection') -> Any:
+            # Phase 2: Send argument
+            mp.pack(arg, conn.cout)
+            conn.cout.flush()
+
+            # Read Phase 2 response: execution result
+            (result, error) = conn.unpack.unpack()
+
+            if error is not None:
+                raise IsabelleError([error], None)
+
+            if conn.debug_stream:
+                conn.debug_stream.clear_buffer()
+
+            return result
+
+        return self.raw_callback(name, phase2_protocol)
+
+    def raw_callback(self, name: str, action: Callable[['Connection'], Any]) -> Any:
+        """Start a raw callback with custom bidirectional protocol.
+
+        Only performs Phase 1 (lookup). After successful lookup, both the ML
+        callback' action and the Python action function run with raw connection
+        access, enabling custom bidirectional protocols.
+
+        Args:
+            name: The ML callback name
+            action: Python function that receives Connection for custom I/O
+
+        Returns:
+            Whatever the action function returns
+
+        Raises:
+            IsabelleError: If the callback is not found
+
+        Example:
+            def my_protocol(conn: Connection):
+                conn.write((1, "command"))
+                result = conn.read()
+                return result
+
+            result = connection.raw_callback("my_callback", my_protocol)
+        """
         # Phase 1: Send callback name for lookup
         mp.pack((0, name), self.cout)
         self.cout.flush()
@@ -114,21 +157,10 @@ class Connection:
             # Callback not found
             raise IsabelleError([phase1_error], None)
 
-        # Phase 2: Callback found, send argument
-        mp.pack(arg, self.cout)
-        self.cout.flush()
+        # Phase 1 succeeded - ML callback is now running with connection access
+        # Call Python action to interact with ML side via custom protocol
+        return action(self)
 
-        # Read Phase 2 response: execution result
-        (result, error) = self.unpack.unpack()
-
-        if error is not None:
-            raise IsabelleError([error], None)
-
-        if self.debug_stream:
-            self.debug_stream.clear_buffer()
-
-        return result
-    
     def close(self):
         try:
             self.cout.close()

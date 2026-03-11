@@ -148,6 +148,8 @@ def my_rpc(arg, connection: Connection):
     return f"Callback returned: {result}"
 ```
 
+**Advanced:** For custom bidirectional protocols, define ML callbacks using `callback'` type directly (bypassing structured schemas) and invoke with `connection.raw_callback(name, action)` where `action` is a function receiving the connection for arbitrary I/O operations.
+
 The built-in `isabelle_heartbeat` callback (RPC.ML:328) provides a working example. See `contrib/Isabelle_RPC/test_callback.py` for complete examples.
 
 ## Common MessagePack Schemas
