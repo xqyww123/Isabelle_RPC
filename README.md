@@ -102,9 +102,6 @@ val result = Remote_Procedure_Calling.call_command' compute_sum_cmd conn [1, 2, 
 val _ = Remote_Procedure_Calling.release_connection conn
 ```
 
-### Example: Heartbeat Command
-
-
 ## Common MessagePack Schemas
 
 ### Packing (ML → Python)
