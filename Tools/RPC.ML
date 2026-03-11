@@ -12,11 +12,24 @@ val write : connection -> 'a MessagePackBinIO.Pack.packer -> 'a -> unit
 val write_error : connection -> exn -> unit
 val write_error': connection -> 'a MessagePackBinIO.Pack.packer -> {message: string list, errobj: 'a} -> unit
 
+type ('a,'b) callback = {
+  name: string,
+  arg_schema: 'a MessagePackBinIO.Unpack.unpacker,
+  ret_schema: 'b MessagePackBinIO.Pack.packer,
+  function: 'a -> 'b,
+  timeout: Time.time option
+}
+type callback' = {name: string, action: connection -> unit}
+
+val mk_callback: ('a,'b) callback -> callback'
+val register_global_callback: ('a,'b) callback -> Context.generic -> Context.generic
+val register_global_callback': callback' -> Context.generic -> Context.generic
+
 type ('a,'b) command = {
   name : string,
   arg_schema : 'a MessagePackBinIO.Pack.packer,
   ret_schema : 'b MessagePackBinIO.Unpack.unpacker,
-  callback : (connection -> unit) option,
+  callback : callback' list,
   timeout : Time.time option
 }
 
@@ -28,6 +41,8 @@ val heartbeat : connection -> unit
 
 val load_cmd : (string list, (string * string option) list) command
 val load : string list -> unit
+
+val call_heartbeat_callback_cmd : (unit, string) command
 
 (*Auxiliary*)
 
@@ -213,19 +228,42 @@ fun make_connection () : connection =
 
 (** IO Infrastructure **)
 
+(** Tagged Message I/O for Callback Protocol **)
 
-fun read (cin,_,timeout) packer =
+datatype 'a tagged_message =
+    Callback_Request of string  (* Just the callback name *)
+  | User_Response of 'a
+  | Remote_Error of string
+
+fun read_tagged unpacker (cin, _, timeout) =
   let open MessagePackBinIO.Unpack
-      val timeout = !timeout
-      val ((ret, err), cin') =
-          (case timeout of SOME t => Timeout.apply t | NONE => I)
-              (doUnpack (unpackPair (unpackOption packer, unpackOption unpackString))) (!cin)
+      val timeout_val = !timeout
+      val (msg, cin') =
+          (case timeout_val of SOME t => Timeout.apply t | NONE => I)
+              (doUnpack (unpackPair_dep' unpackInt (fn tag =>
+                case tag of
+                    0 => (* Callback request: (0, name) *)
+                      (fn s => let val (name, s') = unpackString s
+                               in (Callback_Request name, s') end)
+                  | 1 => (* User response: (1, result) *)
+                      (fn s => let val (result, s') = unpacker s
+                               in (User_Response result, s') end)
+                  | 2 => (* Remote error: (2, error_message) *)
+                      (fn s => let val (err, s') = unpackString s
+                               in (Remote_Error err, s') end)
+                  | _ => (fn _ => error ("Unknown message tag: " ^ Int.toString tag))
+              ))) (!cin)
    in cin := cin'
-    ; case (ret, err)
-        of (SOME ret, NONE) => ret
-         | (_, SOME e) => raise Remote_Calling_Failure {func_name=NONE, message=e}
-         | _ => error "Invalid connection protocal. This is a bug and please report to xqyww123@gmail.com"
+    ; msg
   end
+
+fun read conn packer =
+  case read_tagged packer conn of
+      User_Response result => result
+    | Remote_Error err =>
+        raise Remote_Calling_Failure {func_name = NONE, message = err}
+    | Callback_Request _ =>
+        raise Remote_Calling_Failure {func_name = NONE, message = "Unexpected callback request when expecting user response"}
 
 fun write (_,cout,_) packer data =
   let open MessagePackBinIO.Pack
@@ -245,11 +283,109 @@ fun write_error conn exn =
                         {message=Runtime.exn_message_list exn, errobj=()}
 
 
+(** Callback Registry **)
+
+type ('a,'b) callback = {
+  name: string,
+  arg_schema: 'a MessagePackBinIO.Unpack.unpacker,
+  ret_schema: 'b MessagePackBinIO.Pack.packer,
+  function: 'a -> 'b,
+  timeout: Time.time option
+}
+
+type callback' = {name: string, action: connection -> unit}
+
+structure Callback_Data = Generic_Data
+(
+  type T = callback' Symtab.table
+  val empty = Symtab.empty
+  val merge = Symtab.merge (K true)
+)
+
+fun register_global_callback' (callback' : callback') : Context.generic -> Context.generic =
+  Callback_Data.map (Symtab.update (#name callback', callback'))
+
+fun get_global_callback (context : Context.generic) (name : string) : callback' option =
+  Symtab.lookup (Callback_Data.get context) name
+
+fun mk_callback ({name, arg_schema, ret_schema, function, timeout} : ('a,'b) callback) : callback' =
+  {name = name,
+   action = fn conn => \<^try>\<open>
+     let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
+         val (cin, cout, _) = conn
+         (* Phase 2: Read (arg, error) pair - no tagged protocol *)
+         val (arg, cin') = doUnpack arg_schema (!cin)
+                           handle Unpack => error "Failed to unpack callback argument"
+         val _ = cin := cin'
+         val result = function arg
+         (* Send (result, None) for success - both fields always present *)
+      in doPack (packPair (packOption ret_schema, packOption packString)) (SOME result, NONE) cout
+       ; BinIO.StreamIO.flushOut cout
+     end catch exn =>
+       (* Send (None, error_message) for failure - both fields always present *)
+       let open MessagePackBinIO.Pack
+           val (_, cout, _) = conn
+        in doPack (packPair (packOption ret_schema, packOption packString))
+                  (NONE, SOME (String.concatWith "\n" (Runtime.exn_message_list exn))) cout
+         ; BinIO.StreamIO.flushOut cout
+       end\<close>}
+
+fun register_global_callback (callback : ('a,'b) callback) : Context.generic -> Context.generic =
+  register_global_callback' (mk_callback callback)
+
+(** Built-in Callbacks **)
+
+local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
+
+val heartbeat_callback : (unit, string) callback = {
+  name = "isabelle_heartbeat",
+  arg_schema = unpackUnit,
+  ret_schema = packString,
+  function = (fn () => "Isabelle heartbeat: " ^ Time.toString (Time.now ())),
+  timeout = NONE
+}
+
+val _ = Theory.setup (Context.theory_map (register_global_callback heartbeat_callback))
+
+end
+
+(** Callback Dispatcher **)
+
+fun lookup_callback (local_callbacks : callback' list) (context : Context.generic) (name : string) : callback' option =
+  (case find_first (fn cb => #name cb = name) local_callbacks of
+      SOME cb => SOME cb
+    | NONE => get_global_callback context name)
+
+fun dispatch_loop conn local_callbacks context func_name ret_schema =
+  (case read_tagged ret_schema conn of
+      Callback_Request name =>
+        ((case lookup_callback local_callbacks context name of
+              SOME {action, ...} =>
+                let open MessagePackBinIO.Pack
+                    val (_, cout, _) = conn
+                    (* Phase 1 response: Send ((), None) for callback found *)
+                    val _ = doPack (packPair (packUnit, packOption packString)) ((), NONE) cout
+                    val _ = BinIO.StreamIO.flushOut cout
+                 in action conn
+                end
+            | NONE =>
+                let open MessagePackBinIO.Pack
+                    val (_, cout, _) = conn
+                    (* Phase 1 response: Send (None, error_message) for callback not found *)
+                    val _ = doPack (packPair (packOption packUnit, packOption packString))
+                                   (NONE, SOME ("Unknown callback: " ^ name)) cout
+                    val _ = BinIO.StreamIO.flushOut cout
+                 in () end)
+        ; dispatch_loop conn local_callbacks context func_name ret_schema)
+    | User_Response result => result
+    | Remote_Error err =>
+        raise Remote_Calling_Failure {func_name = SOME func_name, message = err})
+
 type ('a,'b) command = {
   name : string,
   arg_schema : 'a MessagePackBinIO.Pack.packer,
   ret_schema : 'b MessagePackBinIO.Unpack.unpacker,
-  callback : (connection -> unit) option,
+  callback : callback' list,
   timeout : Time.time option
 }
 
@@ -262,10 +398,10 @@ fun call_command' {name, arg_schema, ret_schema, callback, timeout} conn arg =
   let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
       val _ = (#3 conn) := timeout
       val _ = write conn (packPair (packString, arg_schema)) (name, arg)
-   in (case callback of SOME C => C conn | NONE => ())
-    ; read conn ret_schema
+      val context = Context.the_generic_context ()
+   in dispatch_loop conn callback context name ret_schema
   end handle MessagePackBinIO.Unpack.Unpack =>
-      raise Remote_Calling_Failure {func_name=SOME name, message="Invalid response, protocal error"}
+      raise Remote_Calling_Failure {func_name=SOME name, message="Invalid response, protocol error"}
   
 
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
@@ -274,7 +410,7 @@ val heartbeat_cmd = {
   name = "heartbeat",
   arg_schema = packUnit,
   ret_schema = unpackUnit,
-  callback = NONE,
+  callback = [],
   timeout = SOME (Time.fromSeconds 10)
 }
 
@@ -284,8 +420,16 @@ val load_cmd = {
   name = "load_pymodule",
   arg_schema = packList packString,
   ret_schema = unpackPairList (unpackString, unpackOption unpackString),
-  callback = NONE,
+  callback = [],
   timeout = SOME (Time.fromSeconds 30)
+}
+
+val call_heartbeat_callback_cmd = {
+  name = "call_heartbeat_callback",
+  arg_schema = packUnit,
+  ret_schema = unpackString,
+  callback = [],
+  timeout = SOME (Time.fromSeconds 10)
 }
 
 end

@@ -76,14 +76,58 @@ class Connection:
         if self.debug_stream:
             self.debug_stream.clear_buffer()  # only keep failed message bytes for error log
         return ret
-    
+
     def write(self, data: Any) -> None:
-        mp.pack((data, None), self.cout)
+        """Send success response with tag 1: (1, result)."""
+        mp.pack((1, data), self.cout)
         self.cout.flush()
-    
+
     def write_error(self, error: Any) -> None:
-        mp.pack((None, str(error)), self.cout)
+        """Send error response with tag 2: (2, error_message)."""
+        mp.pack((2, str(error)), self.cout)
         self.cout.flush()
+
+    def callback(self, name: str, arg: Any) -> Any:
+        """Call an Isabelle callback function with 2-phase protocol.
+
+        Phase 1: Send callback name, wait for lookup confirmation
+        Phase 2: If found, send argument and wait for execution result
+
+        Args:
+            name: The callback function name
+            arg: The argument to pass to the callback
+
+        Returns:
+            The result returned by the callback
+
+        Raises:
+            IsabelleError: If the callback is not found or execution fails
+        """
+        # Phase 1: Send callback name for lookup
+        mp.pack((0, name), self.cout)
+        self.cout.flush()
+
+        # Read Phase 1 response: (result, error) tuple
+        (phase1_result, phase1_error) = self.unpack.unpack()
+
+        if phase1_error is not None:
+            # Callback not found
+            raise IsabelleError([phase1_error], None)
+
+        # Phase 2: Callback found, send argument
+        mp.pack(arg, self.cout)
+        self.cout.flush()
+
+        # Read Phase 2 response: execution result
+        (result, error) = self.unpack.unpack()
+
+        if error is not None:
+            raise IsabelleError([error], None)
+
+        if self.debug_stream:
+            self.debug_stream.clear_buffer()
+
+        return result
     
     def close(self):
         try:
@@ -159,7 +203,7 @@ class Server:
                         buf = connection.debug_stream.get_buffer_bytes() if connection.debug_stream else None
                         err_details = f"{type(e).__name__}: {e}"
                         if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
-                            err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})"
+                            err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})" # type: ignore
                         elif hasattr(connection.unpack, 'tell'):
                             try:
                                 err_details += f" (stream_pos={connection.unpack.tell()})"
@@ -264,14 +308,26 @@ class Server:
         self.stop_server()
         return False
 
-# Example usage
-def _heartbeat_(arg, connection : Connection) -> None:
+# Built-in remote procedures
+
+@isabelle_remote_procedure("heartbeat")
+def _heartbeat_(arg, connection: Connection) -> None:
+    """Built-in heartbeat RPC for connection health checks."""
     connection.server.logger.info(f"Heartbeat from {connection.client_addr}")
     return None
 
-Remote_Procedures["heartbeat"] = _heartbeat_
 
-def _load_remote_procedures_(arg, connection : Connection):
+@isabelle_remote_procedure("load_pymodule")
+def _load_remote_procedures_(arg, connection: Connection):
+    """
+    Load Python modules to register additional RPC procedures.
+
+    Args:
+        arg: Module name (string) or list of module names
+
+    Returns:
+        Dictionary mapping module names to error messages (None if successful)
+    """
     logger = connection.server.logger
     if isinstance(arg, str):
         arg = [arg]
@@ -286,7 +342,30 @@ def _load_remote_procedures_(arg, connection : Connection):
             errors[target] = str(e)
     return errors
 
-Remote_Procedures["load_pymodule"] = _load_remote_procedures_
+
+@isabelle_remote_procedure("call_heartbeat_callback")
+def _call_heartbeat_callback_(arg, connection: Connection) -> str:
+    """
+    Call the Isabelle heartbeat callback.
+
+    This is an example RPC that demonstrates the callback mechanism:
+    Python receives an RPC call and calls back to Isabelle's heartbeat callback.
+
+    Args:
+        arg: Unused (unit value)
+        connection: The RPC connection
+
+    Returns:
+        The heartbeat message from Isabelle
+    """
+    logger = connection.server.logger
+    logger.info(f"Calling isabelle_heartbeat callback from {connection.client_addr}")
+
+    # Call the Isabelle heartbeat callback
+    heartbeat_msg = connection.callback("isabelle_heartbeat", None)
+
+    logger.info(f"Received heartbeat: {heartbeat_msg}")
+    return heartbeat_msg
 
 def isabelle_home() -> str:
     isabelle_home = os.environ.get("ISABELLE_HOME_USER")

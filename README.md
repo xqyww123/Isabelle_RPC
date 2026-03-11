@@ -102,6 +102,54 @@ val result = Remote_Procedure_Calling.call_command' compute_sum_cmd conn [1, 2, 
 val _ = Remote_Procedure_Calling.release_connection conn
 ```
 
+## Using Callbacks
+
+Callbacks allow Python to call back into Isabelle during RPC execution. This enables bidirectional communication within a single RPC call.
+
+### Defining Callbacks (Isabelle/ML Side)
+
+Define callbacks that Python can invoke:
+
+```sml
+open MessagePackBinIO.Pack MessagePackBinIO.Unpack
+
+val my_callback : (string, int) Remote_Procedure_Calling.callback = {
+  name = "my_callback",           (* callback identifier *)
+  arg_schema = unpackString,      (* Python → ML schema *)
+  ret_schema = packInt,           (* ML → Python schema *)
+  function = (fn msg => String.size msg),  (* callback logic *)
+  timeout = NONE
+}
+
+(* Either register globally using Remote_Procedure_Calling.register_global_callback *)
+val _ = Theory.setup (Context.theory_map
+  (Remote_Procedure_Calling.register_global_callback my_callback))
+
+(* Or pass as local callback in command definition *)
+val my_cmd : (unit, string) Remote_Procedure_Calling.command = {
+  name = "my_rpc",
+  arg_schema = packUnit,
+  ret_schema = unpackString,
+  callback = [Remote_Procedure_Calling.mk_callback my_callback],  (* local *)
+  timeout = SOME (Time.fromSeconds 10)
+}
+```
+
+### Calling Callbacks (Python Side)
+
+Invoke Isabelle callbacks from Python RPC procedures:
+
+```python
+@isabelle_remote_procedure("my_rpc")
+def my_rpc(arg, connection: Connection):
+    # Call back to Isabelle's "my_callback"
+    result = connection.callback("my_callback", "hello")
+    # result = 5 (length of "hello")
+    return f"Callback returned: {result}"
+```
+
+The built-in `isabelle_heartbeat` callback (RPC.ML:328) provides a working example. See `contrib/Isabelle_RPC/test_callback.py` for complete examples.
+
 ## Common MessagePack Schemas
 
 ### Packing (ML → Python)
