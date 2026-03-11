@@ -1,5 +1,5 @@
 theory Remote_Procedure_Calling
-  imports Main
+  imports HOL.HOL
 begin
 
 ML_file \<open>contrib/mlmsgpack/mlmsgpack-aux.sml\<close>
