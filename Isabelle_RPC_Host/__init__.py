@@ -8,6 +8,12 @@ import os
 import tempfile
 from typing import Callable, TypeAlias, Any, Optional
 import importlib
+import uuid
+
+from .position import IsabellePosition, Position
+from .unicode import (get_SYMBOLS, get_REVERSE_SYMBOLS, get_SYMBOLS_AND_REVERSED,
+                      pretty_unicode, unicode_of_ascii, ascii_of_unicode,
+                      SUBSUP_TRANS_TABLE, SUBSUP_RESTORE_TABLE)
 
 class ColorFormatter(logging.Formatter):
     COLORS = {
@@ -398,6 +404,13 @@ def _call_heartbeat_callback_(arg, connection: Connection) -> str:
 
     logger.info(f"Received heartbeat: {heartbeat_msg}")
     return heartbeat_msg
+
+
+@isabelle_remote_procedure("generate_uuids")
+def _generate_uuids_(arg, connection: Connection):
+    count = int(arg)
+    return [uuid.uuid4().bytes for _ in range(count)]
+
 
 def isabelle_home() -> str:
     isabelle_home = os.environ.get("ISABELLE_HOME_USER")
