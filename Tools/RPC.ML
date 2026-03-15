@@ -24,6 +24,7 @@ type callback' = {name: string, action: connection -> unit}
 val mk_callback: ('a,'b) callback -> callback'
 val register_global_callback: ('a,'b) callback -> Context.generic -> Context.generic
 val register_global_callback': callback' -> Context.generic -> Context.generic
+val get_global_callback: Context.generic -> string -> callback' option
 
 type ('a,'b) command = {
   name : string,
@@ -345,7 +346,17 @@ val heartbeat_callback : (unit, string) callback = {
   timeout = NONE
 }
 
-val _ = Theory.setup (Context.theory_map (register_global_callback heartbeat_callback))
+val symbol_explode_callback : (string, string list) callback = {
+  name = "position.symbol_explode",
+  arg_schema = unpackString,
+  ret_schema = packList packString,
+  function = fn text => Symbol_Pos.explode (text, Position.none) |> map fst,
+  timeout = NONE
+}
+
+val _ = Theory.setup (Context.theory_map (
+  register_global_callback heartbeat_callback
+  #> register_global_callback symbol_explode_callback))
 
 end
 
