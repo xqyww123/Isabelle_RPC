@@ -29,6 +29,8 @@ functor MessagePack(S : sig
                       -> ('a * 'b * 'c * 'd * 'e * 'f * 'g) packer
     val packTuple8 : 'a packer * 'b packer * 'c packer * 'd packer * 'e packer * 'f packer * 'g packer * 'i packer
                       -> ('a * 'b * 'c * 'd * 'e * 'f * 'g * 'i) packer
+    val packTuple9 : 'a packer * 'b packer * 'c packer * 'd packer * 'e packer * 'f packer * 'g packer * 'i packer * 'j packer
+                      -> ('a * 'b * 'c * 'd * 'e * 'f * 'g * 'i * 'j) packer
 
     val packPairList : ('a packer * 'b packer) -> ('a * 'b) list packer
     val packMapTabulate : ('a packer * 'b packer) -> (int * (int -> 'a * 'b)) packer
@@ -36,6 +38,7 @@ functor MessagePack(S : sig
     val packUnit   : unit packer
     val packBool   : bool packer
     val packInt    : int packer
+    val packWord64 : Word64.word packer
     val packReal   : real packer
 
     val packString : string packer
@@ -76,6 +79,7 @@ functor MessagePack(S : sig
     val unpackUnit : unit unpacker
     val unpackBool : bool unpacker
     val unpackInt : int unpacker
+    val unpackWord64 : Word64.word unpacker
     val unpackLargeInt : LargeInt.int unpacker
     val unpackReal : real unpacker
 
@@ -176,6 +180,9 @@ end = struct
       fun packTuple8 (p1, p2, p3, p4, p5, p6, p7, p8) (v1, v2, v3, v4, v5, v6, v7, v8) outs =
         (outputArrayLength 8 outs;
         p1 v1 outs; p2 v2 outs; p3 v3 outs; p4 v4 outs; p5 v5 outs; p6 v6 outs; p7 v7 outs; p8 v8 outs)
+      fun packTuple9 (p1, p2, p3, p4, p5, p6, p7, p8, p9) (v1, v2, v3, v4, v5, v6, v7, v8, v9) outs =
+        (outputArrayLength 9 outs;
+        p1 v1 outs; p2 v2 outs; p3 v3 outs; p4 v4 outs; p5 v5 outs; p6 v6 outs; p7 v7 outs; p8 v8 outs; p9 v9 outs)
 
       fun packPairList (p1, p2) values outs =
         (outputMapLength (List.length values) outs;
@@ -265,6 +272,14 @@ end = struct
           else
             raise Overflow
     end
+
+    fun packWord64 w outs =
+      let val arr = Word8Array.array (8, 0w0)
+      in PackWord32Big.update (arr, 0, Word64.toLargeWord (Word64.>> (w, 0w32)));
+         PackWord32Big.update (arr, 1, Word64.toLargeWord w);
+         S.output1 (outs, word8 0wxcf);
+         S.output (outs, Word8Array.vector arr)
+      end
 
     fun packReal real outs =
       (if RealPrinter.bytesPerElem = 8 then
@@ -662,6 +677,20 @@ end = struct
         || unpackFloat
       ) ins
     end
+
+    fun unpackWord64 ins =
+      let val ins' = expect (word8 0wxcf) ins
+          val (bytes, ins'') = S.inputN (ins', 8)
+          val b = Word64.fromLargeWord o Word8.toLargeWord o (fn i => Word8Vector.sub (bytes, i))
+      in (Word64.orb (Word64.<< (b 0, 0w56),
+          Word64.orb (Word64.<< (b 1, 0w48),
+          Word64.orb (Word64.<< (b 2, 0w40),
+          Word64.orb (Word64.<< (b 3, 0w32),
+          Word64.orb (Word64.<< (b 4, 0w24),
+          Word64.orb (Word64.<< (b 5, 0w16),
+          Word64.orb (Word64.<< (b 6, 0w8),
+                      b 7))))))), ins'')
+      end
 
     local
       fun isFixRaw byte = Word8.andb (byte, word8 0wxe0) = word8 0wxa0
