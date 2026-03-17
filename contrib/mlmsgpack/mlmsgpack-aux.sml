@@ -46,7 +46,7 @@ val true = case Int.precision of
   UintScanner scans unsigned integer from Word8Vector and construct I.int value
     I: result integer type
 *)
-functor UintScanner(I : I) :> sig
+functor UintScanner(I : I) : sig
   val scan : Word8Vector.vector -> I.int
 end = struct
   (* with the expectation that the compiler will optimize this idiom *)
@@ -67,7 +67,7 @@ end
 *)
 functor IntScanner(structure I : I;
                    structure W : W;
-                   val toInt : W.word -> I.int) :> sig
+                   val toInt : W.word -> I.int) : sig
   val scan : Word8Vector.vector -> I.int
 end = struct
   (* with the expectation that the compiler will optimize this idiom *)
@@ -114,7 +114,7 @@ functor UintPrinter(structure I : I;
                     structure S : sig
                       type outstream
                       val output1 : outstream * Word8.word -> unit
-                    end) :> sig
+                    end) : sig
   (* print int n outs *)
   val print : I.int -> int -> S.outstream -> unit
 end = struct
@@ -171,7 +171,7 @@ functor UintPrinterInf(structure I : I;
                          type outstream
                          val output1 : outstream * Word8.word -> unit
                        end;
-                       val fromInt : I.int -> Word8.word) :> sig
+                       val fromInt : I.int -> Word8.word) : sig
   val print : I.int -> int -> S.outstream -> unit
 end = struct
   fun explode int n =
@@ -192,7 +192,7 @@ end = struct
 end
 
 functor BitScanner(structure I : I;
-                   val toInt : Word8.word -> I.int) :> sig
+                   val toInt : Word8.word -> I.int) : sig
   val scan : int -> int -> Word8Vector.vector -> I.int
 end = struct
   val fromWordToI = I.fromLarge o Word.toLargeInt
@@ -251,13 +251,13 @@ signature OS = sig
   val output1 : outstream * Word8.word -> unit
 end
 
-functor UintPrinterIntWord(S : OS) :> sig
+functor UintPrinterIntWord(S : OS) : sig
   val print : Int.int -> int -> S.outstream -> unit
 end = UintPrinter(structure I = Int; structure W = Word; structure S = S) 
-functor UintPrinterIntLargeWord(S : OS) :> sig
+functor UintPrinterIntLargeWord(S : OS) : sig
   val print : Int.int -> int -> S.outstream -> unit
 end = UintPrinter(structure I = Int; structure W = LargeWord; structure S = S)
-functor UintPrinterInfInt(S : OS) :> sig
+functor UintPrinterInfInt(S : OS) : sig
   val print : Int.int -> int -> S.outstream -> unit
 end = UintPrinterInf(structure I = Int; structure S = S; val fromInt = Word8.fromInt)
 

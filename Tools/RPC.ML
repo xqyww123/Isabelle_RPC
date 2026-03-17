@@ -24,7 +24,7 @@ type callback' = {name: string, action: connection -> unit}
 val mk_callback: ('a,'b) callback -> callback'
 val register_global_callback: ('a,'b) callback -> Context.generic -> Context.generic
 val register_global_callback': callback' -> Context.generic -> Context.generic
-val get_global_callback: Context.generic -> string -> callback' option
+val get_global_callback: string -> callback' option
 
 type ('a,'b) command = {
   name : string,
@@ -296,18 +296,16 @@ type ('a,'b) callback = {
 
 type callback' = {name: string, action: connection -> unit}
 
-structure Callback_Data = Generic_Data
-(
-  type T = callback' Symtab.table
-  val empty = Symtab.empty
-  val merge = Symtab.merge (K true)
-)
+val global_callbacks : callback' Strhashtab.table = Strhashtab.empty 64
+val global_callbacks_lock = Synchronized.var "RPC.global_callbacks" ()
 
-fun register_global_callback' (callback' : callback') : Context.generic -> Context.generic =
-  Callback_Data.map (Symtab.update (#name callback', callback'))
+fun register_global_callback' (cb : callback') : Context.generic -> Context.generic =
+  (Synchronized.change global_callbacks_lock (fn () =>
+    (Strhashtab.update global_callbacks (#name cb, cb); ())); I)
 
-fun get_global_callback (context : Context.generic) (name : string) : callback' option =
-  Symtab.lookup (Callback_Data.get context) name
+fun get_global_callback (name : string) : callback' option =
+  Synchronized.change_result global_callbacks_lock (fn () =>
+    (Strhashtab.lookup global_callbacks name, ()))
 
 fun mk_callback ({name, arg_schema, ret_schema, function, timeout} : ('a,'b) callback) : callback' =
   {name = name,
@@ -362,15 +360,15 @@ end
 
 (** Callback Dispatcher **)
 
-fun lookup_callback (local_callbacks : callback' list) (context : Context.generic) (name : string) : callback' option =
+fun lookup_callback (local_callbacks : callback' list) (name : string) : callback' option =
   (case find_first (fn cb => #name cb = name) local_callbacks of
       SOME cb => SOME cb
-    | NONE => get_global_callback context name)
+    | NONE => get_global_callback name)
 
-fun dispatch_loop conn local_callbacks context func_name ret_schema =
+fun dispatch_loop conn local_callbacks func_name ret_schema =
   (case read_tagged ret_schema conn of
       Callback_Request name =>
-        ((case lookup_callback local_callbacks context name of
+        ((case lookup_callback local_callbacks name of
               SOME {action, ...} =>
                 let open MessagePackBinIO.Pack
                     val (_, cout, _) = conn
@@ -387,7 +385,7 @@ fun dispatch_loop conn local_callbacks context func_name ret_schema =
                                    (NONE, SOME ("Unknown callback: " ^ name)) cout
                     val _ = BinIO.StreamIO.flushOut cout
                  in () end)
-        ; dispatch_loop conn local_callbacks context func_name ret_schema)
+        ; dispatch_loop conn local_callbacks func_name ret_schema)
     | User_Response result => result
     | Remote_Error err =>
         raise Remote_Calling_Failure {func_name = SOME func_name, message = err})
@@ -409,8 +407,7 @@ fun call_command' {name, arg_schema, ret_schema, callback, timeout} conn arg =
   let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
       val _ = (#3 conn) := timeout
       val _ = write conn (packPair (packString, arg_schema)) (name, arg)
-      val context = Context.the_generic_context ()
-   in dispatch_loop conn callback context name ret_schema
+   in dispatch_loop conn callback name ret_schema
   end handle MessagePackBinIO.Unpack.Unpack =>
       raise Remote_Calling_Failure {func_name=SOME name, message="Invalid response, protocol error"}
   

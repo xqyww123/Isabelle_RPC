@@ -1,11 +1,11 @@
 theory Remote_Procedure_Calling
-  imports Pure
+  imports Performant_Isabelle_ML.Performant_Isabelle_ML
 begin
 
-ML_file ‹contrib/mlmsgpack/mlmsgpack-aux.sml›
-ML_file ‹contrib/mlmsgpack/realprinter-packreal.sml›
-ML_file ‹contrib/mlmsgpack/mlmsgpack.sml›
-ML_file ‹Tools/RPC.ML›
-ML_file ‹Tools/UUID.ML›
+ML_file \<open>contrib/mlmsgpack/mlmsgpack-aux.sml\<close>
+ML_file \<open>contrib/mlmsgpack/realprinter-packreal.sml\<close>
+ML_file \<open>contrib/mlmsgpack/mlmsgpack.sml\<close>
+ML_file \<open>Tools/RPC.ML\<close>
+ML_file \<open>Tools/UUID.ML\<close>
 
 end
