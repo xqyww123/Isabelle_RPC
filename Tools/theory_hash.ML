@@ -21,6 +21,7 @@ signature THEORY_HASH = sig
   val is_persistent : hash -> bool
   val hasher : hash -> word
   val to_hex : hash -> string
+  val store_theory_hash : theory -> unit
 end
 
 structure Theory_Hash : THEORY_HASH = struct
@@ -36,6 +37,14 @@ val xxhash128_cmd : (string * hash list, hash) Remote_Procedure_Calling.command 
   name = "xxhash128_theory",
   arg_schema = packPair (packString, packList packBytes),
   ret_schema = unpackBytes,
+  callback = [],
+  timeout = SOME (Time.fromSeconds 60)
+}
+
+val store_cmd : ((hash * string) list, unit) Remote_Procedure_Calling.command = {
+  name = "Theory_Hash.store",
+  arg_schema = packList (packPair (packBytes, packString)),
+  ret_schema = unpackUnit,
   callback = [],
   timeout = SOME (Time.fromSeconds 60)
 }
@@ -137,6 +146,14 @@ fun hash_of thy =
           val _ = Synchronized.change cache (Inttab.update (id, h))
           val _ = Synchronized.change hash_to_thy (fn tab => (Hash_Tab.update tab (h, thy); tab))
         in h end
+  end
+
+fun store_theory_hash thy =
+  let
+    val entries = Theory.nodes_of thy
+      |> map (fn t => (hash_of t, Context.theory_long_name t))
+  in
+    Remote_Procedure_Calling.call_command store_cmd entries
   end
 
 end
