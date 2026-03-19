@@ -114,7 +114,6 @@ fun hash_of thy =
                 val parent_hashes = map hash_of (Theory.parents_of thy)
 
                 (* RPC call to Python *)
-                val _ = Remote_Procedure_Calling.load ["Isabelle_Semantic_Embedding"]
                 val h = Remote_Procedure_Calling.call_command xxhash128_cmd
                           (file_path, parent_hashes)
 
