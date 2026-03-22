@@ -123,6 +123,10 @@ class Connection:
 
         return self.raw_callback(name, phase2_protocol)
 
+    def config_lookup(self, name: str) -> Any:
+        """Look up an Isabelle config option by name via the Config.lookup callback."""
+        return self.callback("Config.lookup", name)
+
     def raw_callback(self, name: str, action: Callable[['Connection'], Any]) -> Any:
         """Start a raw callback with custom bidirectional protocol.
 

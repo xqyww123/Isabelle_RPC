@@ -10,5 +10,6 @@ ML_file \<open>Tools/UUID.ML\<close>
 ML_file \<open>Tools/Term_Digest.ML\<close>
 ML_file \<open>Tools/theory_hash.ML\<close>
 ML_file \<open>Tools/Universal_Key.ML\<close>
+ML_file \<open>Tools/config.ML\<close>
 
 end

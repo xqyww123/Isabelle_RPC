@@ -10,3 +10,4 @@ from .unicode import (get_SYMBOLS, get_REVERSE_SYMBOLS, get_SYMBOLS_AND_REVERSED
 from .position import IsabellePosition, Position
 from .universal_key import EntityKind, Entity, destruct_key, universal_key_of, universal_key
 from . import theory_hash
+from . import context

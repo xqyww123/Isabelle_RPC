@@ -22,9 +22,21 @@ signature THEORY_HASH = sig
   val hasher : hash -> word
   val to_hex : hash -> string
   val store_theory_hash : theory -> unit
+  val resolve_theory : Context.generic -> string -> theory
 end
 
 structure Theory_Hash : THEORY_HASH = struct
+
+fun resolve_theory (context : Context.generic) (name : string) : theory =
+  let
+    val thy = Context.theory_of context
+    val long = String.isSubstring "." name
+    val thy_name = if long then Context.theory_long_name thy
+                   else Context.theory_base_name thy
+  in
+    if name = thy_name then thy
+    else Theory.check {long = long} (Context.proof_of context) (name, Position.none)
+  end
 
 type hash = Word8Vector.vector
 

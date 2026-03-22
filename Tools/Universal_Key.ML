@@ -10,21 +10,23 @@
   Key format
   ----------
 
-  Every key has the layout:
+  Theory keys are just the 16-byte theory hash from Theory_Hash.hash_of.
+
+  Entity keys have the layout:
 
     <theory_hash (16 bytes)> <tag (1 byte)> <entity (variable)>
 
   - theory_hash: 16-byte hash from Theory_Hash.hash_of, identifying the
     theory that defines the entity.  Works for both heap and non-heap theories.
   - tag: 1-byte entity kind discriminator:
-      0x00 = Theory, 0x01 = Constant, 0x02 = Theorem,
+      0x01 = Constant, 0x02 = Theorem,
       0x03 = Type, 0x04 = Class, 0x05 = Locale
   - entity: variable-length payload identifying the entity within its theory.
 
   Key sizes
   ---------
 
-  - Theory keys:           17 bytes  (16 + 1 + 0, empty entity)
+  - Theory keys:           16 bytes  (hash only)
   - Namespace entity keys: 17 + |name| bytes  (constant, type, class, locale)
   - Theorem keys:          32 bytes  (16 + 1 + 15, always)
 
@@ -37,6 +39,8 @@ eqtype universal_key
 type fully_quantified_name = string
 type theory_long_name = string
 
+datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
+
 datatype entity =
       Constant of fully_quantified_name
     | Theorem  of thm
@@ -46,19 +50,27 @@ datatype entity =
     | Class    of fully_quantified_name
     | Locale   of fully_quantified_name
 
+val hasher : universal_key -> word
+
+structure UK_Table : HASH_TABLE where type key = universal_key
+
 val key_of_theory'  : theory -> universal_key
 val key_of_theory   : Context.generic -> xstring -> universal_key
 val key_of_constant : Context.generic -> xstring -> universal_key
-val key_of_theorem  : Context.generic -> xstring -> universal_key
+val key_of_theorem  : Context.generic -> xstring -> universal_key * thm * bool
 val key_of_theorem' : Context.generic -> thm -> universal_key
 val key_of_type     : Context.generic -> xstring -> universal_key
 val key_of_class    : Context.generic -> xstring -> universal_key
 val key_of_locale   : Context.generic -> xstring -> universal_key
 val key_of          : Context.generic -> entity -> universal_key
+(* key_of'' pre-captures name spaces from the context, returning a closure.
+   Use when computing keys for many entities from the same context. *)
+val key_of''        : Context.generic -> entity -> universal_key
 
 val make_universal_key_callback : Context.generic -> Remote_Procedure_Calling.callback'
 
-val hasher : universal_key -> word
+val pack_universal_key : universal_key MessagePackBinIO.Pack.packer
+val unpack_universal_key : universal_key MessagePackBinIO.Unpack.unpacker
 
 val pack_entity_kind : entity MessagePackBinIO.Pack.packer
 val pack_entity : entity MessagePackBinIO.Pack.packer
@@ -70,6 +82,7 @@ structure Universal_Key : UNIVERSAL_KEY = struct
 
 type fully_quantified_name = string
 type theory_long_name = string
+datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
 datatype entity =
       Constant of fully_quantified_name
     | Theorem  of thm
@@ -82,16 +95,7 @@ type caching_key = entity * theory_long_name
 type universal_key = Word8Vector.vector
 val hasher = Hashers.bitvec
 
-fun resolve_theory (context : Context.generic) (name : string) : theory =
-  let
-    val thy = Context.theory_of context
-    val long = String.isSubstring "." name
-    val thy_name = if long then Context.theory_long_name thy
-                   else Context.theory_base_name thy
-  in
-    if name = thy_name then thy
-    else Theory.check {long = long} (Context.proof_of context) (name, Position.none)
-  end
+val resolve_theory = Theory_Hash.resolve_theory
 
 (* --- Cache --- *)
 
@@ -122,6 +126,14 @@ structure CacheTab = Hash_Table(struct
     | eq ((Locale n1, t1), (Locale n2, t2)) = n1 = n2 andalso t1 = t2
     | eq _ = false
 end)
+
+structure UK_Table = Hash_Table(struct
+  type key = universal_key
+  val hash = hasher
+  val eq = op = : universal_key * universal_key -> bool
+end)
+
+(* --- Key cache --- *)
 
 val cache : universal_key CacheTab.table = CacheTab.empty 1024
 val cache_lock = Synchronized.var "Universal_Key.cache" ()
@@ -173,8 +185,7 @@ fun key_of_ns_entity tag make_ck space context xname =
                 tag (ent_string fq_name))
   end
 
-fun key_of_theory' thy =
-  build_key (Theory_Hash.hash_of thy) 0wx00 (0, fn _ => fn _ => ())
+fun key_of_theory' thy = Theory_Hash.hash_of thy
 
 fun key_of_theory context xname = key_of_theory' (resolve_theory context xname)
 
@@ -219,43 +230,51 @@ local
     end
 in
 
-fun key_of_theorem context xname =
+fun key_of_theorem context =
   let
-    val (base_name, idx_opt) = parse_thm_xname xname
+    val thy = Context.theory_of context
     val ctxt = Context.cases Proof_Context.init_global I context
     val facts = Proof_Context.facts_of ctxt
     val fact_space = Facts.space_of facts
-    val full_name = Name_Space.intern fact_space base_name
-    val ns_entry = Name_Space.the_entry fact_space full_name
-    val thy_long_name = #theory_long_name ns_entry
-    val {thms, ...} = the (Facts.lookup context facts full_name)
-    val thm = case (thms, idx_opt) of
-        ([thm], NONE) => thm
-      | ([thm], SOME _) => thm
-      | (_ :: _, SOME i) =>
-          if i >= 1 andalso i <= length thms
-          then nth thms (i - 1)
-          else error ("Theorem index " ^ Int.toString i ^
-                      " out of range for " ^ full_name ^
-                      " (has " ^ Int.toString (length thms) ^ " theorems)")
-      | (_ :: _ :: _, NONE) =>
-          error ("Fact " ^ full_name ^ " has " ^
-                 Int.toString (length thms) ^
-                 " theorems; specify an index like " ^
-                 full_name ^ "(1)")
-      | ([], _) => error ("No theorems in fact " ^ full_name)
-    val thm = Thm.transfer (Context.theory_of context) thm
-    fun compute () =
-      build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
-  in
-    case Thm.derivation_id thm of
-      SOME thm_id => cached_key (Theorem_ID (#serial thm_id), thy_long_name) compute
-    | NONE => compute ()
+    val global_facts = Global_Theory.facts_of thy
+  in fn xname =>
+    let
+      val (base_name, idx_opt) = parse_thm_xname xname
+      val full_name = Name_Space.intern fact_space base_name
+      val ns_entry = Name_Space.the_entry fact_space full_name
+      val thy_long_name = #theory_long_name ns_entry
+      val {thms, ...} = the (Facts.lookup context facts full_name)
+      val thm = case (thms, idx_opt) of
+          ([thm], NONE) => thm
+        | ([thm], SOME _) => thm
+        | (_ :: _, SOME i) =>
+            if i >= 1 andalso i <= length thms
+            then nth thms (i - 1)
+            else error ("Theorem index " ^ Int.toString i ^
+                        " out of range for " ^ full_name ^
+                        " (has " ^ Int.toString (length thms) ^ " theorems)")
+        | (_ :: _ :: _, NONE) =>
+            error ("Fact " ^ full_name ^ " has " ^
+                   Int.toString (length thms) ^
+                   " theorems; specify an index like " ^
+                   full_name ^ "(1)")
+        | ([], _) => error ("No theorems in fact " ^ full_name)
+      val thm = Thm.transfer thy thm
+      fun compute () =
+        build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
+                  0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
+      val uk = case Thm.derivation_id thm of
+        SOME thm_id => cached_key (Theorem_ID (#serial thm_id), thy_long_name) compute
+      | NONE => compute ()
+      val is_global = Facts.defined global_facts full_name
+    in (uk, thm, is_global) end
   end
 
 end (* local parse_thm_xname *)
 
+(* WARNING: key_of_theorem' does not register the theorem in any store,
+   so there is no way to restore the theorem from the resulting universal key.
+   Prefer key_of_theorem where possible. *)
 fun key_of_theorem' context thm =
   let
     val thm_id_opt = Thm.derivation_id thm
@@ -276,10 +295,29 @@ fun key_of_theorem' context thm =
 fun key_of context (Constant name) = key_of_constant context name
   | key_of context (Theorem thm) = key_of_theorem' context thm
   | key_of context (Theorem_ID _) = error "Cannot compute key from Theorem_ID alone"
-  | key_of context (Named_Theorem name) = key_of_theorem context name
+  | key_of context (Named_Theorem name) = #1 (key_of_theorem context name)
   | key_of context (Type name) = key_of_type context name
   | key_of context (Class name) = key_of_class context name
   | key_of context (Locale name) = key_of_locale context name
+
+fun key_of'' context =
+  let
+    val const_key  = key_of_constant context
+    val thm_key    = key_of_theorem context
+    val type_key   = key_of_type context
+    val class_key  = key_of_class context
+    val locale_key = key_of_locale context
+  in fn (Constant name)      => const_key name
+      | (Theorem thm)        => key_of_theorem' context thm
+      | (Theorem_ID _)       => error "Cannot compute key from Theorem_ID alone"
+      | (Named_Theorem name) => #1 (thm_key name)
+      | (Type name)          => type_key name
+      | (Class name)         => class_key name
+      | (Locale name)        => locale_key name
+  end
+
+val pack_universal_key = MessagePackBinIO.Pack.packBytes
+val unpack_universal_key = MessagePackBinIO.Unpack.unpackBytes
 
 (* --- Callback for Python --- *)
 
@@ -295,7 +333,7 @@ fun make_universal_key_callback (context : Context.generic)
       case kind of
         0 => key_of_theory context name
       | 1 => key_of_constant context name
-      | 2 => key_of_theorem context name
+      | 2 => #1 (key_of_theorem context name)
       | 3 => key_of_type context name
       | 4 => key_of_class context name
       | 5 => key_of_locale context name
