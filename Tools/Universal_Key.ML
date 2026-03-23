@@ -73,6 +73,8 @@ val pack_universal_key : universal_key MessagePackBinIO.Pack.packer
 val unpack_universal_key : universal_key MessagePackBinIO.Unpack.unpacker
 
 val pack_entity_kind : entity MessagePackBinIO.Pack.packer
+val pack_entity_kind' : entity_kind MessagePackBinIO.Pack.packer
+val unpack_entity_kind : entity_kind MessagePackBinIO.Unpack.unpacker
 val pack_entity : entity MessagePackBinIO.Pack.packer
 val unpack_entity : entity MessagePackBinIO.Unpack.unpacker
 
@@ -355,6 +357,20 @@ fun pack_entity_kind (Constant _)      = packInt 1
   | pack_entity_kind (Class _)         = packInt 4
   | pack_entity_kind (Locale _)        = packInt 5
 
+fun pack_entity_kind' ConstantK = packInt 1
+  | pack_entity_kind' TheoremK  = packInt 2
+  | pack_entity_kind' TypeK     = packInt 3
+  | pack_entity_kind' ClassK    = packInt 4
+  | pack_entity_kind' LocaleK   = packInt 5
+
+val unpack_entity_kind : entity_kind unpacker = fn ins =>
+  let val (k, ins') = unpackInt ins
+  in (case k of
+        1 => ConstantK | 2 => TheoremK | 3 => TypeK
+      | 4 => ClassK | 5 => LocaleK
+      | _ => raise Unpack, ins')
+  end
+
 fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
   | pack_entity (Theorem _)          = error "Cannot pack Theorem (contains live thm value)"
   | pack_entity (Theorem_ID serial)  = packPair (packInt, packInt) (2, serial)
@@ -363,16 +379,13 @@ fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
   | pack_entity (Class name)         = packPair (packInt, packString) (4, name)
   | pack_entity (Locale name)        = packPair (packInt, packString) (5, name)
 
-val unpack_entity : entity unpacker = fn ins =>
-  let val (kind, ins') = unpackInt ins
-  in case kind of
-      1 => (unpackString >> Constant) ins'
-    | 2 => ((unpackInt >> Theorem_ID) || (unpackString >> Named_Theorem)) ins'
-    | 3 => (unpackString >> Type) ins'
-    | 4 => (unpackString >> Class) ins'
-    | 5 => (unpackString >> Locale) ins'
-    | _ => raise Unpack
-  end
+val unpack_entity : entity unpacker =
+  unpackPair_dep' unpack_entity_kind (fn kind => case kind of
+      ConstantK => unpackString >> Constant
+    | TheoremK  => (unpackInt >> Theorem_ID) || (unpackString >> Named_Theorem)
+    | TypeK     => unpackString >> Type
+    | ClassK    => unpackString >> Class
+    | LocaleK   => unpackString >> Locale)
 
 end (* local MessagePackBinIO *)
 

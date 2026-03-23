@@ -37,10 +37,29 @@ def theory_name_of(connection: Connection, h: theory_hash) -> str | None:
     return connection.callback("Theory_Hash.theory_name_of", h)
 
 
+import atexit
+import threading
+
+_theory_hash_env: lmdb.Environment | None = None
+_theory_hash_lock = threading.Lock()
+
 def open_theory_hash_store() -> lmdb.Environment:
-    cache_dir = platformdirs.user_cache_dir("Isabelle_Theory_Hash", "Qiyuan")
-    os.makedirs(cache_dir, exist_ok=True)
-    return lmdb.open(os.path.join(cache_dir, "theory_hash.lmdb"), map_size=1 << 30)
+    global _theory_hash_env
+    if _theory_hash_env is None:
+        with _theory_hash_lock:
+            if _theory_hash_env is None:
+                cache_dir = platformdirs.user_cache_dir("Isabelle_Theory_Hash", "Qiyuan")
+                os.makedirs(cache_dir, exist_ok=True)
+                _theory_hash_env = lmdb.open(os.path.join(cache_dir, "theory_hash.lmdb"), map_size=1 << 30)
+                atexit.register(_close_theory_hash_store)
+    return _theory_hash_env
+
+def _close_theory_hash_store() -> None:
+    global _theory_hash_env
+    with _theory_hash_lock:
+        if _theory_hash_env is not None:
+            _theory_hash_env.close()
+            _theory_hash_env = None
 
 
 @isabelle_remote_procedure("Theory_Hash.store")
@@ -51,8 +70,7 @@ def _store_theory_hashes(arg: Any, connection: Connection) -> None:
         for hash_bytes, name in arg:
             if isinstance(name, bytes):
                 name = name.decode("utf-8")
-            txn.put(bytes(hash_bytes), msgpack.packb([name, now]))
-    env.close()
+            txn.put(bytes(hash_bytes), msgpack.packb([name, now]))  # type: ignore
 
 
 @isabelle_remote_procedure("xxhash128_theory")

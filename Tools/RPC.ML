@@ -444,6 +444,12 @@ end
 
 (** Connection Pool **)
 
+fun close_connection conn =
+  let val (cin, cout, _) = conn
+   in BinIO.StreamIO.closeOut cout
+    ; BinIO.StreamIO.closeIn (!cin)
+  end
+
 val connection_pool : (connection * Time.time) list Synchronized.var
       = Synchronized.var "PyProxy.connection_pool" []
 val connection_pool_cleaner_event : Event_Timer.request option Unsynchronized.ref
@@ -456,11 +462,7 @@ fun get_connection () =
     of SOME conn =>
           if can heartbeat conn
           then conn
-          else let val (cin,cout,_) = conn
-                in BinIO.StreamIO.closeOut cout
-                 ; BinIO.StreamIO.closeIn (!cin)
-                 ; get_connection ()
-               end
+          else (close_connection conn; get_connection ())
      | NONE => make_connection ()
 
 val TTL = Time.fromSeconds 60
@@ -471,11 +473,7 @@ fun clean_connection_i conns =
       fun clean [] = []
         | clean ((x,t) :: L) =
             if now - t >= TTL
-            then let val (cin,cout,_) = x
-              in BinIO.StreamIO.closeOut cout
-               ; BinIO.StreamIO.closeIn (!cin)
-               ; clean L
-             end
+            then (close_connection x; clean L)
             else (x,t) :: clean L
    in clean conns
   end
@@ -504,8 +502,14 @@ fun release_connection conn =
 
 fun call_command cmd arg =
   let val conn = get_connection ()
-   in \<^try>\<open>call_command' cmd conn arg
-      finally release_connection conn\<close>
+      val result = Exn.capture (call_command' cmd conn) arg
+      val _ = case result of
+                Exn.Exn exn =>
+                  if Exn.is_interrupt exn
+                  then close_connection conn
+                  else release_connection conn
+              | _ => release_connection conn
+   in Exn.release result
   end
 
 fun load packages =

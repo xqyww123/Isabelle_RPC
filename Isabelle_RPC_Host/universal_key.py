@@ -22,6 +22,9 @@ class EntityKind(IntEnum):
     def from_label(label: str) -> 'EntityKind':
         return _LABEL_TO_ENTITY[label]
 
+EntityKind.ALL = [EntityKind.CONSTANT, EntityKind.THEOREM, EntityKind.TYPE,  # type: ignore
+                  EntityKind.CLASS, EntityKind.LOCALE]
+
 _ENTITY_LABELS = {
     EntityKind.CONSTANT: "constant",
     EntityKind.THEOREM: "lemma",
@@ -37,6 +40,14 @@ class Entity(NamedTuple):
     kind: EntityKind
     name: str | theorem_digest | None
     
+
+def is_WIP(key: universal_key) -> bool:
+    """Check whether a universal key is from a WIP (non-persistent) theory.
+
+    WIP theory hashes have LSB of byte 0 set to 1.
+    """
+    return key[0] & 1 == 1
+
 
 def destruct_key(key: universal_key) -> Entity:
     """Destructure a universal key into its component parts.

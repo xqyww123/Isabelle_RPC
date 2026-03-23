@@ -11,3 +11,15 @@ from .position import IsabellePosition, Position
 from .universal_key import EntityKind, Entity, destruct_key, universal_key_of, universal_key
 from . import theory_hash
 from . import context
+from . import print
+from . import dialogue
+
+# @isabelle_remote_procedure("test_dialogue")
+# def test_dialogue(arg, connection: Connection):
+#     import Isabelle_RPC_Host.dialogue  # noqa: F811
+#     answer = connection.dialogue("How are you?", ["Good", "Bad"])
+#     if answer == "Good":
+#         connection.writeln("Glad to hear that!")
+#     else:
+#         connection.writeln("Hope you feel better soon!")
+#     return answer

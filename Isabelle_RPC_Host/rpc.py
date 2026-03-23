@@ -10,6 +10,8 @@ from typing import Callable, TypeAlias, Any, Optional
 import importlib
 import uuid
 
+_thread_local = threading.local()
+
 
 class ColorFormatter(logging.Formatter):
     COLORS = {
@@ -61,6 +63,11 @@ class IsabelleError(Exception):
 
 
 class Connection:
+    @staticmethod
+    def current() -> 'Connection | None':
+        """Return the Connection for the current thread, or None if not in an RPC handler."""
+        return getattr(_thread_local, 'connection', None)
+
     def __init__(self, socket: socket.socket, client_addr: tuple[str, int], server: 'Server'):
         self.sock = socket
         self.client_addr = client_addr
@@ -230,72 +237,76 @@ class Server:
     def handle_client(self, client_socket: socket.socket, client_addr: tuple[str, int]) -> None:
         """Handle a client connection."""
         with Connection(client_socket, client_addr, self) as connection:
-            while self.running:
-                try:
+            _thread_local.connection = connection
+            try:
+                while self.running:
                     try:
-                        (func_name, arg) = connection.read()
-                    except mp.UnpackException as e:
-                        if connection.is_peer_closed():
-                            self.logger.debug(f"From {client_addr}, connection closed by peer")
+                        try:
+                            (func_name, arg) = connection.read()
+                        except mp.UnpackException as e:
+                            if connection.is_peer_closed():
+                                self.logger.debug(f"From {client_addr}, connection closed by peer")
+                                return
+                            buf = connection.debug_stream.get_buffer_bytes() if connection.debug_stream else None
+                            err_details = f"{type(e).__name__}: {e}"
+                            if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
+                                err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})" # type: ignore
+                            elif hasattr(connection.unpack, 'tell'):
+                                try:
+                                    err_details += f" (stream_pos={connection.unpack.tell()})"
+                                except Exception:
+                                    pass
+                            if buf is not None:
+                                try:
+                                    fd, dump_path = tempfile.mkstemp(suffix='.bin', prefix='isabelle_rpc_unpack_error_')
+                                    with os.fdopen(fd, 'wb') as f:
+                                        f.write(buf)
+                                    err_details += f" [debug: binary written to {dump_path}]"
+                                except Exception as dump_err:
+                                    err_details += f" [debug: failed to write binary: {dump_err}]"
+                            self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
+                            connection.write_error("Invalid RPC request")
                             return
-                        buf = connection.debug_stream.get_buffer_bytes() if connection.debug_stream else None
-                        err_details = f"{type(e).__name__}: {e}"
-                        if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
-                            err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})" # type: ignore
-                        elif hasattr(connection.unpack, 'tell'):
-                            try:
-                                err_details += f" (stream_pos={connection.unpack.tell()})"
-                            except Exception:
-                                pass
-                        if buf is not None:
-                            try:
-                                fd, dump_path = tempfile.mkstemp(suffix='.bin', prefix='isabelle_rpc_unpack_error_')
-                                with os.fdopen(fd, 'wb') as f:
-                                    f.write(buf)
-                                err_details += f" [debug: binary written to {dump_path}]"
-                            except Exception as dump_err:
-                                err_details += f" [debug: failed to write binary: {dump_err}]"
-                        self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
-                        connection.write_error("Invalid RPC request")
+                        try:
+                            func = Remote_Procedures[func_name]
+                        except KeyError:
+                            self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
+                            connection.write_error(f"Unknown procedure {func_name}")
+                            continue
+                        try:
+                            result = func(arg, connection)
+                        except Exception as e:
+                            self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
+                            connection.write_error(e)
+                            if self.debugging:
+                                raise
+                            continue
+                        connection.write(result)
+                    except ConnectionResetError as e:
+                        self.logger.debug(f"From {client_addr}, connection reset by peer: {e}")
                         return
-                    try:
-                        func = Remote_Procedures[func_name]
-                    except KeyError:
-                        self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
-                        connection.write_error(f"Unknown procedure {func_name}")
-                        continue
-                    try:
-                        result = func(arg, connection)
-                    except Exception as e:
-                        self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
-                        connection.write_error(e)
-                        if self.debugging:
-                            raise
-                        continue
-                    connection.write(result)
-                except ConnectionResetError as e:
-                    self.logger.debug(f"From {client_addr}, connection reset by peer: {e}")
-                    return
-                except BrokenPipeError as e:
-                    self.logger.debug(f"From {client_addr}, broken pipe (peer closed): {e}")
-                    return
-                except OSError as e:
-                    if e.errno == errno.ECONNRESET:
-                        self.logger.debug(f"From {client_addr}, connection reset by peer (ECONNRESET): {e}")
+                    except BrokenPipeError as e:
+                        self.logger.debug(f"From {client_addr}, broken pipe (peer closed): {e}")
                         return
-                    if e.errno == errno.EPIPE:
-                        self.logger.debug(f"From {client_addr}, broken pipe (EPIPE, peer closed): {e}")
-                        return
-                    raise
-                except Exception as e:
-                    if self.debugging:
-                        import traceback
-                        traceback.print_exc()
-                        self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                    except OSError as e:
+                        if e.errno == errno.ECONNRESET:
+                            self.logger.debug(f"From {client_addr}, connection reset by peer (ECONNRESET): {e}")
+                            return
+                        if e.errno == errno.EPIPE:
+                            self.logger.debug(f"From {client_addr}, broken pipe (EPIPE, peer closed): {e}")
+                            return
                         raise
-                    else:
-                        self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
-                        return
+                    except Exception as e:
+                        if self.debugging:
+                            import traceback
+                            traceback.print_exc()
+                            self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                            raise
+                        else:
+                            self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                            return
+            finally:
+                _thread_local.connection = None
 
     def stop_server(self) -> None:
         """Stop the TCP server."""
@@ -517,3 +528,4 @@ def fork_and_launch__():
     logger = mk_logger_(addr, log_file)
     debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
     launch_server_(addr, logger, debugging)
+
