@@ -11,7 +11,6 @@ from .position import IsabellePosition, Position
 from .universal_key import EntityKind, Entity, destruct_key, universal_key_of, universal_key
 from . import theory_hash
 from . import context
-from . import print
 from . import dialogue
 
 # @isabelle_remote_procedure("test_dialogue")

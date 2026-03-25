@@ -6,6 +6,7 @@ import socket
 import threading
 import os
 import tempfile
+from enum import IntEnum
 from typing import Callable, TypeAlias, Any, Optional
 import importlib
 import uuid
@@ -133,6 +134,29 @@ class Connection:
     def config_lookup(self, name: str) -> Any:
         """Look up an Isabelle config option by name via the Config.lookup callback."""
         return self.callback("Config.lookup", name)
+
+    # -- Isabelle logging via "log" callback ----------------------------------
+
+    class LogType(IntEnum):
+        """Log level tags matching ``Isabelle_Log.log_type`` in tracing.ML."""
+        TRACING = 0
+        WARNING = 1
+        WRITELN = 2
+
+    def tracing(self, msg: str) -> None:
+        """Print a tracing message in Isabelle's output."""
+        self.server.logger.debug(msg)
+        self.callback("log", (int(self.LogType.TRACING), msg))
+
+    def warning(self, msg: str) -> None:
+        """Print a warning message in Isabelle's output."""
+        self.server.logger.warning(msg)
+        self.callback("log", (int(self.LogType.WARNING), msg))
+
+    def writeln(self, msg: str) -> None:
+        """Print a normal message in Isabelle's output."""
+        self.server.logger.info(msg)
+        self.callback("log", (int(self.LogType.WRITELN), msg))
 
     def raw_callback(self, name: str, action: Callable[['Connection'], Any]) -> Any:
         """Start a raw callback with custom bidirectional protocol.

@@ -121,12 +121,30 @@ def locales(connection: Connection, theory: str | None = None,
                            theory, the_theory_only, theories_not_include)
 
 
+def introduction_rules(connection: Connection, theory: str | None = None,
+                       the_theory_only: bool = False,
+                       theories_not_include: list[str] = []) -> list[universal_key]:
+    """Return universal keys of all introduction rules."""
+    return _cached_or_call(connection, "_ctx_intro_rules", "Context.introduction_rules",
+                           theory, the_theory_only, theories_not_include)
+
+
+def elimination_rules(connection: Connection, theory: str | None = None,
+                      the_theory_only: bool = False,
+                      theories_not_include: list[str] = []) -> list[universal_key]:
+    """Return universal keys of all elimination rules."""
+    return _cached_or_call(connection, "_ctx_elim_rules", "Context.elimination_rules",
+                           theory, the_theory_only, theories_not_include)
+
+
 _KIND_TO_FUNC = {
     EntityKind.CONSTANT: constants,
     EntityKind.THEOREM: theorems,
     EntityKind.TYPE: types,
     EntityKind.CLASS: classes,
     EntityKind.LOCALE: locales,
+    EntityKind.INTRODUCTION_RULE: introduction_rules,
+    EntityKind.ELIMINATION_RULE: elimination_rules,
 }
 
 def entities_of(connection: Connection, kinds: list[EntityKind],

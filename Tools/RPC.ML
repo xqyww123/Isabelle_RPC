@@ -46,10 +46,10 @@ val load : string list -> unit
 val call_heartbeat_callback_cmd : (unit, string) command
 
 (*Auxiliary*)
-
+(*
 val get_connection : unit -> connection
 val release_connection : connection -> unit
-
+*)
 end
 
 structure Remote_Procedure_Calling : REMOTE_PROCEDURE_CALLING = struct
@@ -372,7 +372,6 @@ fun dispatch_loop conn local_callbacks func_name ret_schema =
               SOME {action, ...} =>
                 let open MessagePackBinIO.Pack
                     val (_, cout, _) = conn
-                    (* Phase 1 response: Send ((), None) for callback found *)
                     val _ = doPack (packPair (packUnit, packOption packString)) ((), NONE) cout
                     val _ = BinIO.StreamIO.flushOut cout
                  in action conn
@@ -380,7 +379,6 @@ fun dispatch_loop conn local_callbacks func_name ret_schema =
             | NONE =>
                 let open MessagePackBinIO.Pack
                     val (_, cout, _) = conn
-                    (* Phase 1 response: Send (None, error_message) for callback not found *)
                     val _ = doPack (packPair (packOption packUnit, packOption packString))
                                    (NONE, SOME ("Unknown callback: " ^ name)) cout
                     val _ = BinIO.StreamIO.flushOut cout
@@ -450,6 +448,8 @@ fun close_connection conn =
     ; BinIO.StreamIO.closeIn (!cin)
   end
 
+(* Connection pool temporarily disabled for debugging.
+
 val connection_pool : (connection * Time.time) list Synchronized.var
       = Synchronized.var "PyProxy.connection_pool" []
 val connection_pool_cleaner_event : Event_Timer.request option Unsynchronized.ref
@@ -502,14 +502,27 @@ fun release_connection conn =
 
 fun call_command cmd arg =
   let val conn = get_connection ()
-      val result = Exn.capture (call_command' cmd conn) arg
-      val _ = case result of
-                Exn.Exn exn =>
-                  if Exn.is_interrupt exn
-                  then close_connection conn
-                  else release_connection conn
-              | _ => release_connection conn
-   in Exn.release result
+      val normal = Unsynchronized.ref false
+   in \<^try>\<open>
+        let val result = call_command' cmd conn arg
+            val _ = normal := true
+         in result end
+      finally
+        if !normal
+        then release_connection conn
+        else close_connection conn
+      \<close>
+  end
+*)
+
+(* Using fresh connections per call (pool disabled) *)
+fun call_command cmd arg =
+  let val conn = make_connection ()
+   in \<^try>\<open>
+        call_command' cmd conn arg
+      finally
+        close_connection conn
+      \<close>
   end
 
 fun load packages =
