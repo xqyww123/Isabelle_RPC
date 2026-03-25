@@ -1,6 +1,6 @@
 from enum import IntEnum
 from typing import NamedTuple
-from .rpc import Connection
+from .rpc import Connection, IsabelleError
 from .theory_hash import theory_hash
 
 type universal_key = bytes
@@ -76,6 +76,20 @@ def destruct_key(key: universal_key) -> Entity:
     return Entity(theory=theory, kind=kind, name=name)
 
 
+class UndefinedEntity(Exception):
+    """Raised when an Isabelle entity cannot be found."""
+    def __init__(self, kind: EntityKind, name: str, message: str):
+        self.kind = kind
+        self.name = name
+        super().__init__(f"Undefined {kind.label}: {name!r}")
+
+
 def universal_key_of(connection: Connection, kind: EntityKind, name: str) -> bytes:
     """Request the universal key for an Isabelle entity via callback."""
-    return connection.callback("universal_key_of", (int(kind), name))
+    try:
+        return connection.callback("universal_key_of", (int(kind), name))
+    except IsabelleError as e:
+        msg = e.errors[0] if e.errors else str(e)
+        if msg.startswith("Undefined "):
+            raise UndefinedEntity(kind, name, msg)
+        raise
