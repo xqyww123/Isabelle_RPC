@@ -15,5 +15,6 @@ ML_file \<open>Tools/config.ML\<close>
 ML_file \<open>Tools/context.ML\<close>
 ML_file \<open>Tools/tracing.ML\<close>
 ML_file \<open>Tools/dialogue.ML\<close>
+ML_file \<open>Tools/pretty.ML\<close>
 
 end

@@ -44,6 +44,18 @@ fun resolve_ctx context target_thy_opt =
     NONE => context
   | SOME name => Context.Theory (Theory_Hash.resolve_theory context name)
 
+(* Debug: return (key, name) pairs instead of just keys.
+   Uncomment pack_key_name, dedup_key_names, and the SOME(..., name) lines below,
+   and change ret_schema to packList pack_key_name.
+val pack_key_name = packPair (Universal_Key.pack_universal_key, packString)
+fun dedup_key_names pairs =
+  let val seen = Bytehashtab.empty (length pairs)
+  in map_filter (fn (k, name) =>
+      if Bytehashtab.defined seen k then NONE
+      else (Bytehashtab.update seen (k, ()); SOME (k, name))) pairs
+  end
+*)
+
 fun dedup_keys keys =
   let val seen = Bytehashtab.empty (length keys)
   in map_filter (fn k =>
@@ -106,14 +118,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
          |> maps (fn (name, thms) =>
            let val entry = try (Name_Space.the_entry fact_space) name
            in case entry of
-                NONE => if the_theory_only then [] else map_filter (fn thm =>
-                  let val thm' = Thm.transfer thy thm
-                  in case filter_opt of
-                       NONE => SOME (Universal_Key.key_of_theorem' ctx thm')
-                     | SOME f => if f (name, thm')
-                                 then SOME (Universal_Key.key_of_theorem' ctx thm')
-                                 else NONE
-                  end) thms
+                NONE => []
               | SOME e =>
                   if #concealed e
                      orelse Long_Name.is_hidden (Name_Space.intern fact_space name) then []

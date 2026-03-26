@@ -360,15 +360,15 @@ end
 
 (** Callback Dispatcher **)
 
-fun lookup_callback (local_callbacks : callback' list) (name : string) : callback' option =
-  (case find_first (fn cb => #name cb = name) local_callbacks of
+fun lookup_callback (local_tab : callback' Strhashtab.table) (name : string) : callback' option =
+  (case Strhashtab.lookup local_tab name of
       SOME cb => SOME cb
     | NONE => get_global_callback name)
 
-fun dispatch_loop conn local_callbacks func_name ret_schema =
+fun dispatch_loop conn local_tab func_name ret_schema =
   (case read_tagged ret_schema conn of
       Callback_Request name =>
-        ((case lookup_callback local_callbacks name of
+        ((case lookup_callback local_tab name of
               SOME {action, ...} =>
                 let open MessagePackBinIO.Pack
                     val (_, cout, _) = conn
@@ -383,7 +383,7 @@ fun dispatch_loop conn local_callbacks func_name ret_schema =
                                    (NONE, SOME ("Unknown callback: " ^ name)) cout
                     val _ = BinIO.StreamIO.flushOut cout
                  in () end)
-        ; dispatch_loop conn local_callbacks func_name ret_schema)
+        ; dispatch_loop conn local_tab func_name ret_schema)
     | User_Response result => result
     | Remote_Error err =>
         raise Remote_Calling_Failure {func_name = SOME func_name, message = err})
@@ -403,9 +403,11 @@ exception RPC_Fail of string
 
 fun call_command' {name, arg_schema, ret_schema, callback, timeout} conn arg =
   let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
+      val local_tab = Strhashtab.empty (length callback)
+      val _ = List.app (fn cb => Strhashtab.update local_tab (#name cb, cb)) callback
       val _ = (#3 conn) := timeout
       val _ = write conn (packPair (packString, arg_schema)) (name, arg)
-   in dispatch_loop conn callback name ret_schema
+   in dispatch_loop conn local_tab name ret_schema
   end handle MessagePackBinIO.Unpack.Unpack =>
       raise Remote_Calling_Failure {func_name=SOME name, message="Invalid response, protocol error"}
   

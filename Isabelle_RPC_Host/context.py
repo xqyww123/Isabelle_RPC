@@ -17,6 +17,13 @@ Args common to all entity functions:
 from .rpc import Connection
 from .universal_key import EntityKind, universal_key
 
+# # Debug reverse map: universal_key → readable name
+# _debug_key_names: dict[bytes, str] = {}
+#
+# def debug_key_name(uk: universal_key) -> str | None:
+#     """Look up readable name for a universal key (debug only)."""
+#     return _debug_key_names.get(uk)
+
 
 def _call(connection: Connection, callback_name: str,
           theory: str | None, the_theory_only: bool,
