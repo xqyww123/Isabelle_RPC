@@ -130,9 +130,9 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                      else map_filter (fn thm =>
                        let val thm' = Thm.transfer thy thm
                        in case filter_opt of
-                            NONE => SOME (Universal_Key.key_of_theorem' ctx thm')
+                            NONE => SOME (Universal_Key.key_of_theorem' NONE ctx thm')
                           | SOME f => if f (name, thm')
-                                      then SOME (Universal_Key.key_of_theorem' ctx thm')
+                                      then SOME (Universal_Key.key_of_theorem' NONE ctx thm')
                                       else NONE
                        end) thms
                   end
@@ -281,10 +281,10 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
 in
 fun make_introduction_rules_callback extract_thms =
   make_rules_callback "Context.introduction_rules"
-    Universal_Key.key_of_introduction_rule' extract_thms
+    (Universal_Key.key_of_introduction_rule' NONE) extract_thms
 fun make_elimination_rules_callback extract_thms =
   make_rules_callback "Context.elimination_rules"
-    Universal_Key.key_of_elimination_rule' extract_thms
+    (Universal_Key.key_of_elimination_rule' NONE) extract_thms
 end
 
 end (*local*)
