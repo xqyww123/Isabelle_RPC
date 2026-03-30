@@ -238,13 +238,18 @@ fun build_key (thy_hash : Theory_Hash.hash) (tag : Word8.word)
     Word8Array.vector buf
   end
 
+(* Proof-local facts have theory_long_name = "" in their name space entry.
+   Fall back to the context's theory in that case. *)
+fun default_thy_long_name context "" = Context.theory_long_name (Context.theory_of context)
+  | default_thy_long_name _ name = name
+
 (* --- Namespace-based entities (constant, type, class, locale) --- *)
 
 fun key_of_ns_entity tag make_ck space context xname =
   let
     val fq_name = Name_Space.intern space xname
     val ns_entry = Name_Space.the_entry space fq_name
-    val thy_long_name = #theory_long_name ns_entry
+    val thy_long_name = default_thy_long_name context (#theory_long_name ns_entry)
     val ck = (make_ck fq_name, thy_long_name)
   in
     cached_key ck (fn () =>
@@ -309,7 +314,7 @@ fun key_of_theorem cache context =
       val (base_name, idx_opt) = parse_thm_xname xname
       val full_name = Name_Space.intern fact_space base_name
       val ns_entry = Name_Space.the_entry fact_space full_name
-      val thy_long_name = #theory_long_name ns_entry
+      val thy_long_name = default_thy_long_name context (#theory_long_name ns_entry)
       val {thms, ...} = the (Facts.lookup context facts full_name)
       val thm = case (thms, idx_opt) of
           ([thm], NONE) => thm
@@ -342,11 +347,8 @@ end (* local parse_thm_xname *)
 fun key_of_theorem' cache context thm =
   let
     val thm_id_opt = Thm.derivation_id thm
-    val thy_long_name = case thm_id_opt of
-        SOME {theory_name, ...} =>
-          if theory_name = "" then Context.theory_long_name (Context.theory_of context)
-          else theory_name
-      | NONE => Context.theory_long_name (Context.theory_of context)
+    val thy_long_name = default_thy_long_name context
+      (case thm_id_opt of SOME {theory_name, ...} => theory_name | NONE => "")
     fun compute () =
       build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                 0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
@@ -362,11 +364,8 @@ fun key_of_theorem' cache context thm =
 local
 fun key_of_rule tag make_named cache context thm =
   let
-    fun thy_long_name () = case Thm.derivation_id thm of
-        SOME {theory_name, ...} =>
-          if theory_name = "" then Context.theory_long_name (Context.theory_of context)
-          else theory_name
-      | NONE => Context.theory_long_name (Context.theory_of context)
+    fun thy_long_name () = default_thy_long_name context
+      (case Thm.derivation_id thm of SOME {theory_name, ...} => theory_name | NONE => "")
     fun compute () =
       build_key (Theory_Hash.hash_of (resolve_theory context (thy_long_name ())))
                 tag (ent_digest128_15 (Term_Digest.thm128 thm))

@@ -16,13 +16,20 @@ _thread_local = threading.local()
 
 class ColorFormatter(logging.Formatter):
     COLORS = {
-        'DEBUG': '\033[94m',    # Blue
+        'DEBUG': '',            # Default (no color)
         'INFO': '\033[92m',     # Green
-        'WARNING': '\033[93m',  # Yellow
-        'ERROR': '\033[91m',    # Red
-        'CRITICAL': '\033[95m', # Magenta
+        'WARNING': '\033[1;33m',# Bold Yellow
+        'ERROR': '\033[1;31m',  # Bold Red
+        'CRITICAL': '\033[1;35m', # Bold Magenta
     }
     RESET = '\033[0m'
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        color = self.COLORS.get(record.levelname, '')
+        if color:
+            return f"{color}{msg}{self.RESET}"
+        return msg
 
 class DebugStream:
     """Wraps a stream and buffers all bytes read for debugging unpack failures."""
