@@ -12,6 +12,16 @@ Args common to all entity functions:
         is ``True``.
     theories_not_include: Long theory names to exclude. Ignored when
         ``the_theory_only`` is ``True``.
+    theories_include: Theory names (short or fully qualified). Empty = no restriction.
+        If non-empty, only return entities defined in these theories.
+
+Additional filtering (only on applicable entity kinds):
+    term_patterns: Isabelle term pattern strings for structural filtering.
+        Empty list = no restriction. All patterns must match (conjunction).
+        Only applicable to thm-like entities (theorems, intro/elim rules).
+    type_patterns: Isabelle type pattern strings for type filtering.
+        Empty list = no restriction. All patterns must match (conjunction).
+        Applicable to thm-like entities and constants.
 """
 
 from .rpc import Connection
@@ -27,121 +37,123 @@ from .universal_key import EntityKind, universal_key
 
 def _call(connection: Connection, callback_name: str,
           theory: str | None, the_theory_only: bool,
-          exclude: list[str]) -> list[universal_key]:
+          exclude: list[str],
+          term_patterns: list[str] = [],
+          type_patterns: list[str] = [],
+          theories_include: list[str] = []) -> list[universal_key]:
     return [bytes(k) for k in
-            connection.callback(callback_name, (theory, the_theory_only, exclude))]
+            connection.callback(callback_name,
+                (theory, the_theory_only, exclude,
+                 term_patterns, type_patterns, theories_include))]
 
 
-def _is_default(theory: str | None, the_theory_only: bool, exclude: list[str]) -> bool:
-    return theory is None and not the_theory_only and not exclude
+def _is_default(theory: str | None, the_theory_only: bool, exclude: list[str],
+                term_patterns: list[str], type_patterns: list[str],
+                theories_include: list[str]) -> bool:
+    return (theory is None and not the_theory_only and not exclude
+            and not term_patterns and not type_patterns and not theories_include)
 
 
 def _cached_or_call(connection: Connection, attr: str, callback_name: str,
                     theory: str | None, the_theory_only: bool,
-                    exclude: list[str]) -> list[universal_key]:
-    if _is_default(theory, the_theory_only, exclude):
+                    exclude: list[str],
+                    term_patterns: list[str] = [],
+                    type_patterns: list[str] = [],
+                    theories_include: list[str] = []) -> list[universal_key]:
+    if _is_default(theory, the_theory_only, exclude,
+                   term_patterns, type_patterns, theories_include):
         cached = getattr(connection, attr, None)
         if cached is None:
             cached = _call(connection, callback_name, None, False, [])
             setattr(connection, attr, cached)
         return cached
-    return _call(connection, callback_name, theory, the_theory_only, exclude)
+    return _call(connection, callback_name, theory, the_theory_only, exclude,
+                 term_patterns, type_patterns, theories_include)
 
 
 def constants(connection: Connection, theory: str | None = None,
               the_theory_only: bool = False,
-              theories_not_include: list[str] = []) -> list[universal_key]:
+              theories_not_include: list[str] = [],
+              type_patterns: list[str] = [],
+              theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all constants.
-
-    Args:
-        connection: Active Isabelle RPC connection.
-        theory: Long theory name to target, or ``None`` for the current context.
-        the_theory_only: If ``True``, only entities from the target theory;
-            otherwise all entities from the target theory and its ancestors.
-        theories_not_include: Long theory names to exclude.
+    Only type_patterns apply (constants have no proposition; term patterns are ignored).
     """
     return _cached_or_call(connection, "_ctx_constants", "Context.constants",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           [], type_patterns, theories_include)
 
 
 def theorems(connection: Connection, theory: str | None = None,
              the_theory_only: bool = False,
-             theories_not_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all theorems.
-
-    Args:
-        connection: Active Isabelle RPC connection.
-        theory: Long theory name to target, or ``None`` for the current context.
-        the_theory_only: If ``True``, only entities from the target theory;
-            otherwise all entities from the target theory and its ancestors.
-        theories_not_include: Long theory names to exclude.
-    """
+             theories_not_include: list[str] = [],
+             term_patterns: list[str] = [],
+             type_patterns: list[str] = [],
+             theories_include: list[str] = []) -> list[universal_key]:
+    """Return universal keys of all theorems."""
     return _cached_or_call(connection, "_ctx_theorems", "Context.theorems",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           term_patterns, type_patterns, theories_include)
 
 
 def types(connection: Connection, theory: str | None = None,
           the_theory_only: bool = False,
-          theories_not_include: list[str] = []) -> list[universal_key]:
+          theories_not_include: list[str] = [],
+          theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all types.
-
-    Args:
-        connection: Active Isabelle RPC connection.
-        theory: Long theory name to target, or ``None`` for the current context.
-        the_theory_only: If ``True``, only entities from the target theory;
-            otherwise all entities from the target theory and its ancestors.
-        theories_not_include: Long theory names to exclude.
+    Pattern parameters are not applicable to types.
     """
     return _cached_or_call(connection, "_ctx_types", "Context.types",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           [], [], theories_include)
 
 
 def classes(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
-            theories_not_include: list[str] = []) -> list[universal_key]:
+            theories_not_include: list[str] = [],
+            theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all type classes.
-
-    Args:
-        connection: Active Isabelle RPC connection.
-        theory: Long theory name to target, or ``None`` for the current context.
-        the_theory_only: If ``True``, only entities from the target theory;
-            otherwise all entities from the target theory and its ancestors.
-        theories_not_include: Long theory names to exclude.
+    Pattern parameters are not applicable to classes.
     """
     return _cached_or_call(connection, "_ctx_classes", "Context.classes",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           [], [], theories_include)
 
 
 def locales(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
-            theories_not_include: list[str] = []) -> list[universal_key]:
+            theories_not_include: list[str] = [],
+            theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all locales.
-
-    Args:
-        connection: Active Isabelle RPC connection.
-        theory: Long theory name to target, or ``None`` for the current context.
-        the_theory_only: If ``True``, only entities from the target theory;
-            otherwise all entities from the target theory and its ancestors.
-        theories_not_include: Long theory names to exclude.
+    Pattern parameters are not applicable to locales.
     """
     return _cached_or_call(connection, "_ctx_locales", "Context.locales",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           [], [], theories_include)
 
 
 def introduction_rules(connection: Connection, theory: str | None = None,
                        the_theory_only: bool = False,
-                       theories_not_include: list[str] = []) -> list[universal_key]:
+                       theories_not_include: list[str] = [],
+                       term_patterns: list[str] = [],
+                       type_patterns: list[str] = [],
+                       theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all introduction rules."""
     return _cached_or_call(connection, "_ctx_intro_rules", "Context.introduction_rules",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           term_patterns, type_patterns, theories_include)
 
 
 def elimination_rules(connection: Connection, theory: str | None = None,
                       the_theory_only: bool = False,
-                      theories_not_include: list[str] = []) -> list[universal_key]:
+                      theories_not_include: list[str] = [],
+                      term_patterns: list[str] = [],
+                      type_patterns: list[str] = [],
+                      theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all elimination rules."""
     return _cached_or_call(connection, "_ctx_elim_rules", "Context.elimination_rules",
-                           theory, the_theory_only, theories_not_include)
+                           theory, the_theory_only, theories_not_include,
+                           term_patterns, type_patterns, theories_include)
 
 
 _KIND_TO_FUNC = {
@@ -157,22 +169,39 @@ _KIND_TO_FUNC = {
 def entities_of(connection: Connection, kinds: list[EntityKind],
                 theory: str | None = None,
                 the_theory_only: bool = False,
-                theories_not_include: list[str] = []) -> list[universal_key]:
+                theories_not_include: list[str] = [],
+                term_patterns: list[str] = [],
+                type_patterns: list[str] = [],
+                theories_include: list[str] = []) -> list[universal_key]:
     """Return universal keys of all entities of the given kinds.
 
-    Args:
-        connection: Active Isabelle RPC connection.
-        kinds: Entity kinds to include.
-        theory: Long theory name to target, or ``None`` for the current context.
-        the_theory_only: If ``True``, only entities from the target theory;
-            otherwise all entities from the target theory and its ancestors.
-        theories_not_include: Long theory names to exclude.
+    Pattern parameters are forwarded only to entity kinds that support them:
+    term_patterns → theorems, intro/elim rules only.
+    type_patterns → theorems, intro/elim rules, constants.
+    theories_include → all kinds.
     """
     result: list[universal_key] = []
     for kind in kinds:
         func = _KIND_TO_FUNC.get(kind)
-        if func is not None:
-            result.extend(func(connection, theory, the_theory_only, theories_not_include))
+        if func is None:
+            continue
+        # Pass only the parameters each function accepts
+        if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE):
+            result.extend(func(connection, theory, the_theory_only,
+                               theories_not_include,
+                               theories_include=theories_include))
+        elif kind == EntityKind.CONSTANT:
+            result.extend(func(connection, theory, the_theory_only,
+                               theories_not_include,
+                               type_patterns=type_patterns,
+                               theories_include=theories_include))
+        else:
+            # THEOREM, INTRODUCTION_RULE, ELIMINATION_RULE
+            result.extend(func(connection, theory, the_theory_only,
+                               theories_not_include,
+                               term_patterns=term_patterns,
+                               type_patterns=type_patterns,
+                               theories_include=theories_include))
     return result
 
 

@@ -46,10 +46,8 @@ val load : string list -> unit
 val call_heartbeat_callback_cmd : (unit, string) command
 
 (*Auxiliary*)
-(*
 val get_connection : unit -> connection
 val release_connection : connection -> unit
-*)
 end
 
 structure Remote_Procedure_Calling : REMOTE_PROCEDURE_CALLING = struct
@@ -450,57 +448,24 @@ fun close_connection conn =
     ; BinIO.StreamIO.closeIn (!cin)
   end
 
-(* Connection pool temporarily disabled for debugging.
-
-val connection_pool : (connection * Time.time) list Synchronized.var
-      = Synchronized.var "PyProxy.connection_pool" []
-val connection_pool_cleaner_event : Event_Timer.request option Unsynchronized.ref
-      = Unsynchronized.ref NONE
+val connection_pool : connection list Synchronized.var
+      = Synchronized.var "RPC.connection_pool" []
 
 fun get_connection () =
   case Synchronized.change_result connection_pool (
         fn [] => (NONE, [])
-         | (x,_)::L => (SOME x, L) )
+         | x::L => (SOME x, L) )
     of SOME conn =>
           if can heartbeat conn
           then conn
-          else (close_connection conn; get_connection ())
+          else ( close_connection conn
+               ; List.app close_connection
+                   (Synchronized.change_result connection_pool (fn L => (L, [])))
+               ; make_connection () )
      | NONE => make_connection ()
 
-val TTL = Time.fromSeconds 60
-val TTL' = TTL + Time.fromSeconds 1
-
-fun clean_connection_i conns =
-  let val now = Time.now ()
-      fun clean [] = []
-        | clean ((x,t) :: L) =
-            if now - t >= TTL
-            then (close_connection x; clean L)
-            else (x,t) :: clean L
-   in clean conns
-  end
-
-fun clean_connection_action () =
-  Synchronized.change connection_pool (fn L =>
-    let val L' = clean_connection_i L
-     in (case L' of [] => connection_pool_cleaner_event := NONE
-          | (_, t) :: _ => connection_pool_cleaner_event :=
-              SOME (Event_Timer.request {physical=false} (t + TTL') clean_connection_action) )
-      ; L'
-    end )
-
 fun release_connection conn =
-  Synchronized.change connection_pool (fn L =>
-    let val L' = clean_connection_i L
-        val now = Time.now ()
-     in (case L' of [] => ()
-          | _ =>
-         case !connection_pool_cleaner_event
-           of SOME _ => ()
-            | NONE => connection_pool_cleaner_event :=
-                SOME (Event_Timer.request {physical=false} (now + TTL') clean_connection_action))
-      ; (conn, now) :: L'
-    end)
+  Synchronized.change connection_pool (fn L => conn :: L)
 
 fun call_command cmd arg =
   let val conn = get_connection ()
@@ -513,17 +478,6 @@ fun call_command cmd arg =
         if !normal
         then release_connection conn
         else close_connection conn
-      \<close>
-  end
-*)
-
-(* Using fresh connections per call (pool disabled) *)
-fun call_command cmd arg =
-  let val conn = make_connection ()
-   in \<^try>\<open>
-        call_command' cmd conn arg
-      finally
-        close_connection conn
       \<close>
   end
 

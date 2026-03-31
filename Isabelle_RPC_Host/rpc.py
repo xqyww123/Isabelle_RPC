@@ -393,7 +393,7 @@ class Server:
 @isabelle_remote_procedure("heartbeat")
 def _heartbeat_(arg, connection: Connection) -> None:
     """Built-in heartbeat RPC for connection health checks."""
-    connection.server.logger.info(f"Heartbeat from {connection.client_addr}")
+    #connection.server.logger.info(f"Heartbeat from {connection.client_addr}")
     return None
 
 
