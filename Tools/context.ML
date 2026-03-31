@@ -52,6 +52,9 @@ val arg_schema = unpackTuple6 (unpackOption unpackString, unpackBool,
       unpackList unpackString, unpackList unpackString,
       unpackList unpackString, unpackList unpackString)
 
+val ret_schema = packPair (packList Universal_Key.pack_universal_key,
+                           packList packString (* warnings *))
+
 fun resolve_ctx context target_thy_opt =
   case target_thy_opt of
     NONE => context
@@ -109,15 +112,32 @@ fun resolve_include_set context names =
   else SOME (Strhashtab.make_set (map (fn name =>
     Context.theory_long_name (Theory_Hash.resolve_theory context name)) names))
 
-(* Parse term and type pattern strings. Returns (term list, typ list).
-   Empty input lists produce empty output lists (= no restriction). *)
+(* Parse term and type pattern strings. Returns (term list, typ list, warnings).
+   Empty input lists produce empty output lists (= no restriction).
+   Warns when term patterns contain undeclared free variables
+   (which likely indicate misspelled constant names). *)
 fun parse_patterns context (term_pat_strs, type_pat_strs) =
-  if null term_pat_strs andalso null type_pat_strs then ([], [])
+  if null term_pat_strs andalso null type_pat_strs then ([], [], [])
   else
     let val ctxt = Context.cases Proof_Context.init_global I context
         val ctxt_pat = Proof_Context.set_mode Proof_Context.mode_pattern ctxt
-    in (map (Syntax.read_term ctxt_pat) term_pat_strs,
-        map (Syntax.read_typ ctxt_pat) type_pat_strs)
+        val term_pats = map (Syntax.read_term ctxt_pat) term_pat_strs
+        val warnings = maps (fn (pat_str, pat) =>
+          let val undeclared = filter (not o Variable.is_declared ctxt)
+                                      (Term.add_free_names pat [])
+          in if null undeclared then []
+             else let val plural = length undeclared > 1
+                  in [String.concat [
+                      "Term pattern ", quote pat_str,
+                      " contains undeclared free variable",
+                      if plural then "s: " else ": ",
+                      commas_quote undeclared, ". ",
+                      if plural then "They are likely misspelled constants."
+                      else "It is likely a misspelled constant."]]
+                  end
+          end) (term_pat_strs ~~ term_pats)
+        val type_pats = map (Syntax.read_typ ctxt_pat) type_pat_strs
+    in (term_pats, type_pats, warnings)
     end
 
 (* Collect type constructor names from a type. *)
@@ -226,9 +246,9 @@ fun make_constants_callback filter_opt (context : Context.generic)
   Remote_Procedure_Calling.mk_callback {
     name = "Context.constants",
     arg_schema = arg_schema,
-    ret_schema = packList Universal_Key.pack_universal_key,
+    ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude,
-                   term_pat_strs, type_pat_strs, theories_include) =>
+                   _, type_pat_strs, theories_include) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -237,9 +257,10 @@ fun make_constants_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-        val (_, type_pats) = parse_patterns context ([], type_pat_strs)
+        val (_, type_pats, warnings) = parse_patterns context ([], type_pat_strs)
         val const_pat_filter = mk_const_pattern_matcher ctx type_pats
-      in ns_filter key_of space target_name exclude_set include_set const_pat_filter filter_opt end,
+        val keys = ns_filter key_of space target_name exclude_set include_set const_pat_filter filter_opt
+      in (keys, warnings) end,
     timeout = NONE
   }
 
@@ -248,7 +269,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theorems",
     arg_schema = arg_schema,
-    ret_schema = packList Universal_Key.pack_universal_key,
+    ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude,
                    term_pat_strs, type_pat_strs, theories_include) =>
       let
@@ -261,9 +282,9 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
         val ctxt = Context.cases Proof_Context.init_global I ctx
-        val (term_pats, type_pats) = parse_patterns ctx (term_pat_strs, type_pat_strs)
+        val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
-      in Facts.dest_static false [] facts
+        val keys = Facts.dest_static false [] facts
          |> maps (fn (name, thms) =>
            let val entry = try (Name_Space.the_entry fact_space) name
            in case entry of
@@ -292,7 +313,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                   end
            end)
          |> dedup_keys
-      end,
+      in (keys, warnings) end,
     timeout = NONE
   }
 
@@ -301,7 +322,7 @@ fun make_types_callback filter_opt (context : Context.generic)
   Remote_Procedure_Calling.mk_callback {
     name = "Context.types",
     arg_schema = arg_schema,
-    ret_schema = packList Universal_Key.pack_universal_key,
+    ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -311,7 +332,7 @@ fun make_types_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-      in ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt end,
+      in (ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt, []) end,
     timeout = NONE
   }
 
@@ -320,7 +341,7 @@ fun make_classes_callback filter_opt (context : Context.generic)
   Remote_Procedure_Calling.mk_callback {
     name = "Context.classes",
     arg_schema = arg_schema,
-    ret_schema = packList Universal_Key.pack_universal_key,
+    ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -330,7 +351,7 @@ fun make_classes_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-      in ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt end,
+      in (ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt, []) end,
     timeout = NONE
   }
 
@@ -339,7 +360,7 @@ fun make_locales_callback filter_opt (context : Context.generic)
   Remote_Procedure_Calling.mk_callback {
     name = "Context.locales",
     arg_schema = arg_schema,
-    ret_schema = packList Universal_Key.pack_universal_key,
+    ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -349,7 +370,7 @@ fun make_locales_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-      in ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt end,
+      in (ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt, []) end,
     timeout = NONE
   }
 
@@ -396,7 +417,7 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
   Remote_Procedure_Calling.mk_callback {
     name = cb_name,
     arg_schema = arg_schema,
-    ret_schema = packList Universal_Key.pack_universal_key,
+    ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude,
                    term_pat_strs, type_pat_strs, theories_include) =>
       let
@@ -410,9 +431,9 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
         val include_set = resolve_include_set context theories_include
         val seen : unit Strhashtab.table = Strhashtab.empty 128
         val ctxt = Context.cases Proof_Context.init_global I ctx
-        val (term_pats, type_pats) = parse_patterns ctx (term_pat_strs, type_pat_strs)
+        val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
-      in
+        val keys =
         map_filter (fn thm =>
           let val thm = Thm.transfer thy thm
               val name = Thm.derivation_name thm
@@ -443,7 +464,7 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
                end
           end) thms
         |> dedup_keys
-      end,
+      in (keys, warnings) end,
     timeout = NONE
   }
 in

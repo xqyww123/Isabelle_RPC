@@ -40,11 +40,12 @@ def _call(connection: Connection, callback_name: str,
           exclude: list[str],
           term_patterns: list[str] = [],
           type_patterns: list[str] = [],
-          theories_include: list[str] = []) -> list[universal_key]:
-    return [bytes(k) for k in
-            connection.callback(callback_name,
+          theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Returns (keys, warnings)."""
+    keys_raw, warnings = connection.callback(callback_name,
                 (theory, the_theory_only, exclude,
-                 term_patterns, type_patterns, theories_include))]
+                 term_patterns, type_patterns, theories_include))
+    return [bytes(k) for k in keys_raw], list(warnings)
 
 
 def _is_default(theory: str | None, the_theory_only: bool, exclude: list[str],
@@ -59,14 +60,16 @@ def _cached_or_call(connection: Connection, attr: str, callback_name: str,
                     exclude: list[str],
                     term_patterns: list[str] = [],
                     type_patterns: list[str] = [],
-                    theories_include: list[str] = []) -> list[universal_key]:
+                    theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Returns (keys, warnings)."""
     if _is_default(theory, the_theory_only, exclude,
                    term_patterns, type_patterns, theories_include):
         cached = getattr(connection, attr, None)
         if cached is None:
-            cached = _call(connection, callback_name, None, False, [])
-            setattr(connection, attr, cached)
-        return cached
+            keys, _ = _call(connection, callback_name, None, False, [])
+            setattr(connection, attr, keys)
+            return keys, []
+        return cached, []
     return _call(connection, callback_name, theory, the_theory_only, exclude,
                  term_patterns, type_patterns, theories_include)
 
@@ -75,8 +78,8 @@ def constants(connection: Connection, theory: str | None = None,
               the_theory_only: bool = False,
               theories_not_include: list[str] = [],
               type_patterns: list[str] = [],
-              theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all constants.
+              theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all constants.
     Only type_patterns apply (constants have no proposition; term patterns are ignored).
     """
     return _cached_or_call(connection, "_ctx_constants", "Context.constants",
@@ -89,8 +92,8 @@ def theorems(connection: Connection, theory: str | None = None,
              theories_not_include: list[str] = [],
              term_patterns: list[str] = [],
              type_patterns: list[str] = [],
-             theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all theorems."""
+             theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all theorems."""
     return _cached_or_call(connection, "_ctx_theorems", "Context.theorems",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include)
@@ -99,8 +102,8 @@ def theorems(connection: Connection, theory: str | None = None,
 def types(connection: Connection, theory: str | None = None,
           the_theory_only: bool = False,
           theories_not_include: list[str] = [],
-          theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all types.
+          theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all types.
     Pattern parameters are not applicable to types.
     """
     return _cached_or_call(connection, "_ctx_types", "Context.types",
@@ -111,8 +114,8 @@ def types(connection: Connection, theory: str | None = None,
 def classes(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
             theories_not_include: list[str] = [],
-            theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all type classes.
+            theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all type classes.
     Pattern parameters are not applicable to classes.
     """
     return _cached_or_call(connection, "_ctx_classes", "Context.classes",
@@ -123,8 +126,8 @@ def classes(connection: Connection, theory: str | None = None,
 def locales(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
             theories_not_include: list[str] = [],
-            theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all locales.
+            theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all locales.
     Pattern parameters are not applicable to locales.
     """
     return _cached_or_call(connection, "_ctx_locales", "Context.locales",
@@ -137,8 +140,8 @@ def introduction_rules(connection: Connection, theory: str | None = None,
                        theories_not_include: list[str] = [],
                        term_patterns: list[str] = [],
                        type_patterns: list[str] = [],
-                       theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all introduction rules."""
+                       theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all introduction rules."""
     return _cached_or_call(connection, "_ctx_intro_rules", "Context.introduction_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include)
@@ -149,8 +152,8 @@ def elimination_rules(connection: Connection, theory: str | None = None,
                       theories_not_include: list[str] = [],
                       term_patterns: list[str] = [],
                       type_patterns: list[str] = [],
-                      theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all elimination rules."""
+                      theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all elimination rules."""
     return _cached_or_call(connection, "_ctx_elim_rules", "Context.elimination_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include)
@@ -172,37 +175,41 @@ def entities_of(connection: Connection, kinds: list[EntityKind],
                 theories_not_include: list[str] = [],
                 term_patterns: list[str] = [],
                 type_patterns: list[str] = [],
-                theories_include: list[str] = []) -> list[universal_key]:
-    """Return universal keys of all entities of the given kinds.
+                theories_include: list[str] = []) -> tuple[list[universal_key], list[str]]:
+    """Return (keys, warnings) for all entities of the given kinds.
 
     Pattern parameters are forwarded only to entity kinds that support them:
     term_patterns → theorems, intro/elim rules only.
     type_patterns → theorems, intro/elim rules, constants.
     theories_include → all kinds.
+    Warnings include notices about undeclared free variables in term patterns.
     """
     result: list[universal_key] = []
+    all_warnings: list[str] = []
     for kind in kinds:
         func = _KIND_TO_FUNC.get(kind)
         if func is None:
             continue
         # Pass only the parameters each function accepts
         if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE):
-            result.extend(func(connection, theory, the_theory_only,
-                               theories_not_include,
-                               theories_include=theories_include))
+            keys, warnings = func(connection, theory, the_theory_only,
+                                  theories_not_include,
+                                  theories_include=theories_include)
         elif kind == EntityKind.CONSTANT:
-            result.extend(func(connection, theory, the_theory_only,
-                               theories_not_include,
-                               type_patterns=type_patterns,
-                               theories_include=theories_include))
+            keys, warnings = func(connection, theory, the_theory_only,
+                                  theories_not_include,
+                                  type_patterns=type_patterns,
+                                  theories_include=theories_include)
         else:
             # THEOREM, INTRODUCTION_RULE, ELIMINATION_RULE
-            result.extend(func(connection, theory, the_theory_only,
-                               theories_not_include,
-                               term_patterns=term_patterns,
-                               type_patterns=type_patterns,
-                               theories_include=theories_include))
-    return result
+            keys, warnings = func(connection, theory, the_theory_only,
+                                  theories_not_include,
+                                  term_patterns=term_patterns,
+                                  type_patterns=type_patterns,
+                                  theories_include=theories_include)
+        result.extend(keys)
+        all_warnings.extend(warnings)
+    return result, all_warnings
 
 
 def theory_long_name(connection: Connection) -> str:
