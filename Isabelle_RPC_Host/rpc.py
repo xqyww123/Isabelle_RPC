@@ -1,17 +1,18 @@
+import asyncio
+import contextvars
 import errno
 import msgpack as mp
 import logging
 import sys
 import socket
-import threading
 import os
 import tempfile
 from enum import IntEnum
-from typing import Callable, TypeAlias, Any, Optional
+from typing import Callable, TypeAlias, Any, Awaitable
 import importlib
 import uuid
 
-_thread_local = threading.local()
+_connection_var: contextvars.ContextVar['Connection | None'] = contextvars.ContextVar('_connection_var', default=None)
 
 
 class ColorFormatter(logging.Formatter):
@@ -31,37 +32,6 @@ class ColorFormatter(logging.Formatter):
             return f"{color}{msg}{self.RESET}"
         return msg
 
-class DebugStream:
-    """Wraps a stream and buffers all bytes read for debugging unpack failures."""
-
-    def __init__(self, stream):
-        self._stream = stream
-        self._buffer = bytearray()
-
-    def read(self, size: int = -1) -> bytes:
-        data = self._stream.read(size) if size >= 0 else self._stream.read()
-        self._buffer.extend(data)
-        return data
-
-    def readinto(self, b: bytearray) -> Optional[int]:
-        n = self._stream.readinto(b)
-        if n:
-            self._buffer.extend(b[:n])
-        return n
-
-    def close(self):
-        self._stream.close()
-
-    def get_buffer_bytes(self) -> bytes:
-        return bytes(self._buffer)
-
-    def clear_buffer(self) -> None:
-        """Clear buffer after successful read; keeps only the current message for error reporting."""
-        self._buffer.clear()
-
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
-
 
 class IsabelleError(Exception):
     def __init__(self, errors : list[str], errobj: Any):
@@ -73,38 +43,52 @@ class IsabelleError(Exception):
 class Connection:
     @staticmethod
     def current() -> 'Connection | None':
-        """Return the Connection for the current thread, or None if not in an RPC handler."""
-        return getattr(_thread_local, 'connection', None)
+        """Return the Connection for the current task, or None if not in an RPC handler."""
+        return _connection_var.get()
 
-    def __init__(self, socket: socket.socket, client_addr: tuple[str, int], server: 'Server'):
-        self.sock = socket
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                 client_addr: tuple[str, int], server: 'Server'):
+        self.reader = reader
+        self.writer = writer
+        self.sock: socket.socket = writer.get_extra_info('socket')
         self.client_addr = client_addr
         self.server = server
-        self.cout = self.sock.makefile('wb')
-        raw_cin = self.sock.makefile('rb', buffering=0)
-        self.debug_stream: DebugStream | None = DebugStream(raw_cin) if server.debugging else None
-        self.cin = self.debug_stream if self.debug_stream else raw_cin
-        self.unpack = mp.Unpacker(self.cin)
+        self.unpack = mp.Unpacker()  # feed mode: no stream, manually feed bytes
+        self._debug_buffer: bytearray | None = bytearray() if server.debugging else None
+        self._callback_lock = asyncio.Lock()
 
-    def read(self) -> Any:
-        (ret, err) = self.unpack.unpack()
+    async def _feed_and_unpack(self) -> Any:
+        """Read bytes from StreamReader, feed to Unpacker, return next msgpack object."""
+        while True:
+            try:
+                return self.unpack.unpack()
+            except mp.OutOfData:
+                data = await self.reader.read(65536)
+                if not data:
+                    raise ConnectionResetError("peer closed connection")
+                if self._debug_buffer is not None:
+                    self._debug_buffer.extend(data)
+                self.unpack.feed(data)
+
+    async def read(self) -> Any:
+        (ret, err) = await self._feed_and_unpack()
         if err is not None:
             raise IsabelleError(*err)
-        if self.debug_stream:
-            self.debug_stream.clear_buffer()  # only keep failed message bytes for error log
+        if self._debug_buffer is not None:
+            self._debug_buffer.clear()
         return ret
 
-    def write(self, data: Any) -> None:
+    async def write(self, data: Any) -> None:
         """Send success response with tag 1: (1, result)."""
-        mp.pack((1, data), self.cout)
-        self.cout.flush()
+        self.writer.write(mp.packb((1, data)))  # type: ignore[arg-type]
+        await self.writer.drain()
 
-    def write_error(self, error: Any) -> None:
+    async def write_error(self, error: Any) -> None:
         """Send error response with tag 2: (2, error_message)."""
-        mp.pack((2, str(error)), self.cout)
-        self.cout.flush()
+        self.writer.write(mp.packb((2, str(error))))  # type: ignore[arg-type]
+        await self.writer.drain()
 
-    def callback(self, name: str, arg: Any) -> Any:
+    async def callback(self, name: str, arg: Any) -> Any:
         """Call an Isabelle callback function with 2-phase protocol.
 
         Phase 1: Send callback name, wait for lookup confirmation
@@ -120,27 +104,94 @@ class Connection:
         Raises:
             IsabelleError: If the callback is not found or execution fails
         """
-        def phase2_protocol(conn: 'Connection') -> Any:
+        async def phase2_protocol(conn: 'Connection') -> Any:
             # Phase 2: Send argument
-            mp.pack(arg, conn.cout)
-            conn.cout.flush()
+            conn.writer.write(mp.packb(arg))  # type: ignore[arg-type]
+            await conn.writer.drain()
 
             # Read Phase 2 response: execution result
-            (result, error) = conn.unpack.unpack()
+            (result, error) = await conn._feed_and_unpack()
 
             if error is not None:
                 raise IsabelleError([error], None)
 
-            if conn.debug_stream:
-                conn.debug_stream.clear_buffer()
+            if conn._debug_buffer is not None:
+                conn._debug_buffer.clear()
 
             return result
 
-        return self.raw_callback(name, phase2_protocol)
+        return await self.raw_callback(name, phase2_protocol)
 
-    def config_lookup(self, name: str) -> Any:
+    async def config_lookup(self, name: str) -> Any:
         """Look up an Isabelle config option by name via the Config.lookup callback."""
-        return self.callback("Config.lookup", name)
+        return await self.callback("Config.lookup", name)
+
+    def _unpack_sync(self) -> Any:
+        """Blocking unpack via direct socket I/O.
+
+        Drains the StreamReader's internal buffer (``_buffer``) first, then
+        falls back to blocking ``sock.recv``.  Safe to call from the event
+        loop thread because the caller is blocking the loop — no concurrent
+        reader exists for this connection.
+
+        Note: accesses ``StreamReader._buffer`` which is a private but
+        stable CPython attribute (unchanged since Python 3.8).
+        """
+        while True:
+            try:
+                return self.unpack.unpack()
+            except mp.OutOfData:
+                # 1. Drain StreamReader's internal buffer
+                buf = self.reader._buffer          # type: ignore[union-attr]
+                if buf:
+                    data = bytes(buf)
+                    buf.clear()
+                    if self._debug_buffer is not None:
+                        self._debug_buffer.extend(data)
+                    self.unpack.feed(data)
+                    continue
+                # 2. Blocking recv from raw socket
+                old_blocking = self.sock.getblocking()
+                try:
+                    self.sock.setblocking(True)
+                    data = self.sock.recv(65536)
+                finally:
+                    self.sock.setblocking(old_blocking)
+                if not data:
+                    raise ConnectionResetError("peer closed connection")
+                if self._debug_buffer is not None:
+                    self._debug_buffer.extend(data)
+                self.unpack.feed(data)
+
+    def callback_sync(self, name: str, arg: Any) -> Any:
+        """Blocking callback via direct socket I/O.
+
+        Safe to call from both the event loop thread and non-event-loop
+        threads.  Uses ``sock.sendall`` for writes and ``_unpack_sync``
+        for reads, bypassing asyncio StreamReader/StreamWriter entirely.
+        """
+        old_blocking = self.sock.getblocking()
+        try:
+            self.sock.setblocking(True)
+            # Phase 1: send callback name
+            self.sock.sendall(mp.packb((0, name)))  # type: ignore[arg-type]
+            (phase1_result, phase1_error) = self._unpack_sync()
+            if phase1_error is not None:
+                raise IsabelleError([phase1_error], None)
+            # Phase 2: send argument, read result
+            self.sock.sendall(mp.packb(arg))  # type: ignore[arg-type]
+            (result, error) = self._unpack_sync()
+            if error is not None:
+                raise IsabelleError([error], None)
+            if self._debug_buffer is not None:
+                self._debug_buffer.clear()
+            return result
+        finally:
+            self.sock.setblocking(old_blocking)
+
+    def config_lookup_sync(self, name: str) -> Any:
+        """Blocking config lookup via direct socket I/O."""
+        return self.callback_sync("Config.lookup", name)
 
     # -- Isabelle logging via "log" callback ----------------------------------
 
@@ -150,22 +201,37 @@ class Connection:
         WARNING = 1
         WRITELN = 2
 
-    def tracing(self, msg: str) -> None:
+    async def tracing(self, msg: str) -> None:
         """Print a tracing message in Isabelle's output."""
         self.server.logger.debug(msg)
-        self.callback("log", (int(self.LogType.TRACING), msg))
+        await self.callback("log", (int(self.LogType.TRACING), msg))
 
-    def warning(self, msg: str) -> None:
+    async def warning(self, msg: str) -> None:
         """Print a warning message in Isabelle's output."""
         self.server.logger.warning(msg)
-        self.callback("log", (int(self.LogType.WARNING), msg))
+        await self.callback("log", (int(self.LogType.WARNING), msg))
 
-    def writeln(self, msg: str) -> None:
+    async def writeln(self, msg: str) -> None:
         """Print a normal message in Isabelle's output."""
         self.server.logger.info(msg)
-        self.callback("log", (int(self.LogType.WRITELN), msg))
+        await self.callback("log", (int(self.LogType.WRITELN), msg))
 
-    def raw_callback(self, name: str, action: Callable[['Connection'], Any]) -> Any:
+    def tracing_sync(self, msg: str) -> None:
+        """Blocking version of tracing()."""
+        self.server.logger.debug(msg)
+        self.callback_sync("log", (int(self.LogType.TRACING), msg))
+
+    def warning_sync(self, msg: str) -> None:
+        """Blocking version of warning()."""
+        self.server.logger.warning(msg)
+        self.callback_sync("log", (int(self.LogType.WARNING), msg))
+
+    def writeln_sync(self, msg: str) -> None:
+        """Blocking version of writeln()."""
+        self.server.logger.info(msg)
+        self.callback_sync("log", (int(self.LogType.WRITELN), msg))
+
+    async def raw_callback(self, name: str, action: Callable[['Connection'], Awaitable[Any]]) -> Any:
         """Start a raw callback with custom bidirectional protocol.
 
         Only performs Phase 1 (lookup). After successful lookup, both the ML
@@ -174,7 +240,7 @@ class Connection:
 
         Args:
             name: The ML callback name
-            action: Python function that receives Connection for custom I/O
+            action: Async function that receives Connection for custom I/O
 
         Returns:
             Whatever the action function returns
@@ -183,72 +249,48 @@ class Connection:
             IsabelleError: If the callback is not found
 
         Example:
-            def my_protocol(conn: Connection):
-                conn.write((1, "command"))
-                result = conn.read()
+            async def my_protocol(conn: Connection):
+                conn.writer.write(mp.packb("command"))
+                await conn.writer.drain()
+                result = await conn._feed_and_unpack()
                 return result
 
-            result = connection.raw_callback("my_callback", my_protocol)
+            result = await connection.raw_callback("my_callback", my_protocol)
         """
-        # Phase 1: Send callback name for lookup
-        mp.pack((0, name), self.cout)
-        self.cout.flush()
+        async with self._callback_lock:
+            # Phase 1: Send callback name for lookup
+            self.writer.write(mp.packb((0, name)))  # type: ignore[arg-type]
+            await self.writer.drain()
 
-        # Read Phase 1 response: (result, error) tuple
-        (phase1_result, phase1_error) = self.unpack.unpack()
+            # Read Phase 1 response: (result, error) tuple
+            (phase1_result, phase1_error) = await self._feed_and_unpack()
 
-        if phase1_error is not None:
-            # Callback not found
-            raise IsabelleError([phase1_error], None)
+            if phase1_error is not None:
+                # Callback not found
+                raise IsabelleError([phase1_error], None)
 
-        # Phase 1 succeeded - ML callback is now running with connection access
-        # Call Python action to interact with ML side via custom protocol
-        return action(self)
+            # Phase 1 succeeded - ML callback is now running with connection access
+            # Call Python action to interact with ML side via custom protocol
+            return await action(self)
 
     def close(self):
         try:
-            self.cout.close()
-        except:
-            pass
-        try:
-            self.cin.close()
-        except:
-            pass
-        try:
-            self.sock.close()
+            self.writer.close()
         except:
             pass
 
-    def __enter__(self) -> 'Connection':
+    async def __aenter__(self) -> 'Connection':
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
         self.close()
         return False
 
-    def is_peer_closed(self) -> bool:
-        """True if the peer has closed the connection (no data and EOF)."""
-        old = self.sock.getblocking()
-        try:
-            self.sock.setblocking(False)
-            try:
-                n = len(self.sock.recv(1, socket.MSG_PEEK))
-                return n == 0
-            except BlockingIOError:
-                return False
-        except OSError:
-            return True
-        finally:
-            try:
-                self.sock.setblocking(old)
-            except OSError:
-                pass
-
-RemoteProcedure: TypeAlias = Callable[[Any, Connection], Any]
+RemoteProcedure: TypeAlias = Callable[[Any, 'Connection'], Awaitable[Any]]
 Remote_Procedures: dict[str, RemoteProcedure] = {}
 
 def isabelle_remote_procedure(name: str):
-    def decorator(func: Callable[[Any, Connection], Any]):
+    def decorator(func: Callable[[Any, 'Connection'], Awaitable[Any]]):
         Remote_Procedures[name] = func
         return func
     return decorator
@@ -259,127 +301,108 @@ class Server:
         self.addr = addr
         self.host, port_str = addr.split(':')
         self.port = int(port_str)
-        self.socket = None
+        self._server: asyncio.Server | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self.running = False
         self.clients = {}
         self.logger = logger
         self.debugging = debugging
 
-    def handle_client(self, client_socket: socket.socket, client_addr: tuple[str, int]) -> None:
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Handle a client connection."""
-        with Connection(client_socket, client_addr, self) as connection:
-            _thread_local.connection = connection
-            try:
-                while self.running:
+        client_addr = writer.get_extra_info('peername')
+        connection = Connection(reader, writer, client_addr, self)
+        token = _connection_var.set(connection)
+        try:
+            while self.running:
+                try:
                     try:
-                        try:
-                            (func_name, arg) = connection.read()
-                        except mp.UnpackException as e:
-                            if connection.is_peer_closed():
-                                self.logger.debug(f"From {client_addr}, connection closed by peer")
-                                return
-                            buf = connection.debug_stream.get_buffer_bytes() if connection.debug_stream else None
-                            err_details = f"{type(e).__name__}: {e}"
-                            if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
-                                err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})" # type: ignore
-                            elif hasattr(connection.unpack, 'tell'):
-                                try:
-                                    err_details += f" (stream_pos={connection.unpack.tell()})"
-                                except Exception:
-                                    pass
-                            if buf is not None:
-                                try:
-                                    fd, dump_path = tempfile.mkstemp(suffix='.bin', prefix='isabelle_rpc_unpack_error_')
-                                    with os.fdopen(fd, 'wb') as f:
-                                        f.write(buf)
-                                    err_details += f" [debug: binary written to {dump_path}]"
-                                except Exception as dump_err:
-                                    err_details += f" [debug: failed to write binary: {dump_err}]"
-                            self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
-                            connection.write_error("Invalid RPC request")
-                            return
-                        try:
-                            func = Remote_Procedures[func_name]
-                        except KeyError:
-                            self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
-                            connection.write_error(f"Unknown procedure {func_name}")
-                            continue
-                        try:
-                            result = func(arg, connection)
-                        except Exception as e:
-                            self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
-                            connection.write_error(e)
-                            if self.debugging:
-                                raise
-                            continue
-                        connection.write(result)
-                    except ConnectionResetError as e:
-                        self.logger.debug(f"From {client_addr}, connection reset by peer: {e}")
+                        (func_name, arg) = await connection.read()
+                    except mp.UnpackException as e:
+                        buf = bytes(connection._debug_buffer) if connection._debug_buffer is not None else None
+                        err_details = f"{type(e).__name__}: {e}"
+                        if hasattr(e, 'unpacked') and hasattr(e, 'extra'):
+                            err_details += f" (unpacked={e.unpacked!r}, extra_bytes_hex={e.extra.hex()!s})" # type: ignore
+                        elif hasattr(connection.unpack, 'tell'):
+                            try:
+                                err_details += f" (stream_pos={connection.unpack.tell()})"
+                            except Exception:
+                                pass
+                        if buf is not None:
+                            try:
+                                fd, dump_path = tempfile.mkstemp(suffix='.bin', prefix='isabelle_rpc_unpack_error_')
+                                with os.fdopen(fd, 'wb') as f:
+                                    f.write(buf)
+                                err_details += f" [debug: binary written to {dump_path}]"
+                            except Exception as dump_err:
+                                err_details += f" [debug: failed to write binary: {dump_err}]"
+                        self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
+                        await connection.write_error("Invalid RPC request")
                         return
-                    except BrokenPipeError as e:
-                        self.logger.debug(f"From {client_addr}, broken pipe (peer closed): {e}")
-                        return
-                    except OSError as e:
-                        if e.errno == errno.ECONNRESET:
-                            self.logger.debug(f"From {client_addr}, connection reset by peer (ECONNRESET): {e}")
-                            return
-                        if e.errno == errno.EPIPE:
-                            self.logger.debug(f"From {client_addr}, broken pipe (EPIPE, peer closed): {e}")
-                            return
-                        raise
+                    try:
+                        func = Remote_Procedures[func_name]
+                    except KeyError:
+                        self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
+                        await connection.write_error(f"Unknown procedure {func_name}")
+                        continue
+                    try:
+                        result = await func(arg, connection)
                     except Exception as e:
+                        self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
+                        await connection.write_error(e)
                         if self.debugging:
-                            import traceback
-                            traceback.print_exc()
-                            self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
                             raise
-                        else:
-                            self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
-                            return
-            finally:
-                _thread_local.connection = None
+                        continue
+                    await connection.write(result)
+                except ConnectionResetError as e:
+                    self.logger.debug(f"From {client_addr}, connection reset by peer: {e}")
+                    return
+                except BrokenPipeError as e:
+                    self.logger.debug(f"From {client_addr}, broken pipe (peer closed): {e}")
+                    return
+                except OSError as e:
+                    if e.errno == errno.ECONNRESET:
+                        self.logger.debug(f"From {client_addr}, connection reset by peer (ECONNRESET): {e}")
+                        return
+                    if e.errno == errno.EPIPE:
+                        self.logger.debug(f"From {client_addr}, broken pipe (EPIPE, peer closed): {e}")
+                        return
+                    raise
+                except Exception as e:
+                    if self.debugging:
+                        import traceback
+                        traceback.print_exc()
+                        self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                        raise
+                    else:
+                        self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
+                        return
+        finally:
+            _connection_var.reset(token)
+            connection.close()
+
+    async def run_server(self) -> None:
+        if self.running:
+            raise RuntimeError(f"Isabelle RPC Host {self.addr} is already running")
+
+        self._loop = asyncio.get_running_loop()
+        self._server = await asyncio.start_server(
+            self.handle_client, self.host, self.port,
+            reuse_address=True, backlog=8)
+        self.running = True
+
+        self.logger.info(f"Start" + (" (debug mode: binary capture on unpack errors)" if self.debugging else ""))
+
+        async with self._server:
+            await self._server.serve_forever()
 
     def stop_server(self) -> None:
         """Stop the TCP server."""
         self.logger.info(f"Stopping server {self.addr}...")
         self.running = False
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
+        if self._server:
+            self._server.close()
         self.logger.info(f"Server {self.addr} stopped")
-
-    def run_server(self) -> None:
-        if self.running:
-            raise RuntimeError(f"Isabelle RPC Host {self.addr} is already running")
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.host, self.port))
-            self.socket.listen(8)
-            self.running = True
-
-            # Create thread pool executor for handling client connections
-            self.logger.info(f"Start" + (" (debug mode: binary capture on unpack errors)" if self.debugging else ""))
-
-            while self.running:
-                try:
-                    client_socket, client_addr = self.socket.accept()
-                    self.logger.debug(f"New client connected from {client_addr}")
-                    client_thread = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, client_addr)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
-
-                except socket.error as e:
-                    if self.running:
-                        self.logger.error(f"Socket error: {e}")
-
-        except Exception as e:
-            self.logger.error(f"Failed to start: {e}")
 
     def __enter__(self) -> 'Server':
         return self
@@ -391,14 +414,14 @@ class Server:
 # Built-in remote procedures
 
 @isabelle_remote_procedure("heartbeat")
-def _heartbeat_(arg, connection: Connection) -> None:
+async def _heartbeat_(arg, connection: Connection) -> None:
     """Built-in heartbeat RPC for connection health checks."""
     #connection.server.logger.info(f"Heartbeat from {connection.client_addr}")
     return None
 
 
 @isabelle_remote_procedure("load_pymodule")
-def _load_remote_procedures_(arg, connection: Connection):
+async def _load_remote_procedures_(arg, connection: Connection):
     """
     Load Python modules to register additional RPC procedures.
 
@@ -424,7 +447,7 @@ def _load_remote_procedures_(arg, connection: Connection):
 
 
 @isabelle_remote_procedure("call_heartbeat_callback")
-def _call_heartbeat_callback_(arg, connection: Connection) -> str:
+async def _call_heartbeat_callback_(arg, connection: Connection) -> str:
     """
     Call the Isabelle heartbeat callback.
 
@@ -442,14 +465,14 @@ def _call_heartbeat_callback_(arg, connection: Connection) -> str:
     logger.info(f"Calling isabelle_heartbeat callback from {connection.client_addr}")
 
     # Call the Isabelle heartbeat callback
-    heartbeat_msg = connection.callback("isabelle_heartbeat", None)
+    heartbeat_msg = await connection.callback("isabelle_heartbeat", None)
 
     logger.info(f"Received heartbeat: {heartbeat_msg}")
     return heartbeat_msg
 
 
 @isabelle_remote_procedure("generate_uuids")
-def _generate_uuids_(arg, connection: Connection):
+async def _generate_uuids_(arg, connection: Connection):
     count = int(arg)
     return [uuid.uuid4().bytes for _ in range(count)]
 
@@ -503,7 +526,7 @@ def mk_logger_(addr: str, log_file: str | None) -> logging.Logger:
 def launch_server_(addr: str, logger: logging.Logger, debugging: bool = False) -> None:
     _load_remote_procedures(logger)
     with Server(addr, logger, debugging) as server:
-        server.run_server()
+        asyncio.run(server.run_server())
 
 def fork_and_launch__():
     """
@@ -559,4 +582,3 @@ def fork_and_launch__():
     logger = mk_logger_(addr, log_file)
     debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
     launch_server_(addr, logger, debugging)
-

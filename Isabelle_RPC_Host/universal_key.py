@@ -84,10 +84,10 @@ class UndefinedEntity(Exception):
         super().__init__(f"Undefined {kind.label}: {name!r}")
 
 
-def universal_key_of(connection: Connection, kind: EntityKind, name: str) -> bytes:
+async def universal_key_of(connection: Connection, kind: EntityKind, name: str) -> bytes:
     """Request the universal key for an Isabelle entity via callback."""
     try:
-        return connection.callback("universal_key_of", (int(kind), name))
+        return await connection.callback("universal_key_of", (int(kind), name))
     except IsabelleError as e:
         msg = e.errors[0] if e.errors else str(e)
         if msg.startswith("Undefined "):

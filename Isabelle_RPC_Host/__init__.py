@@ -1,5 +1,5 @@
 from .rpc import (
-    DebugStream, IsabelleError, Connection,
+    IsabelleError, Connection,
     RemoteProcedure, Remote_Procedures, isabelle_remote_procedure,
     Server,
     isabelle_home, mk_logger_, launch_server_, fork_and_launch__,

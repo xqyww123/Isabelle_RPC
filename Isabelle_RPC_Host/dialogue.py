@@ -6,14 +6,14 @@ until the user clicks one.
 
 Usage::
 
-    answer = connection.dialogue("Continue?", ["Yes", "No"])
+    answer = await connection.dialogue("Continue?", ["Yes", "No"])
     # answer is "Yes" or "No"
 """
 
 from .rpc import Connection
 
 
-def _dialogue(self: Connection, question: str, options: list[str]) -> str:  # type: ignore
+async def _dialogue(self: Connection, question: str, options: list[str]) -> str:  # type: ignore
     """Show a dialogue in Isabelle's output panel with clickable options.
 
     Blocks until the user clicks one of the options.
@@ -25,8 +25,7 @@ def _dialogue(self: Connection, question: str, options: list[str]) -> str:  # ty
     Returns:
         The option string the user clicked.
     """
-    return self.callback("dialogue", (question, options))
+    return await self.callback("dialogue", (question, options))
 
 
 Connection.dialogue = _dialogue  # type: ignore
-

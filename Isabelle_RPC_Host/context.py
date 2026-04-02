@@ -38,7 +38,7 @@ from .universal_key import EntityKind, universal_key
 #     return _debug_key_names.get(uk)
 
 
-def _call(connection: Connection, callback_name: str,
+async def _call(connection: Connection, callback_name: str,
           theory: str | None, the_theory_only: bool,
           exclude: list[str],
           term_patterns: list[str] = [],
@@ -47,7 +47,7 @@ def _call(connection: Connection, callback_name: str,
           name_contains: list[str] = [],
           limit: int = -1) -> tuple[list[universal_key], list[str]]:
     """Returns (keys, warnings). limit<0 means no limit."""
-    keys_raw, warnings = connection.callback(callback_name,
+    keys_raw, warnings = await connection.callback(callback_name,
                 (theory, the_theory_only, exclude,
                  term_patterns, type_patterns, theories_include,
                  name_contains, limit))
@@ -64,7 +64,7 @@ def _is_default(theory: str | None, the_theory_only: bool, exclude: list[str],
             and not name_contains and limit < 0)
 
 
-def _cached_or_call(connection: Connection, attr: str, callback_name: str,
+async def _cached_or_call(connection: Connection, attr: str, callback_name: str,
                     theory: str | None, the_theory_only: bool,
                     exclude: list[str],
                     term_patterns: list[str] = [],
@@ -78,16 +78,16 @@ def _cached_or_call(connection: Connection, attr: str, callback_name: str,
                    name_contains, limit):
         cached = getattr(connection, attr, None)
         if cached is None:
-            keys, _ = _call(connection, callback_name, None, False, [])
+            keys, _ = await _call(connection, callback_name, None, False, [])
             setattr(connection, attr, keys)
             return keys, []
         return cached, []
-    return _call(connection, callback_name, theory, the_theory_only, exclude,
+    return await _call(connection, callback_name, theory, the_theory_only, exclude,
                  term_patterns, type_patterns, theories_include,
                  name_contains, limit)
 
 
-def constants(connection: Connection, theory: str | None = None,
+async def constants(connection: Connection, theory: str | None = None,
               the_theory_only: bool = False,
               theories_not_include: list[str] = [],
               type_patterns: list[str] = [],
@@ -97,13 +97,13 @@ def constants(connection: Connection, theory: str | None = None,
     """Return (keys, warnings) for all constants.
     Only type_patterns apply (constants have no proposition; term patterns are ignored).
     """
-    return _cached_or_call(connection, "_ctx_constants", "Context.constants",
+    return await _cached_or_call(connection, "_ctx_constants", "Context.constants",
                            theory, the_theory_only, theories_not_include,
                            [], type_patterns, theories_include,
                            name_contains, limit)
 
 
-def theorems(connection: Connection, theory: str | None = None,
+async def theorems(connection: Connection, theory: str | None = None,
              the_theory_only: bool = False,
              theories_not_include: list[str] = [],
              term_patterns: list[str] = [],
@@ -112,13 +112,13 @@ def theorems(connection: Connection, theory: str | None = None,
              name_contains: list[str] = [],
              limit: int = -1) -> tuple[list[universal_key], list[str]]:
     """Return (keys, warnings) for all theorems."""
-    return _cached_or_call(connection, "_ctx_theorems", "Context.theorems",
+    return await _cached_or_call(connection, "_ctx_theorems", "Context.theorems",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit)
 
 
-def types(connection: Connection, theory: str | None = None,
+async def types(connection: Connection, theory: str | None = None,
           the_theory_only: bool = False,
           theories_not_include: list[str] = [],
           theories_include: list[str] = [],
@@ -127,13 +127,13 @@ def types(connection: Connection, theory: str | None = None,
     """Return (keys, warnings) for all types.
     Pattern parameters are not applicable to types.
     """
-    return _cached_or_call(connection, "_ctx_types", "Context.types",
+    return await _cached_or_call(connection, "_ctx_types", "Context.types",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit)
 
 
-def classes(connection: Connection, theory: str | None = None,
+async def classes(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
             theories_not_include: list[str] = [],
             theories_include: list[str] = [],
@@ -142,13 +142,13 @@ def classes(connection: Connection, theory: str | None = None,
     """Return (keys, warnings) for all type classes.
     Pattern parameters are not applicable to classes.
     """
-    return _cached_or_call(connection, "_ctx_classes", "Context.classes",
+    return await _cached_or_call(connection, "_ctx_classes", "Context.classes",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit)
 
 
-def locales(connection: Connection, theory: str | None = None,
+async def locales(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
             theories_not_include: list[str] = [],
             theories_include: list[str] = [],
@@ -157,13 +157,13 @@ def locales(connection: Connection, theory: str | None = None,
     """Return (keys, warnings) for all locales.
     Pattern parameters are not applicable to locales.
     """
-    return _cached_or_call(connection, "_ctx_locales", "Context.locales",
+    return await _cached_or_call(connection, "_ctx_locales", "Context.locales",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit)
 
 
-def introduction_rules(connection: Connection, theory: str | None = None,
+async def introduction_rules(connection: Connection, theory: str | None = None,
                        the_theory_only: bool = False,
                        theories_not_include: list[str] = [],
                        term_patterns: list[str] = [],
@@ -172,13 +172,13 @@ def introduction_rules(connection: Connection, theory: str | None = None,
                        name_contains: list[str] = [],
                        limit: int = -1) -> tuple[list[universal_key], list[str]]:
     """Return (keys, warnings) for all introduction rules."""
-    return _cached_or_call(connection, "_ctx_intro_rules", "Context.introduction_rules",
+    return await _cached_or_call(connection, "_ctx_intro_rules", "Context.introduction_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit)
 
 
-def elimination_rules(connection: Connection, theory: str | None = None,
+async def elimination_rules(connection: Connection, theory: str | None = None,
                       the_theory_only: bool = False,
                       theories_not_include: list[str] = [],
                       term_patterns: list[str] = [],
@@ -187,7 +187,7 @@ def elimination_rules(connection: Connection, theory: str | None = None,
                       name_contains: list[str] = [],
                       limit: int = -1) -> tuple[list[universal_key], list[str]]:
     """Return (keys, warnings) for all elimination rules."""
-    return _cached_or_call(connection, "_ctx_elim_rules", "Context.elimination_rules",
+    return await _cached_or_call(connection, "_ctx_elim_rules", "Context.elimination_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit)
@@ -203,7 +203,7 @@ _KIND_TO_FUNC = {
     EntityKind.ELIMINATION_RULE: elimination_rules,
 }
 
-def entities_of(connection: Connection, kinds: list[EntityKind],
+async def entities_of(connection: Connection, kinds: list[EntityKind],
                 theory: str | None = None,
                 the_theory_only: bool = False,
                 theories_not_include: list[str] = [],
@@ -229,13 +229,13 @@ def entities_of(connection: Connection, kinds: list[EntityKind],
             continue
         # Pass only the parameters each function accepts
         if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE):
-            keys, warnings = func(connection, theory, the_theory_only,
+            keys, warnings = await func(connection, theory, the_theory_only,
                                   theories_not_include,
                                   theories_include=theories_include,
                                   name_contains=name_contains,
                                   limit=limit)
         elif kind == EntityKind.CONSTANT:
-            keys, warnings = func(connection, theory, the_theory_only,
+            keys, warnings = await func(connection, theory, the_theory_only,
                                   theories_not_include,
                                   type_patterns=type_patterns,
                                   theories_include=theories_include,
@@ -243,7 +243,7 @@ def entities_of(connection: Connection, kinds: list[EntityKind],
                                   limit=limit)
         else:
             # THEOREM, INTRODUCTION_RULE, ELIMINATION_RULE
-            keys, warnings = func(connection, theory, the_theory_only,
+            keys, warnings = await func(connection, theory, the_theory_only,
                                   theories_not_include,
                                   term_patterns=term_patterns,
                                   type_patterns=type_patterns,
@@ -255,7 +255,7 @@ def entities_of(connection: Connection, kinds: list[EntityKind],
     return result, all_warnings
 
 
-def theory_long_name(connection: Connection) -> str:
+async def theory_long_name(connection: Connection) -> str:
     """Return the long theory name of the Isabelle context where the RPC was initiated.
 
     Args:
@@ -263,6 +263,6 @@ def theory_long_name(connection: Connection) -> str:
     """
     cached = getattr(connection, "_theory_long_name", None)
     if cached is None:
-        cached = connection.callback("Context.theory_long_name", None)
+        cached = await connection.callback("Context.theory_long_name", None)
         connection._theory_long_name = cached  # type: ignore
     return cached

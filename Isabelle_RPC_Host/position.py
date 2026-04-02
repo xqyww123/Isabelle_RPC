@@ -240,7 +240,7 @@ from watchdog.events import FileSystemEventHandler
 
 class _CacheInvalidator(FileSystemEventHandler):
     def on_modified(self, event):
-        if not event.is_directory:
+        if not event.is_directory and isinstance(event.src_path, str):
             path = os.path.realpath(event.src_path)
             _file_index_cache.pop(path, None)
 
@@ -488,7 +488,7 @@ from .rpc import isabelle_remote_procedure, Connection
 
 
 @isabelle_remote_procedure("position.offset_to_line_column")
-def _offset_to_line_column(arg: tuple, connection: Connection):
+async def _offset_to_line_column(arg: tuple, connection: Connection):
     """Given (file_path, offset), return (line, column) in ASCII coordinates."""
     file_path, offset = arg
     if isinstance(file_path, bytes):
@@ -499,7 +499,7 @@ def _offset_to_line_column(arg: tuple, connection: Connection):
 
 
 @isabelle_remote_procedure("position.line_column_to_offset")
-def _line_column_to_offset(arg: tuple, connection: Connection):
+async def _line_column_to_offset(arg: tuple, connection: Connection):
     """Given (file_path, line, column), return symbol offset."""
     file_path, line, column = arg
     if isinstance(file_path, bytes):

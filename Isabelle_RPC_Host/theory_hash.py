@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from typing import Any
@@ -29,12 +30,12 @@ def theory_xxhash128(file_path: str, parent_hashes: list[bytes]) -> theory_hash:
     return h.digest()
 
 
-def theory_name_of(connection: Connection, h: theory_hash) -> str | None:
+async def theory_name_of(connection: Connection, h: theory_hash) -> str | None:
     """Look up the long name of a theory given its hash.
 
     Returns None if the hash has not been seen in the current Isabelle runtime.
     """
-    return connection.callback("Theory_Hash.theory_name_of", h)
+    return await connection.callback("Theory_Hash.theory_name_of", h)
 
 
 import atexit
@@ -63,7 +64,7 @@ def _close_theory_hash_store() -> None:
 
 
 @isabelle_remote_procedure("Theory_Hash.store")
-def _store_theory_hashes(arg: Any, connection: Connection) -> None:
+async def _store_theory_hashes(arg: Any, connection: Connection) -> None:
     env = open_theory_hash_store()
     now = int(time.time())
     with env.begin(write=True) as txn:
@@ -74,7 +75,7 @@ def _store_theory_hashes(arg: Any, connection: Connection) -> None:
 
 
 @isabelle_remote_procedure("xxhash128_theory")
-def _theory_xxhash128(arg: Any, connection: Connection) -> theory_hash:
+async def _theory_xxhash128(arg: Any, connection: Connection) -> theory_hash:
     (file_path, parent_hashes) = arg
     if isinstance(file_path, bytes):
         file_path = file_path.decode("utf-8")
