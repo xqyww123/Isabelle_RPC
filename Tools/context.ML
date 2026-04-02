@@ -48,9 +48,11 @@ structure Context_Callbacks : CONTEXT_CALLBACKS = struct
 
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 
-val arg_schema = unpackTuple6 (unpackOption unpackString, unpackBool,
+val arg_schema = unpackTuple8 (unpackOption unpackString, unpackBool,
       unpackList unpackString, unpackList unpackString,
-      unpackList unpackString, unpackList unpackString)
+      unpackList unpackString, unpackList unpackString,
+      unpackList unpackString (* name_contains *),
+      unpackInt (* limit, 0 = no limit *))
 
 val ret_schema = packPair (packList Universal_Key.pack_universal_key,
                            packList packString (* warnings *))
@@ -115,29 +117,49 @@ fun resolve_include_set context names =
 (* Parse term and type pattern strings. Returns (term list, typ list, warnings).
    Empty input lists produce empty output lists (= no restriction).
    Warns when term patterns contain undeclared free variables
-   (which likely indicate misspelled constant names). *)
+   (which likely indicate misspelled constant names).
+   Parse errors (ERROR, Par_Exn) are caught and returned as warnings
+   with YXML markup stripped. *)
 fun parse_patterns context (term_pat_strs, type_pat_strs) =
   if null term_pat_strs andalso null type_pat_strs then ([], [], [])
   else
     let val ctxt = Context.cases Proof_Context.init_global I context
         val ctxt_pat = Proof_Context.set_mode Proof_Context.mode_pattern ctxt
-        val term_pats = map (Syntax.read_term ctxt_pat) term_pat_strs
-        val warnings = maps (fn (pat_str, pat) =>
-          let val undeclared = filter (not o Variable.is_declared ctxt)
-                                      (Term.add_free_names pat [])
-          in if null undeclared then []
-             else let val plural = length undeclared > 1
-                  in [String.concat [
-                      "Term pattern ", quote pat_str,
-                      " contains undeclared free variable",
-                      if plural then "s: " else ": ",
-                      commas_quote undeclared, ". ",
-                      if plural then "They are likely misspelled constants."
-                      else "It is likely a misspelled constant."]]
-                  end
-          end) (term_pat_strs ~~ term_pats)
-        val type_pats = map (Syntax.read_typ ctxt_pat) type_pat_strs
-    in (term_pats, type_pats, warnings)
+        fun handle_parse_exn exn =
+          case Par_Exn.dest exn of
+            SOME exns =>
+              let val msgs = map_filter (fn ERROR msg => SOME msg | _ => NONE) exns
+              in if length msgs = length exns
+                 then map RPC_Pretty.trim_markup msgs
+                 else Exn.reraise exn
+              end
+          | NONE =>
+              (case exn of
+                ERROR msg => [RPC_Pretty.trim_markup msg]
+              | _ => Exn.reraise exn)
+        val (term_pats, term_parse_warnings) =
+          \<^try>\<open>(map (Syntax.read_term ctxt_pat) term_pat_strs, [])
+          catch exn => ([], handle_parse_exn exn)\<close>
+        val warnings = term_parse_warnings @
+          (if null term_pats then []
+           else maps (fn (pat_str, pat) =>
+             let val undeclared = filter (not o Variable.is_declared ctxt)
+                                         (Term.add_free_names pat [])
+             in if null undeclared then []
+                else let val plural = length undeclared > 1
+                     in [String.concat [
+                         "Term pattern ", quote pat_str,
+                         " contains undeclared free variable",
+                         if plural then "s: " else ": ",
+                         commas_quote undeclared, ". ",
+                         if plural then "They are likely misspelled constants."
+                         else "It is likely a misspelled constant."]]
+                     end
+             end) (term_pat_strs ~~ term_pats))
+        val (type_pats, type_parse_warnings) =
+          \<^try>\<open>(map (Syntax.read_typ ctxt_pat) type_pat_strs, [])
+          catch exn => ([], handle_parse_exn exn)\<close>
+    in (term_pats, type_pats, warnings @ type_parse_warnings)
     end
 
 (* Collect type constructor names from a type. *)
@@ -214,29 +236,52 @@ fun mk_const_pattern_matcher ctx (type_pats : typ list) : string -> bool =
     end
 
 
+(* --- name_contains filter: case-insensitive substring match on fully qualified name --- *)
+
+fun mk_name_filter [] = (fn _ : string => true)
+  | mk_name_filter pats =
+      let val pats_lower = map (String.map Char.toLower) pats
+      in fn name =>
+        let val name_lower = String.map Char.toLower name
+        in List.all (fn pat => String.isSubstring pat name_lower) pats_lower end
+      end
+
 (* --- ns_filter: shared for constants, types, classes, locales --- *)
 
-fun ns_filter key_of space target_name exclude_set include_set extra_filter filter_opt =
-  Name_Space.get_names space |> map_filter (fn name =>
-    (let val entry = Name_Space.the_entry space name
-     in if #concealed entry
-           orelse Long_Name.is_hidden (Name_Space.intern space name) then NONE
-        else
-          let val thy_name = #theory_long_name entry
-              val pass = case exclude_set of
-                   NONE => thy_name = target_name
-                 | SOME es => not (Strhashtab.defined es thy_name)
-              val pass_include = case include_set of
-                   NONE => true
-                 | SOME is => Strhashtab.defined is thy_name
-          in if not pass orelse not pass_include then NONE
-             else if not (extra_filter name) then NONE
-             else case filter_opt of
-                    NONE => SOME (key_of name)
-                  | SOME f => if f name then SOME (key_of name) else NONE
+fun ns_filter limit key_of space target_name exclude_set include_set extra_filter filter_opt =
+  let
+    val names = Name_Space.get_names space
+    val seen = Bytehashtab.empty 128
+    fun collect [] acc _ = rev acc
+      | collect _ acc 0 = rev acc
+      | collect (name :: rest) acc remaining =
+          let val result =
+            (let val entry = Name_Space.the_entry space name
+             in if #concealed entry
+                   orelse Long_Name.is_hidden (Name_Space.intern space name) then NONE
+                else
+                  let val thy_name = #theory_long_name entry
+                      val pass = case exclude_set of
+                           NONE => thy_name = target_name
+                         | SOME es => not (Strhashtab.defined es thy_name)
+                      val pass_include = case include_set of
+                           NONE => true
+                         | SOME is => Strhashtab.defined is thy_name
+                  in if not pass orelse not pass_include then NONE
+                     else if not (extra_filter name) then NONE
+                     else case filter_opt of
+                            NONE => SOME (key_of name)
+                          | SOME f => if f name then SOME (key_of name) else NONE
+                  end
+             end) handle ERROR _ => NONE
+          in case result of
+               NONE => collect rest acc remaining
+             | SOME k =>
+                 if Bytehashtab.defined seen k then collect rest acc remaining
+                 else (Bytehashtab.update seen (k, ());
+                       collect rest (k :: acc) (remaining - 1))
           end
-     end) handle ERROR _ => NONE)
-  |> dedup_keys
+  in collect names [] limit end
 
 
 (* --- Entity enumeration callbacks --- *)
@@ -248,7 +293,7 @@ fun make_constants_callback filter_opt (context : Context.generic)
     arg_schema = arg_schema,
     ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude,
-                   _, type_pat_strs, theories_include) =>
+                    _, type_pat_strs, theories_include, name_contains, limit) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -259,7 +304,9 @@ fun make_constants_callback filter_opt (context : Context.generic)
         val include_set = resolve_include_set context theories_include
         val (_, type_pats, warnings) = parse_patterns context ([], type_pat_strs)
         val const_pat_filter = mk_const_pattern_matcher ctx type_pats
-        val keys = ns_filter key_of space target_name exclude_set include_set const_pat_filter filter_opt
+        val name_filter = mk_name_filter name_contains
+        val keys = ns_filter limit key_of space target_name exclude_set include_set
+                    (fn name => const_pat_filter name andalso name_filter name) filter_opt
       in (keys, warnings) end,
     timeout = NONE
   }
@@ -271,7 +318,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
     arg_schema = arg_schema,
     ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude,
-                   term_pat_strs, type_pat_strs, theories_include) =>
+                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val thy = Context.theory_of ctx
@@ -284,14 +331,18 @@ fun make_theorems_callback filter_opt (context : Context.generic)
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
-        val keys = Facts.dest_static false [] facts
-         |> maps (fn (name, thms) =>
+        val name_filter = mk_name_filter name_contains
+        val seen = Bytehashtab.empty 128
+        val (keys, _) = fold (fn (name, thms) => fn (acc, remaining) =>
+           if remaining = 0 then (acc, 0)
+           else
            let val entry = try (Name_Space.the_entry fact_space) name
            in case entry of
-                NONE => []
+                NONE => (acc, remaining)
               | SOME e =>
                   if #concealed e
-                     orelse Long_Name.is_hidden (Name_Space.intern fact_space name) then []
+                     orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
+                  then (acc, remaining)
                   else
                   let val thy_name = #theory_long_name e
                       val dominated = case exclude_set of
@@ -300,20 +351,29 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                       val included = case include_set of
                            NONE => true
                          | SOME is => Strhashtab.defined is thy_name
-                  in if dominated orelse not included then []
-                     else map_filter (fn thm =>
+                  in if dominated orelse not included then (acc, remaining)
+                     else if not (name_filter name) then (acc, remaining)
+                     else fold (fn thm => fn (acc, remaining) =>
+                       if remaining = 0 then (acc, 0)
+                       else
                        let val thm' = Thm.transfer thy thm
-                       in if not (thm_matches thm') then NONE
-                          else case filter_opt of
-                            NONE => SOME (Universal_Key.key_of_theorem' NONE ctx thm')
-                          | SOME f => if f (name, thm')
-                                      then SOME (Universal_Key.key_of_theorem' NONE ctx thm')
-                                      else NONE
-                       end) thms
+                       in if not (thm_matches thm') then (acc, remaining)
+                          else
+                            let val pass_filter = case filter_opt of
+                                  NONE => true
+                                | SOME f => f (name, thm')
+                            in if not pass_filter then (acc, remaining)
+                               else
+                                 let val k = Universal_Key.key_of_theorem' NONE ctx thm'
+                                 in if Bytehashtab.defined seen k then (acc, remaining)
+                                    else (Bytehashtab.update seen (k, ());
+                                          (k :: acc, remaining - 1))
+                                 end
+                            end
+                       end) thms (acc, remaining)
                   end
-           end)
-         |> dedup_keys
-      in (keys, warnings) end,
+           end) (Facts.dest_static false [] facts) ([], limit)
+      in (rev keys, warnings) end,
     timeout = NONE
   }
 
@@ -323,7 +383,7 @@ fun make_types_callback filter_opt (context : Context.generic)
     name = "Context.types",
     arg_schema = arg_schema,
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include) =>
+    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -332,7 +392,7 @@ fun make_types_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-      in (ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt, []) end,
+      in (ns_filter limit key_of space target_name exclude_set include_set (mk_name_filter name_contains) filter_opt, []) end,
     timeout = NONE
   }
 
@@ -342,7 +402,7 @@ fun make_classes_callback filter_opt (context : Context.generic)
     name = "Context.classes",
     arg_schema = arg_schema,
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include) =>
+    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -351,7 +411,7 @@ fun make_classes_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-      in (ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt, []) end,
+      in (ns_filter limit key_of space target_name exclude_set include_set (mk_name_filter name_contains) filter_opt, []) end,
     timeout = NONE
   }
 
@@ -361,7 +421,7 @@ fun make_locales_callback filter_opt (context : Context.generic)
     name = "Context.locales",
     arg_schema = arg_schema,
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include) =>
+    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -370,7 +430,7 @@ fun make_locales_callback filter_opt (context : Context.generic)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
-      in (ns_filter key_of space target_name exclude_set include_set (fn _ => true) filter_opt, []) end,
+      in (ns_filter limit key_of space target_name exclude_set include_set (mk_name_filter name_contains) filter_opt, []) end,
     timeout = NONE
   }
 
@@ -419,7 +479,7 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
     arg_schema = arg_schema,
     ret_schema = ret_schema,
     function = fn (target_thy_opt, the_theory_only, exclude,
-                   term_pat_strs, type_pat_strs, theories_include) =>
+                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val thy = Context.theory_of ctx
@@ -430,14 +490,17 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
         val seen : unit Strhashtab.table = Strhashtab.empty 128
+        val key_seen = Bytehashtab.empty 128
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
-        val keys =
-        map_filter (fn thm =>
+        val name_filter = mk_name_filter name_contains
+        val (keys, _) = fold (fn thm => fn (acc, remaining) =>
+          if remaining = 0 then (acc, 0)
+          else
           let val thm = Thm.transfer thy thm
               val name = Thm.derivation_name thm
-          in if name = "" orelse Strhashtab.defined seen name then NONE
+          in if name = "" orelse Strhashtab.defined seen name then (acc, remaining)
              else
                let
                  val thy_name_of = case Thm.derivation_id thm of
@@ -454,17 +517,25 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
                    | SOME is => (case thy_name_of of
                          SOME tn => Strhashtab.defined is tn
                        | NONE => true)
-               in if not pass orelse not pass_include then NONE
-                  else if not (thm_matches thm) then NONE
-                  else (Strhashtab.update seen (name, ());
-                        case filter_opt of
-                          NONE => SOME (key_of ctx thm)
-                        | SOME f => if f (name, thm) then SOME (key_of ctx thm)
-                                    else NONE)
+               in if not pass orelse not pass_include then (acc, remaining)
+                  else if not (name_filter name) then (acc, remaining)
+                  else if not (thm_matches thm) then (acc, remaining)
+                  else
+                    let val pass_filter = case filter_opt of
+                          NONE => true
+                        | SOME f => f (name, thm)
+                    in if not pass_filter then (acc, remaining)
+                       else
+                         let val k = key_of ctx thm
+                         in (Strhashtab.update seen (name, ());
+                             if Bytehashtab.defined key_seen k then (acc, remaining)
+                             else (Bytehashtab.update key_seen (k, ());
+                                   (k :: acc, remaining - 1)))
+                         end
+                    end
                end
-          end) thms
-        |> dedup_keys
-      in (keys, warnings) end,
+          end) thms ([], limit)
+      in (rev keys, warnings) end,
     timeout = NONE
   }
 in

@@ -72,6 +72,8 @@ functor MessagePack(S : sig
     val unpackTuple4 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker -> ('a * 'b * 'c * 'd) unpacker
     val unpackTuple5 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker -> ('a * 'b * 'c * 'd * 'e) unpacker
     val unpackTuple6 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker -> ('a * 'b * 'c * 'd * 'e * 'f) unpacker
+    val unpackTuple7 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker * 'g unpacker -> ('a * 'b * 'c * 'd * 'e * 'f * 'g) unpacker
+    val unpackTuple8 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker * 'g unpacker * 'h unpacker -> ('a * 'b * 'c * 'd * 'e * 'f * 'g * 'h) unpacker
 
     val unpackMapFold : ('a unpacker * 'b unpacker) -> ('a * 'b * 'c -> 'c) -> 'c -> 'c unpacker
     val unpackPairList : ('a unpacker * 'b unpacker) -> ('a * 'b) list unpacker
@@ -548,8 +550,37 @@ end = struct
       in
         ((v1, v2, v3, v4, v5, v6), ins6)
       end
-  
-    local 
+
+    fun unpackTuple7 (u1, u2, u3, u4, u5, u6, u7) ins =
+      let
+        val ins0 = expect (fixArray 7) ins
+        val (v1, ins1) = u1 ins0
+        val (v2, ins2) = u2 ins1
+        val (v3, ins3) = u3 ins2
+        val (v4, ins4) = u4 ins3
+        val (v5, ins5) = u5 ins4
+        val (v6, ins6) = u6 ins5
+        val (v7, ins7) = u7 ins6
+      in
+        ((v1, v2, v3, v4, v5, v6, v7), ins7)
+      end
+
+    fun unpackTuple8 (u1, u2, u3, u4, u5, u6, u7, u8) ins =
+      let
+        val ins0 = expect (fixArray 8) ins
+        val (v1, ins1) = u1 ins0
+        val (v2, ins2) = u2 ins1
+        val (v3, ins3) = u3 ins2
+        val (v4, ins4) = u4 ins3
+        val (v5, ins5) = u5 ins4
+        val (v6, ins6) = u6 ins5
+        val (v7, ins7) = u7 ins6
+        val (v8, ins8) = u8 ins7
+      in
+        ((v1, v2, v3, v4, v5, v6, v7, v8), ins8)
+      end
+
+    local
       fun isPositiveFixnum byte =
         byte >= (word8 0wx00) andalso byte <= (word8 0wx7f)
       fun isNegativeFixnum byte =
