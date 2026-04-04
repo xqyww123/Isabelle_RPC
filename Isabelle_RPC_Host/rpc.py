@@ -55,7 +55,12 @@ class Connection:
         self.server = server
         self.unpack = mp.Unpacker()  # feed mode: no stream, manually feed bytes
         self._debug_buffer: bytearray | None = bytearray() if server.debugging else None
-        self._callback_lock = asyncio.Lock()
+        # Multiplexed callback protocol (tag 0 = success, 1 = error, N>1 = callback)
+        self._next_callback_id = 2
+        self._pending: dict[int, asyncio.Future[Any]] = {}  # callback_id → Future
+        self._user_channel: asyncio.Queue[tuple[int, Any]] = asyncio.Queue()  # (tag, payload)
+        self._reader_task: asyncio.Task[None] | None = None
+        self._write_lock = asyncio.Lock()  # serialize writes to the socket
 
     async def _feed_and_unpack(self) -> Any:
         """Read bytes from StreamReader, feed to Unpacker, return next msgpack object."""
@@ -70,128 +75,106 @@ class Connection:
                     self._debug_buffer.extend(data)
                 self.unpack.feed(data)
 
+    async def _start_reader(self) -> None:
+        """Start the background reader task that dispatches messages by tag."""
+        self._reader_task = asyncio.create_task(self._reader_loop())
+
+    async def _reader_loop(self) -> None:
+        """Read (tag, payload) messages and dispatch by tag."""
+        try:
+            while True:
+                (tag, payload) = await self._feed_and_unpack()
+                if tag <= 1:  # user channel (0 = data, 1 = error)
+                    await self._user_channel.put((tag, payload))
+                else:  # callback channel N > 1
+                    future = self._pending.pop(tag, None)
+                    if future is not None and not future.done():
+                        future.set_result(payload)
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            # Connection closed — unblock any pending waiters
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(ConnectionResetError("peer closed connection"))
+            self._pending.clear()
+            await self._user_channel.put(None)  # sentinel to unblock read()
+
+    def _stop_reader(self) -> None:
+        """Cancel the background reader task."""
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            self._reader_task = None
+
     async def read(self) -> Any:
-        (ret, err) = await self._feed_and_unpack()
-        if err is not None:
-            raise IsabelleError(*err)
+        """Read next RPC request from user channel (tag 0) or raise on error (tag 1)."""
+        msg = await self._user_channel.get()
+        if msg is None:
+            raise ConnectionResetError("peer closed connection")
+        (tag, payload) = msg
+        if tag == 1:  # remote error
+            raise IsabelleError(*payload)
         if self._debug_buffer is not None:
             self._debug_buffer.clear()
-        return ret
+        return payload
 
     async def write(self, data: Any) -> None:
-        """Send success response with tag 1: (1, result)."""
-        self.writer.write(mp.packb((1, data)))  # type: ignore[arg-type]
-        await self.writer.drain()
+        """Send success response: (0, result)."""
+        async with self._write_lock:
+            self.writer.write(mp.packb((0, data)))  # type: ignore[arg-type]
+            await self.writer.drain()
 
     async def write_error(self, error: Any) -> None:
-        """Send error response with tag 2: (2, error_message)."""
-        self.writer.write(mp.packb((2, str(error))))  # type: ignore[arg-type]
-        await self.writer.drain()
+        """Send error response: (1, error_string)."""
+        async with self._write_lock:
+            self.writer.write(mp.packb((1, str(error))))  # type: ignore[arg-type]
+            await self.writer.drain()
 
     async def callback(self, name: str, arg: Any) -> Any:
-        """Call an Isabelle callback function with 2-phase protocol.
+        """Call an Isabelle callback function with 2-phase multiplexed protocol.
 
-        Phase 1: Send callback name, wait for lookup confirmation
-        Phase 2: If found, send argument and wait for execution result
+        Each callback gets a unique ID (tag > 0). The reader task routes
+        responses by tag, so multiple callbacks can be in-flight concurrently
+        and callbacks can be called from within isabelle_remote_procedure handlers.
 
-        Args:
-            name: The callback function name
-            arg: The argument to pass to the callback
-
-        Returns:
-            The result returned by the callback
-
-        Raises:
-            IsabelleError: If the callback is not found or execution fails
+        The write lock is held across both phases to prevent interleaving
+        of concurrent callbacks — Isabelle's dispatch_loop reads phase 1
+        then immediately reads phase 2, so they must be adjacent in the
+        byte stream.  The await for the phase-1 ack is safe inside the
+        lock because responses arrive via the independent _reader_loop.
         """
-        async def phase2_protocol(conn: 'Connection') -> Any:
-            # Phase 2: Send argument
-            conn.writer.write(mp.packb(arg))  # type: ignore[arg-type]
-            await conn.writer.drain()
+        loop = asyncio.get_running_loop()
+        cb_id = self._next_callback_id
+        self._next_callback_id += 1
 
-            # Read Phase 2 response: execution result
-            (result, error) = await conn._feed_and_unpack()
+        async with self._write_lock:
+            # Phase 1: Send (cb_id, name), wait for lookup confirmation
+            phase1_future: asyncio.Future[Any] = loop.create_future()
+            self._pending[cb_id] = phase1_future
+            self.writer.write(mp.packb((cb_id, name)))  # type: ignore[arg-type]
+            await self.writer.drain()
+            (phase1_result, phase1_error) = await phase1_future
 
-            if error is not None:
-                raise IsabelleError([error], None)
+            if phase1_error is not None:
+                raise IsabelleError([phase1_error], None)
 
-            if conn._debug_buffer is not None:
-                conn._debug_buffer.clear()
+            # Phase 2: Send (cb_id, arg), wait for execution result
+            phase2_future: asyncio.Future[Any] = loop.create_future()
+            self._pending[cb_id] = phase2_future
+            self.writer.write(mp.packb((cb_id, arg)))  # type: ignore[arg-type]
+            await self.writer.drain()
 
-            return result
+        (result, error) = await phase2_future
 
-        return await self.raw_callback(name, phase2_protocol)
+        if error is not None:
+            raise IsabelleError([error], None)
+
+        if self._debug_buffer is not None:
+            self._debug_buffer.clear()
+
+        return result
 
     async def config_lookup(self, name: str) -> Any:
         """Look up an Isabelle config option by name via the Config.lookup callback."""
         return await self.callback("Config.lookup", name)
-
-    def _unpack_sync(self) -> Any:
-        """Blocking unpack via direct socket I/O.
-
-        Drains the StreamReader's internal buffer (``_buffer``) first, then
-        falls back to blocking ``sock.recv``.  Safe to call from the event
-        loop thread because the caller is blocking the loop — no concurrent
-        reader exists for this connection.
-
-        Note: accesses ``StreamReader._buffer`` which is a private but
-        stable CPython attribute (unchanged since Python 3.8).
-        """
-        while True:
-            try:
-                return self.unpack.unpack()
-            except mp.OutOfData:
-                # 1. Drain StreamReader's internal buffer
-                buf = self.reader._buffer          # type: ignore[union-attr]
-                if buf:
-                    data = bytes(buf)
-                    buf.clear()
-                    if self._debug_buffer is not None:
-                        self._debug_buffer.extend(data)
-                    self.unpack.feed(data)
-                    continue
-                # 2. Blocking recv from raw socket
-                old_blocking = self.sock.getblocking()
-                try:
-                    self.sock.setblocking(True)
-                    data = self.sock.recv(65536)
-                finally:
-                    self.sock.setblocking(old_blocking)
-                if not data:
-                    raise ConnectionResetError("peer closed connection")
-                if self._debug_buffer is not None:
-                    self._debug_buffer.extend(data)
-                self.unpack.feed(data)
-
-    def callback_sync(self, name: str, arg: Any) -> Any:
-        """Blocking callback via direct socket I/O.
-
-        Safe to call from both the event loop thread and non-event-loop
-        threads.  Uses ``sock.sendall`` for writes and ``_unpack_sync``
-        for reads, bypassing asyncio StreamReader/StreamWriter entirely.
-        """
-        old_blocking = self.sock.getblocking()
-        try:
-            self.sock.setblocking(True)
-            # Phase 1: send callback name
-            self.sock.sendall(mp.packb((0, name)))  # type: ignore[arg-type]
-            (phase1_result, phase1_error) = self._unpack_sync()
-            if phase1_error is not None:
-                raise IsabelleError([phase1_error], None)
-            # Phase 2: send argument, read result
-            self.sock.sendall(mp.packb(arg))  # type: ignore[arg-type]
-            (result, error) = self._unpack_sync()
-            if error is not None:
-                raise IsabelleError([error], None)
-            if self._debug_buffer is not None:
-                self._debug_buffer.clear()
-            return result
-        finally:
-            self.sock.setblocking(old_blocking)
-
-    def config_lookup_sync(self, name: str) -> Any:
-        """Blocking config lookup via direct socket I/O."""
-        return self.callback_sync("Config.lookup", name)
 
     # -- Isabelle logging via "log" callback ----------------------------------
 
@@ -215,63 +198,6 @@ class Connection:
         """Print a normal message in Isabelle's output."""
         self.server.logger.info(msg)
         await self.callback("log", (int(self.LogType.WRITELN), msg))
-
-    def tracing_sync(self, msg: str) -> None:
-        """Blocking version of tracing()."""
-        self.server.logger.debug(msg)
-        self.callback_sync("log", (int(self.LogType.TRACING), msg))
-
-    def warning_sync(self, msg: str) -> None:
-        """Blocking version of warning()."""
-        self.server.logger.warning(msg)
-        self.callback_sync("log", (int(self.LogType.WARNING), msg))
-
-    def writeln_sync(self, msg: str) -> None:
-        """Blocking version of writeln()."""
-        self.server.logger.info(msg)
-        self.callback_sync("log", (int(self.LogType.WRITELN), msg))
-
-    async def raw_callback(self, name: str, action: Callable[['Connection'], Awaitable[Any]]) -> Any:
-        """Start a raw callback with custom bidirectional protocol.
-
-        Only performs Phase 1 (lookup). After successful lookup, both the ML
-        callback' action and the Python action function run with raw connection
-        access, enabling custom bidirectional protocols.
-
-        Args:
-            name: The ML callback name
-            action: Async function that receives Connection for custom I/O
-
-        Returns:
-            Whatever the action function returns
-
-        Raises:
-            IsabelleError: If the callback is not found
-
-        Example:
-            async def my_protocol(conn: Connection):
-                conn.writer.write(mp.packb("command"))
-                await conn.writer.drain()
-                result = await conn._feed_and_unpack()
-                return result
-
-            result = await connection.raw_callback("my_callback", my_protocol)
-        """
-        async with self._callback_lock:
-            # Phase 1: Send callback name for lookup
-            self.writer.write(mp.packb((0, name)))  # type: ignore[arg-type]
-            await self.writer.drain()
-
-            # Read Phase 1 response: (result, error) tuple
-            (phase1_result, phase1_error) = await self._feed_and_unpack()
-
-            if phase1_error is not None:
-                # Callback not found
-                raise IsabelleError([phase1_error], None)
-
-            # Phase 1 succeeded - ML callback is now running with connection access
-            # Call Python action to interact with ML side via custom protocol
-            return await action(self)
 
     def close(self):
         try:
@@ -312,6 +238,7 @@ class Server:
         """Handle a client connection."""
         client_addr = writer.get_extra_info('peername')
         connection = Connection(reader, writer, client_addr, self)
+        await connection._start_reader()
         token = _connection_var.set(connection)
         try:
             while self.running:
@@ -378,6 +305,7 @@ class Server:
                         self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
                         return
         finally:
+            connection._stop_reader()
             _connection_var.reset(token)
             connection.close()
 

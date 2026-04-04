@@ -19,7 +19,7 @@ type ('a,'b) callback = {
   function: 'a -> 'b,
   timeout: Time.time option
 }
-type callback' = {name: string, action: connection -> unit}
+type callback' = {name: string, action: connection -> int -> unit}
 
 val mk_callback: ('a,'b) callback -> callback'
 val register_global_callback: ('a,'b) callback -> Context.generic -> Context.generic
@@ -182,7 +182,10 @@ fun launch_RPC_host (host,port) =
 
 fun connect_agent_socket can_launch =
   let val addr = get_addr ()
-      val sock = INetSock.TCP.socket ()
+      val _ = tracing ("[RPC.connect] can_launch=" ^ Bool.toString can_launch
+                        ^ " addr=" ^ #1 addr ^ ":" ^ #2 addr)
+      val sock = \<^try>\<open>INetSock.TCP.socket ()
+          catch exn => (tracing ("[RPC.connect] socket() FAILED: " ^ Runtime.exn_message exn); Exn.reraise exn)\<close>
 
       fun parse_addr (h,p) =
          let fun err () = error ("Bad address " ^ h ^ ":" ^ p)
@@ -191,10 +194,12 @@ fun connect_agent_socket can_launch =
           in INetSock.toAddr (NetHostDB.addr host, port)
          end
       val addr' = parse_addr addr
+      val t0 = Time.now ()
 
    in if Socket.connectNB (sock, addr')
-    then sock
+    then (tracing "[RPC.connect] connectNB=true (immediate)"; sock)
     else let
+      val _ = tracing "[RPC.connect] connectNB=false, waiting in select(5s)..."
       val timeout = SOME (Time.fromSeconds 5)
       val {wrs, exs, ...} = Socket.select {
           rds = [],
@@ -202,15 +207,20 @@ fun connect_agent_socket can_launch =
           exs = [Socket.sockDesc sock],
           timeout = timeout
       }
+      val elapsed = Time.toMilliseconds (Time.- (Time.now (), t0))
+      val _ = tracing ("[RPC.connect] select done after " ^ IntInf.toString elapsed ^ "ms: wrs="
+                        ^ Int.toString (length wrs) ^ " exs=" ^ Int.toString (length exs))
       fun handle_err () = (
           Socket.close sock;
+          tracing ("[RPC.connect] handle_err can_launch=" ^ Bool.toString can_launch);
           if can_launch
           then ( launch_RPC_host addr
                ; connect_agent_socket false )
           else error ("Fail to either connect or launch the RPC host on " ^ #1 addr ^ ":" ^ #2 addr) )
      in case (wrs, exs)
-          of (_::_, []) => (* Ready for writing - check for errors *)
+          of (_::_, []) =>
               let val errorOccurred = Socket.Ctl.getERROR sock
+                  val _ = tracing ("[RPC.connect] writable, getERROR=" ^ Bool.toString errorOccurred)
                in if errorOccurred
                   then handle_err ()
                   else sock
@@ -227,10 +237,27 @@ fun make_connection () : connection =
 
 (** IO Infrastructure **)
 
-(** Tagged Message I/O for Callback Protocol **)
+(** Tagged Message I/O for Multiplexed Callback Protocol **)
+(*
+  Wire protocol — every message is (tag : int, payload):
+    tag = 0   → user channel (RPC request / success response)
+    tag = 1   → remote error
+    tag = N>1 → callback channel N (request/response pair)
+
+  User channel payloads:
+    ML → Python:  (0, (func_name, arg))         RPC request
+    Python → ML:  (0, result)                    success response
+    Python → ML:  (1, error_string)              error response
+
+  Callback channel payloads (Python ↔ ML):
+    Phase 1:  (N, callback_name)                 request
+              (N, ((), None) | (None, err))       response
+    Phase 2:  (N, arg)                           request
+              (N, (result, None) | (None, err))   response
+*)
 
 datatype 'a tagged_message =
-    Callback_Request of string  (* Just the callback name *)
+    Callback_Request of int * string  (* callback_id, callback_name *)
   | User_Response of 'a
   | Remote_Error of string
 
@@ -241,16 +268,15 @@ fun read_tagged unpacker (cin, _, timeout) =
           (case timeout_val of SOME t => Timeout.apply t | NONE => I)
               (doUnpack (unpackPair_dep' unpackInt (fn tag =>
                 case tag of
-                    0 => (* Callback request: (0, name) *)
-                      (fn s => let val (name, s') = unpackString s
-                               in (Callback_Request name, s') end)
-                  | 1 => (* User response: (1, result) *)
+                    0 => (* User channel: (0, result) *)
                       (fn s => let val (result, s') = unpacker s
                                in (User_Response result, s') end)
-                  | 2 => (* Remote error: (2, error_message) *)
+                  | 1 => (* Remote error: (1, error_message) *)
                       (fn s => let val (err, s') = unpackString s
                                in (Remote_Error err, s') end)
-                  | _ => (fn _ => error ("Unknown message tag: " ^ Int.toString tag))
+                  | n => (* Callback channel n: (n, name) *)
+                      (fn s => let val (name, s') = unpackString s
+                               in (Callback_Request (n, name), s') end)
               ))) (!cin)
    in cin := cin'
     ; msg
@@ -266,14 +292,14 @@ fun read conn packer =
 
 fun write (_,cout,_) packer data =
   let open MessagePackBinIO.Pack
-   in doPack (packPair (packer, packUnit)) (data, ()) cout
+   in doPack (packPair (packInt, packer)) (0, data) cout
     ; BinIO.StreamIO.flushOut cout
   end
 
 fun write_error' (_,cout,_) packer {message, errobj} =
   let open MessagePackBinIO.Pack
-   in doPack (packPair (packOption packUnit, packPair (packList packString, packer)))
-             (NONE, (message, errobj)) cout
+   in doPack (packPair (packInt, packPair (packList packString, packer)))
+             (1, (message, errobj)) cout
     ; BinIO.StreamIO.flushOut cout
   end
 
@@ -292,7 +318,8 @@ type ('a,'b) callback = {
   timeout: Time.time option
 }
 
-type callback' = {name: string, action: connection -> unit}
+type callback' = {name: string, action: connection -> int -> unit}
+  (* action conn callback_id: read Phase 2 arg, execute, send tagged response *)
 
 val global_callbacks : callback' Strhashtab.table = Strhashtab.empty 64
 val global_callbacks_lock = Synchronized.var "RPC.global_callbacks" ()
@@ -307,23 +334,23 @@ fun get_global_callback (name : string) : callback' option =
 
 fun mk_callback ({name, arg_schema, ret_schema, function, timeout} : ('a,'b) callback) : callback' =
   {name = name,
-   action = fn conn => \<^try>\<open>
+   action = fn conn => fn cb_id => \<^try>\<open>
      let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
          val (cin, cout, _) = conn
-         (* Phase 2: Read (arg, error) pair - no tagged protocol *)
-         val (arg, cin') = doUnpack arg_schema (!cin)
+         (* Phase 2: Read (cb_id, arg) pair *)
+         val ((_, cb_arg), cin') = doUnpack (unpackPair (unpackInt, arg_schema)) (!cin)
                            handle Unpack => error "Failed to unpack callback argument"
          val _ = cin := cin'
-         val result = function arg
-         (* Send (result, None) for success - both fields always present *)
-      in doPack (packPair (packOption ret_schema, packOption packString)) (SOME result, NONE) cout
+         val result = function cb_arg
+         (* Send (cb_id, (Some result, None)) *)
+      in doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
+                (cb_id, (SOME result, NONE)) cout
        ; BinIO.StreamIO.flushOut cout
      end catch exn =>
-       (* Send (None, error_message) for failure - both fields always present *)
        let open MessagePackBinIO.Pack
            val (_, cout, _) = conn
-        in doPack (packPair (packOption ret_schema, packOption packString))
-                  (NONE, SOME (String.concatWith "\n" (Runtime.exn_message_list exn))) cout
+        in doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
+                  (cb_id, (NONE, SOME (String.concatWith "\n" (Runtime.exn_message_list exn)))) cout
          ; BinIO.StreamIO.flushOut cout
        end\<close>}
 
@@ -365,20 +392,21 @@ fun lookup_callback (local_tab : callback' Strhashtab.table) (name : string) : c
 
 fun dispatch_loop conn local_tab func_name ret_schema =
   (case read_tagged ret_schema conn of
-      Callback_Request name =>
+      Callback_Request (cb_id, name) =>
         ((case lookup_callback local_tab name of
               SOME {action, ...} =>
                 let open MessagePackBinIO.Pack
                     val (_, cout, _) = conn
-                    val _ = doPack (packPair (packUnit, packOption packString)) ((), NONE) cout
+                    val _ = doPack (packPair (packInt, packPair (packUnit, packOption packString)))
+                                   (cb_id, ((), NONE)) cout
                     val _ = BinIO.StreamIO.flushOut cout
-                 in action conn
+                 in action conn cb_id
                 end
             | NONE =>
                 let open MessagePackBinIO.Pack
                     val (_, cout, _) = conn
-                    val _ = doPack (packPair (packOption packUnit, packOption packString))
-                                   (NONE, SOME ("Unknown callback: " ^ name)) cout
+                    val _ = doPack (packPair (packInt, packPair (packOption packUnit, packOption packString)))
+                                   (cb_id, (NONE, SOME ("Unknown callback: " ^ name))) cout
                     val _ = BinIO.StreamIO.flushOut cout
                  in () end)
         ; dispatch_loop conn local_tab func_name ret_schema)
@@ -457,12 +485,13 @@ fun get_connection () =
          | x::L => (SOME x, L) )
     of SOME conn =>
           if can heartbeat conn
-          then conn
-          else ( close_connection conn
+          then (tracing "[RPC.get_connection] reusing pooled connection (heartbeat OK)"; conn)
+          else ( tracing "[RPC.get_connection] pooled connection stale (heartbeat FAILED), making new"
+               ; close_connection conn
                ; List.app close_connection
                    (Synchronized.change_result connection_pool (fn L => (L, [])))
                ; make_connection () )
-     | NONE => make_connection ()
+     | NONE => (tracing "[RPC.get_connection] pool empty, making new connection"; make_connection ())
 
 fun release_connection conn =
   Synchronized.change connection_pool (fn L => conn :: L)
