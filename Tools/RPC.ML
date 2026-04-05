@@ -182,10 +182,7 @@ fun launch_RPC_host (host,port) =
 
 fun connect_agent_socket can_launch =
   let val addr = get_addr ()
-      val _ = tracing ("[RPC.connect] can_launch=" ^ Bool.toString can_launch
-                        ^ " addr=" ^ #1 addr ^ ":" ^ #2 addr)
-      val sock = \<^try>\<open>INetSock.TCP.socket ()
-          catch exn => (tracing ("[RPC.connect] socket() FAILED: " ^ Runtime.exn_message exn); Exn.reraise exn)\<close>
+      val sock = INetSock.TCP.socket ()
 
       fun parse_addr (h,p) =
          let fun err () = error ("Bad address " ^ h ^ ":" ^ p)
@@ -194,12 +191,10 @@ fun connect_agent_socket can_launch =
           in INetSock.toAddr (NetHostDB.addr host, port)
          end
       val addr' = parse_addr addr
-      val t0 = Time.now ()
 
    in if Socket.connectNB (sock, addr')
-    then (tracing "[RPC.connect] connectNB=true (immediate)"; sock)
+    then sock
     else let
-      val _ = tracing "[RPC.connect] connectNB=false, waiting in select(5s)..."
       val timeout = SOME (Time.fromSeconds 5)
       val {wrs, exs, ...} = Socket.select {
           rds = [],
@@ -207,20 +202,15 @@ fun connect_agent_socket can_launch =
           exs = [Socket.sockDesc sock],
           timeout = timeout
       }
-      val elapsed = Time.toMilliseconds (Time.- (Time.now (), t0))
-      val _ = tracing ("[RPC.connect] select done after " ^ IntInf.toString elapsed ^ "ms: wrs="
-                        ^ Int.toString (length wrs) ^ " exs=" ^ Int.toString (length exs))
       fun handle_err () = (
           Socket.close sock;
-          tracing ("[RPC.connect] handle_err can_launch=" ^ Bool.toString can_launch);
           if can_launch
           then ( launch_RPC_host addr
                ; connect_agent_socket false )
           else error ("Fail to either connect or launch the RPC host on " ^ #1 addr ^ ":" ^ #2 addr) )
      in case (wrs, exs)
-          of (_::_, []) =>
+          of (_::_, []) => (* Ready for writing - check for errors *)
               let val errorOccurred = Socket.Ctl.getERROR sock
-                  val _ = tracing ("[RPC.connect] writable, getERROR=" ^ Bool.toString errorOccurred)
                in if errorOccurred
                   then handle_err ()
                   else sock
@@ -485,13 +475,12 @@ fun get_connection () =
          | x::L => (SOME x, L) )
     of SOME conn =>
           if can heartbeat conn
-          then (tracing "[RPC.get_connection] reusing pooled connection (heartbeat OK)"; conn)
-          else ( tracing "[RPC.get_connection] pooled connection stale (heartbeat FAILED), making new"
-               ; close_connection conn
+          then conn
+          else ( close_connection conn
                ; List.app close_connection
                    (Synchronized.change_result connection_pool (fn L => (L, [])))
                ; make_connection () )
-     | NONE => (tracing "[RPC.get_connection] pool empty, making new connection"; make_connection ())
+     | NONE => make_connection ()
 
 fun release_connection conn =
   Synchronized.change connection_pool (fn L => conn :: L)
