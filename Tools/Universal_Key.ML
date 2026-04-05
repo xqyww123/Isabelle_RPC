@@ -48,7 +48,6 @@ datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
 datatype entity =
       Constant of fully_quantified_name
     | Theorem  of thm
-    | Theorem_ID of serial  (* #serial of Proofterm.thm_id, from Thm.derivation_id *)
     | Named_Theorem of fully_quantified_name
     | Type     of fully_quantified_name
     | Class    of fully_quantified_name
@@ -104,7 +103,6 @@ datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
 datatype entity =
       Constant of fully_quantified_name
     | Theorem  of thm
-    | Theorem_ID of serial  (* #serial of Proofterm.thm_id, from Thm.derivation_id *)
     | Named_Theorem of fully_quantified_name
     | Type     of fully_quantified_name
     | Class    of fully_quantified_name
@@ -128,8 +126,6 @@ structure CacheTab = Hash_Table(struct
     | hash (Theorem thm, thy) =
         Word.xorb (Term_Digest.digest128_hasher (Term_Digest.thm128 thm),
                    Hashers.string thy)
-    | hash (Theorem_ID serial, thy) =
-        Word.xorb (0w2, Word.xorb (Hashers.int serial, Hashers.string thy))
     | hash (Named_Theorem name, thy) =
         Word.xorb (0w3, Word.xorb (Hashers.string name, Hashers.string thy))
     | hash (Type name, thy) =
@@ -151,7 +147,6 @@ structure CacheTab = Hash_Table(struct
   fun eq ((Constant n1, t1), (Constant n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Theorem thm1, t1), (Theorem thm2, t2)) =
         Thm.eq_thm (thm1, thm2) andalso t1 = t2
-    | eq ((Theorem_ID s1, t1), (Theorem_ID s2, t2)) = s1 = s2 andalso t1 = t2
     | eq ((Named_Theorem n1, t1), (Named_Theorem n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Type n1, t1), (Type n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Class n1, t1), (Class n2, t2)) = n1 = n2 andalso t1 = t2
@@ -335,9 +330,10 @@ fun key_of_theorem cache context =
       fun compute () =
         build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                   0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
-      val uk = case Thm.derivation_id thm of
-        SOME thm_id => cached_key (Theorem_ID (#serial thm_id), thy_long_name) compute
-      | NONE => cached_thm_key cache thm compute
+      val deriv_name = Thm.raw_derivation_name thm
+      val uk = if deriv_name <> ""
+        then cached_key (Named_Theorem deriv_name, thy_long_name) compute
+        else cached_thm_key cache thm compute
       val is_global = Facts.defined global_facts full_name
     in (uk, thm, is_global) end
   end
@@ -346,16 +342,20 @@ end (* local parse_thm_xname *)
 
 fun key_of_theorem' cache context thm =
   let
-    val thm_id_opt = Thm.derivation_id thm
+    val deriv_name = Thm.raw_derivation_name thm
+    val fact_space = Facts.space_of
+          (Context.cases Global_Theory.facts_of Proof_Context.facts_of context)
     val thy_long_name = default_thy_long_name context
-      (case thm_id_opt of SOME {theory_name, ...} => theory_name | NONE => "")
+      (case try (Name_Space.the_entry fact_space) deriv_name of
+         SOME e => #theory_long_name e
+       | NONE => "")
     fun compute () =
       build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                 0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
   in
-    case thm_id_opt of
-      SOME thm_id => cached_key (Theorem_ID (#serial thm_id), thy_long_name) compute
-    | NONE => cached_thm_key cache thm compute
+    if deriv_name <> ""
+    then cached_key (Named_Theorem deriv_name, thy_long_name) compute
+    else cached_thm_key cache thm compute
   end
 
 (* --- Introduction / Elimination rules --- *)
@@ -364,12 +364,16 @@ fun key_of_theorem' cache context thm =
 local
 fun key_of_rule tag make_named cache context thm =
   let
+    val deriv_name = Thm.raw_derivation_name thm
+    val fact_space = Facts.space_of
+          (Context.cases Global_Theory.facts_of Proof_Context.facts_of context)
     fun thy_long_name () = default_thy_long_name context
-      (case Thm.derivation_id thm of SOME {theory_name, ...} => theory_name | NONE => "")
+      (case try (Name_Space.the_entry fact_space) deriv_name of
+         SOME e => #theory_long_name e
+       | NONE => "")
     fun compute () =
       build_key (Theory_Hash.hash_of (resolve_theory context (thy_long_name ())))
                 tag (ent_digest128_15 (Term_Digest.thm128 thm))
-    val deriv_name = Thm.derivation_name thm
   in
     if deriv_name <> ""
     then cached_key (make_named deriv_name, thy_long_name ()) compute
@@ -388,7 +392,6 @@ fun key_of_elimination_rule cache context xname =
 
 fun key_of cache context (Constant name) = key_of_constant context name
   | key_of cache context (Theorem thm) = key_of_theorem' cache context thm
-  | key_of _ _ (Theorem_ID _) = error "Cannot compute key from Theorem_ID alone"
   | key_of cache context (Named_Theorem name) = #1 (key_of_theorem cache context name)
   | key_of _ context (Type name) = key_of_type context name
   | key_of _ context (Class name) = key_of_class context name
@@ -407,7 +410,6 @@ fun key_of'' cache context =
     val locale_key = key_of_locale context
   in fn (Constant name)      => const_key name
       | (Theorem thm)        => key_of_theorem' cache context thm
-      | (Theorem_ID _)       => error "Cannot compute key from Theorem_ID alone"
       | (Named_Theorem name) => #1 (thm_key name)
       | (Type name)          => type_key name
       | (Class name)         => class_key name
@@ -453,12 +455,11 @@ fun make_universal_key_callback context = make_universal_key_callback' NONE cont
 
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 
-(*  1 = Constant, 2 = Theorem/Theorem_ID/Named_Theorem,
+(*  1 = Constant, 2 = Theorem/Named_Theorem,
     3 = Type, 4 = Class, 5 = Locale,
     0x12 = Introduction_Rule, 0x22 = Elimination_Rule  *)
 fun pack_entity_kind (Constant _)               = packInt 1
   | pack_entity_kind (Theorem _)                = packInt 2
-  | pack_entity_kind (Theorem_ID _)             = packInt 2
   | pack_entity_kind (Named_Theorem _)          = packInt 2
   | pack_entity_kind (Type _)                   = packInt 3
   | pack_entity_kind (Class _)                  = packInt 4
@@ -486,14 +487,13 @@ val unpack_entity_kind : entity_kind unpacker = fn ins =>
   end
 
 fun pack_thm_entity tag thm =
-  let val name = Thm.derivation_name thm
-  in if name = "" then error "Cannot pack anonymous thm (Thm.derivation_name is empty)"
+  let val name = Thm.raw_derivation_name thm
+  in if name = "" then error "Cannot pack anonymous thm (Thm.raw_derivation_name is empty)"
      else packPair (packInt, packString) (tag, name)
   end
 
 fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
   | pack_entity (Theorem thm)        = pack_thm_entity 2 thm
-  | pack_entity (Theorem_ID serial)  = packPair (packInt, packInt) (2, serial)
   | pack_entity (Named_Theorem name) = packPair (packInt, packString) (2, name)
   | pack_entity (Type name)          = packPair (packInt, packString) (3, name)
   | pack_entity (Class name)         = packPair (packInt, packString) (4, name)
@@ -506,7 +506,7 @@ fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
 val unpack_entity : entity unpacker =
   unpackPair_dep' unpack_entity_kind (fn kind => case kind of
       ConstantK         => unpackString >> Constant
-    | TheoremK          => (unpackInt >> Theorem_ID) || (unpackString >> Named_Theorem)
+    | TheoremK          => unpackString >> Named_Theorem
     | TypeK             => unpackString >> Type
     | ClassK            => unpackString >> Class
     | LocaleK           => unpackString >> Locale

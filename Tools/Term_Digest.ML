@@ -219,18 +219,18 @@ fun typ128 t = (Hasher_Lo.typ t, Hasher_Hi.typ t)
 fun term128 t = (Hasher_Lo.term t, Hasher_Hi.term t)
 fun goal128 g = (Hasher_Lo.goal g, Hasher_Hi.goal g)
 
-val thm128_cache : digest128 Inthashtab.table Synchronized.var =
-  Synchronized.var "Hasher.thm128_cache" (Inthashtab.empty 1024)
+val thm128_cache : digest128 Strhashtab.table Synchronized.var =
+  Synchronized.var "Hasher.thm128_cache" (Strhashtab.empty 1024)
 
 fun thm128 thm =
-  case Thm.derivation_id thm of
-    NONE => term128 (Thm.prop_of thm)
-  | SOME {serial, ...} =>
+  case Thm.raw_derivation_name thm of
+    "" => term128 (Thm.prop_of thm)
+  | name =>
       Synchronized.change_result thm128_cache (fn tab =>
-        case Inthashtab.lookup tab serial of
+        case Strhashtab.lookup tab name of
           SOME h => (h, tab)
         | NONE =>
             let val h = term128 (Thm.prop_of thm)
-            in (h, (Inthashtab.update tab (serial, h); tab)) end)
+            in (h, (Strhashtab.update tab (name, h); tab)) end)
 
 end

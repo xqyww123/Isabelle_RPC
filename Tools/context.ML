@@ -489,6 +489,8 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val include_set = resolve_include_set context theories_include
+        val fact_space = Facts.space_of
+              (Context.cases Global_Theory.facts_of Proof_Context.facts_of ctx)
         val seen : unit Strhashtab.table = Strhashtab.empty 128
         val key_seen = Bytehashtab.empty 128
         val ctxt = Context.cases Proof_Context.init_global I ctx
@@ -499,13 +501,13 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
           if remaining = 0 then (acc, 0)
           else
           let val thm = Thm.transfer thy thm
-              val name = Thm.derivation_name thm
+              val name = Thm.raw_derivation_name thm
           in if name = "" orelse Strhashtab.defined seen name then (acc, remaining)
              else
                let
-                 val thy_name_of = case Thm.derivation_id thm of
-                     SOME {theory_name, ...} =>
-                       if theory_name = "" then NONE else SOME theory_name
+                 val thy_name_of =
+                   case try (Name_Space.the_entry fact_space) name of
+                     SOME e => (case #theory_long_name e of "" => NONE | tn => SOME tn)
                    | NONE => NONE
                  val pass = case exclude_set of
                      NONE => String.isPrefix target_prefix name

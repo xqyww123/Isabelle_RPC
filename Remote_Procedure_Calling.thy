@@ -1,7 +1,6 @@
 theory Remote_Procedure_Calling
   imports Performant_Isabelle_ML.Performant_Isabelle_ML
 begin
-(* declare [[ML_debugger, ML_exception_debugger]] *)
 
 ML_file \<open>contrib/mlmsgpack/mlmsgpack-aux.sml\<close>
 ML_file \<open>contrib/mlmsgpack/realprinter-packreal.sml\<close>
