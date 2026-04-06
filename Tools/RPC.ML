@@ -21,6 +21,7 @@ type ('a,'b) callback = {
 }
 type callback' = {name: string, action: connection -> int -> unit}
 
+val trim_markup: string -> string
 val mk_callback: ('a,'b) callback -> callback'
 val register_global_callback: ('a,'b) callback -> Context.generic -> Context.generic
 val register_global_callback': callback' -> Context.generic -> Context.generic
@@ -51,6 +52,14 @@ val release_connection : connection -> unit
 end
 
 structure Remote_Procedure_Calling : REMOTE_PROCEDURE_CALLING = struct
+
+fun trim_markup msg =
+  let fun auto _ [] = []
+        | auto acc (#"\005" :: L) = auto (not acc) L
+        | auto true (x :: L) = x :: auto true L
+        | auto false (_ :: L) = auto false L
+   in String.implode (auto true (String.explode msg))
+  end
 
 type connection = BinIO.StreamIO.instream Unsynchronized.ref
                 * BinIO.StreamIO.outstream
@@ -295,7 +304,7 @@ fun write_error' (_,cout,_) packer {message, errobj} =
 
 fun write_error conn exn =
       write_error' conn MessagePackBinIO.Pack.packUnit
-                        {message=Runtime.exn_message_list exn, errobj=()}
+                        {message=map trim_markup (Runtime.exn_message_list exn), errobj=()}
 
 
 (** Callback Registry **)
@@ -340,7 +349,7 @@ fun mk_callback ({name, arg_schema, ret_schema, function, timeout} : ('a,'b) cal
        let open MessagePackBinIO.Pack
            val (_, cout, _) = conn
         in doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
-                  (cb_id, (NONE, SOME (String.concatWith "\n" (Runtime.exn_message_list exn)))) cout
+                  (cb_id, (NONE, SOME (String.concatWith "\n" (map trim_markup (Runtime.exn_message_list exn))))) cout
          ; BinIO.StreamIO.flushOut cout
        end\<close>}
 

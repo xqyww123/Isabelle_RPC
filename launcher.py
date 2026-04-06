@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import Isabelle_RPC_Host
 import logging
+import os
 import sys
 
 if __name__ == "__main__":
@@ -9,7 +10,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         addr = sys.argv[1]
     else:
-        addr = 'localhost:27182'
+        addr = os.environ.get('RPC_Host', '127.0.0.1:27182')
     
     # Check for log file argument
     log_file = None
