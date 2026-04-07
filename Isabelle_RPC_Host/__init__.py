@@ -12,6 +12,7 @@ from .universal_key import EntityKind, Entity, destruct_key, universal_key_of, u
 from . import theory_hash
 from . import context
 from . import dialogue
+from . import run_python
 
 # @isabelle_remote_procedure("test_dialogue")
 # def test_dialogue(arg, connection: Connection):

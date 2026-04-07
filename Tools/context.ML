@@ -54,8 +54,23 @@ val arg_schema = unpackTuple8 (unpackOption unpackString, unpackBool,
       unpackList unpackString (* name_contains *),
       unpackInt (* limit, 0 = no limit *))
 
-val ret_schema = packPair (packList Universal_Key.pack_universal_key,
-                           packList packString (* warnings *))
+val pack_pos = packTuple3 (packString, packInt, packInt)
+
+val ret_schema = packPair (
+  packList (packPair (Universal_Key.pack_universal_key, pack_pos)),
+  packList packString (* warnings *))
+
+(* Extract definition position (file, line, symbol_offset) from a Name_Space entry.
+   File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
+   Returns ("", 0, 0) when the position is unknown (e.g. ID-based positions from live PIDE). *)
+fun entry_def_pos entry =
+  let val pos = #pos entry
+      val file = the_default "" (Position.file_of pos)
+      val file' = if file = "" then "" else File.standard_path (Path.explode file)
+  in (file',
+      the_default 0 (Position.line_of pos),
+      the_default 0 (Position.offset_of pos))
+  end
 
 fun resolve_ctx context target_thy_opt =
   case target_thy_opt of
@@ -269,17 +284,20 @@ fun ns_filter limit key_of space target_name exclude_set include_set extra_filte
                          | SOME is => Strhashtab.defined is thy_name
                   in if not pass orelse not pass_include then NONE
                      else if not (extra_filter name) then NONE
-                     else case filter_opt of
-                            NONE => SOME (key_of name)
-                          | SOME f => if f name then SOME (key_of name) else NONE
+                     else
+                       let val pass_filter = case filter_opt of
+                               NONE => true | SOME f => f name
+                       in if not pass_filter then NONE
+                          else SOME (key_of name, entry_def_pos entry)
+                       end
                   end
              end) handle ERROR _ => NONE
           in case result of
                NONE => collect rest acc remaining
-             | SOME k =>
+             | SOME (k, pos) =>
                  if Bytehashtab.defined seen k then collect rest acc remaining
                  else (Bytehashtab.update seen (k, ());
-                       collect rest (k :: acc) (remaining - 1))
+                       collect rest ((k, pos) :: acc) (remaining - 1))
           end
   in collect names [] limit end
 
@@ -333,7 +351,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
         val name_filter = mk_name_filter name_contains
         val seen = Bytehashtab.empty 128
-        val (keys, _) = fold (fn (name, thms) => fn (acc, remaining) =>
+        val (entries, _) = fold (fn (name, thms) => fn (acc, remaining) =>
            if remaining = 0 then (acc, 0)
            else
            let val entry = try (Name_Space.the_entry fact_space) name
@@ -353,7 +371,9 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                          | SOME is => Strhashtab.defined is thy_name
                   in if dominated orelse not included then (acc, remaining)
                      else if not (name_filter name) then (acc, remaining)
-                     else fold (fn thm => fn (acc, remaining) =>
+                     else
+                       let val epos = entry_def_pos e
+                       in fold (fn thm => fn (acc, remaining) =>
                        if remaining = 0 then (acc, 0)
                        else
                        let val thm' = Thm.transfer thy thm
@@ -367,13 +387,14 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                                  let val k = Universal_Key.key_of_theorem' NONE ctx thm'
                                  in if Bytehashtab.defined seen k then (acc, remaining)
                                     else (Bytehashtab.update seen (k, ());
-                                          (k :: acc, remaining - 1))
+                                          ((k, epos) :: acc, remaining - 1))
                                  end
                             end
                        end) thms (acc, remaining)
+                       end
                   end
            end) (Facts.dest_static false [] facts) ([], limit)
-      in (rev keys, warnings) end,
+      in (rev entries, warnings) end,
     timeout = NONE
   }
 
@@ -497,7 +518,7 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
         val name_filter = mk_name_filter name_contains
-        val (keys, _) = fold (fn thm => fn (acc, remaining) =>
+        val (entries, _) = fold (fn thm => fn (acc, remaining) =>
           if remaining = 0 then (acc, 0)
           else
           let val thm = Thm.transfer thy thm
@@ -505,8 +526,8 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
           in if name = "" orelse Strhashtab.defined seen name then (acc, remaining)
              else
                let
-                 val thy_name_of =
-                   case try (Name_Space.the_entry fact_space) name of
+                 val entry_opt = try (Name_Space.the_entry fact_space) name
+                 val thy_name_of = case entry_opt of
                      SOME e => (case #theory_long_name e of "" => NONE | tn => SOME tn)
                    | NONE => NONE
                  val pass = case exclude_set of
@@ -529,15 +550,17 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
                     in if not pass_filter then (acc, remaining)
                        else
                          let val k = key_of ctx thm
+                             val epos = case entry_opt of
+                                 SOME e => entry_def_pos e | NONE => ("", 0, 0)
                          in (Strhashtab.update seen (name, ());
                              if Bytehashtab.defined key_seen k then (acc, remaining)
                              else (Bytehashtab.update key_seen (k, ());
-                                   (k :: acc, remaining - 1)))
+                                   ((k, epos) :: acc, remaining - 1)))
                          end
                     end
                end
           end) thms ([], limit)
-      in (rev keys, warnings) end,
+      in (rev entries, warnings) end,
     timeout = NONE
   }
 in
