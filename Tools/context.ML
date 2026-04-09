@@ -571,7 +571,7 @@ fun make_theory_long_name_callback (context : Context.generic)
   let val name = Context.theory_long_name (Context.theory_of context)
   in
     Remote_Procedure_Calling.mk_callback {
-      name = "Context.theory_long_name",
+      name = "Context.the_theory_long_name",
       arg_schema = unpackUnit,
       ret_schema = packString,
       function = fn () => name,

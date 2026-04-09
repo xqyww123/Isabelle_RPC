@@ -291,6 +291,6 @@ async def theory_long_name(connection: Connection) -> str:
     """
     cached = getattr(connection, "_theory_long_name", None)
     if cached is None:
-        cached = await connection.callback("Context.theory_long_name", None)
+        cached = await connection.callback("Context.the_theory_long_name", None)
         connection._theory_long_name = cached  # type: ignore
     return cached
