@@ -5,7 +5,7 @@
   that takes:
     (target_theory: string option, the_theory_only: bool, exclude: string list,
      term_patterns: string list, type_patterns: string list,
-     theories_include: string list)
+     theories_include: string list, name_contains: string list, limit: int)
 
   - target_theory: if SOME, resolve that long theory name and enumerate entities
     from its context; if NONE, use the captured context.
@@ -21,14 +21,45 @@
     Applicable to thm-like entities (types in proposition) and constants (constant type).
   - theories_include: theory names (short or fully qualified). Empty = no restriction.
     If non-empty, only return entities defined in these theories.
+  - name_contains: case-insensitive substrings. Empty = no restriction.
+    All substrings must match (conjunction).
+  - limit: maximum number of results. <0 means no limit.
 
   An optional filter parameter allows callers to further restrict which entities
   are returned, applied after exclude_set/target_thy/the_theory_only filtering.
 *)
 
 signature CONTEXT_CALLBACKS = sig
+  (* Definition position: (file_path, line, symbol_offset).
+     file_path is the standardized absolute path (empty string if unknown).
+     line is the 1-based line number (0 if unknown).
+     symbol_offset is the Isabelle symbol offset from file start (0 if unknown). *)
+  type def_pos = string * int * int
+
+  (* Cached theorem entry: pre-computed at theory-load time, used to skip
+     entry_lookup / infra_filter / key_compute at query time. *)
+  type cached_thm_entry = {
+    uk: Universal_Key.universal_key,
+    name: string,
+    thy_name: string,
+    pos: def_pos,
+    thm: thm
+  }
+
+  (* Exported utilities for building caches externally *)
+  val entry_def_pos : {pos: Position.T, serial: serial, group: serial,
+    suppress: bool list, theory_long_name: string, concealed: bool} -> def_pos
+  val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
+  val mk_name_filter : string list -> string -> bool
+  val mk_prop_pattern_matcher : Proof.context -> term list -> typ list -> term -> bool
+
   val make_constants_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
-  val make_theorems_callback : (string * thm -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
+  (* cache_opt: when SOME (entries, facts), uses cached entries for global theorems
+     and only runs the full pipeline on facts not in the cached Facts.T. *)
+  val make_theorems_callback :
+    (string * thm -> bool) option ->
+    (cached_thm_entry list * Facts.T) option ->
+    Context.generic -> Remote_Procedure_Calling.callback'
   val make_types_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
   val make_classes_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
   val make_locales_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
@@ -46,19 +77,16 @@ end
 
 structure Context_Callbacks : CONTEXT_CALLBACKS = struct
 
-local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
+type def_pos = string * int * int
 
-val arg_schema = unpackTuple8 (unpackOption unpackString, unpackBool,
-      unpackList unpackString, unpackList unpackString,
-      unpackList unpackString, unpackList unpackString,
-      unpackList unpackString (* name_contains *),
-      unpackInt (* limit, 0 = no limit *))
+type cached_thm_entry = {
+  uk: Universal_Key.universal_key,
+  name: string,
+  thy_name: string,
+  pos: def_pos,
+  thm: thm
+}
 
-val pack_pos = packTuple3 (packString, packInt, packInt)
-
-val ret_schema = packPair (
-  packList (packPair (Universal_Key.pack_universal_key, pack_pos)),
-  packList packString (* warnings *))
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry.
    File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
@@ -213,9 +241,9 @@ fun type_matches_in_type typ_inst (type_pat_infos : (typ * string list) list) T 
      type_pat_infos
   end
 
-(* Build a thm filter from parsed term/type patterns.
-   Returns (thm -> bool). Always true when both lists are empty. *)
-fun mk_thm_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) : thm -> bool =
+(* Build a prop filter from parsed term/type patterns.
+   Returns (term -> bool). Always true when both lists are empty. *)
+fun mk_prop_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) : term -> bool =
   if null term_pats andalso null type_pats then (fn _ => true)
   else
     let val thy = Proof_Context.theory_of ctxt
@@ -224,15 +252,20 @@ fun mk_thm_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) :
           let val pat' = (expand_abs o Envir.eta_contract) pat
           in (pat', get_names pat') end) term_pats
         val type_pat_infos = mk_type_pat_infos type_pats
-    in fn thm =>
-      let val prop = Thm.full_prop_of thm
-          val prop_names = get_names prop
+    in fn prop =>
+      let val prop_names = get_names prop
       in List.all (fn (pat', pat_consts) =>
            subset (op =) (pat_consts, prop_names)
            andalso matches_subterm ctxt (pat', prop)) term_pat_infos
          andalso type_matches_in_term typ_inst type_pat_infos prop
       end
     end
+
+(* Build a thm filter from parsed term/type patterns.
+   Returns (thm -> bool). Always true when both lists are empty. *)
+fun mk_thm_pattern_matcher ctxt term_pats type_pats : thm -> bool =
+  let val prop_matcher = mk_prop_pattern_matcher ctxt term_pats type_pats
+  in fn thm => prop_matcher (Thm.full_prop_of thm) end
 
 (* Build a constant-name filter from parsed type patterns.
    Only type_pats apply; term_pats are ignored for constants.
@@ -288,21 +321,35 @@ fun ns_filter limit key_of space target_name exclude_set include_set extra_filte
                        let val pass_filter = case filter_opt of
                                NONE => true | SOME f => f name
                        in if not pass_filter then NONE
-                          else SOME (key_of name, entry_def_pos entry)
+                          else SOME (key_of name, name, entry_def_pos entry)
                        end
                   end
              end) handle ERROR _ => NONE
           in case result of
                NONE => collect rest acc remaining
-             | SOME (k, pos) =>
+             | SOME (k, nm, pos) =>
                  if Bytehashtab.defined seen k then collect rest acc remaining
                  else (Bytehashtab.update seen (k, ());
-                       collect rest ((k, pos) :: acc) (remaining - 1))
+                       collect rest ((k, nm, pos) :: acc) (remaining - 1))
           end
   in collect names [] limit end
 
 
 (* --- Entity enumeration callbacks --- *)
+
+local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
+
+val arg_schema = unpackTuple8 (unpackOption unpackString, unpackBool,
+      unpackList unpackString, unpackList unpackString,
+      unpackList unpackString, unpackList unpackString,
+      unpackList unpackString (* name_contains *),
+      unpackInt (* limit, <0 = no limit *))
+
+val pack_pos = packTuple3 (packString, packInt, packInt)
+
+val ret_schema = packPair (
+  packList (packTuple3 (Universal_Key.pack_universal_key, packString, pack_pos)),
+  packList packString (* warnings *))
 
 fun make_constants_callback filter_opt (context : Context.generic)
     : Remote_Procedure_Calling.callback' =
@@ -329,7 +376,7 @@ fun make_constants_callback filter_opt (context : Context.generic)
     timeout = NONE
   }
 
-fun make_theorems_callback filter_opt (context : Context.generic)
+fun make_theorems_callback filter_opt cache_opt (context : Context.generic)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theorems",
@@ -338,6 +385,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
     function = fn (target_thy_opt, the_theory_only, exclude,
                     term_pat_strs, type_pat_strs, theories_include, name_contains, limit) =>
       let
+        val t_start = Time.now ()
         val ctx = resolve_ctx context target_thy_opt
         val thy = Context.theory_of ctx
         val target_name = Context.theory_long_name thy
@@ -348,10 +396,23 @@ fun make_theorems_callback filter_opt (context : Context.generic)
         val include_set = resolve_include_set context theories_include
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
-        val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
+        val prop_matches = mk_prop_pattern_matcher ctxt term_pats type_pats
         val name_filter = mk_name_filter name_contains
         val seen = Bytehashtab.empty 128
-        val (entries, _) = fold (fn (name, thms) => fn (acc, remaining) =>
+
+        (* --- Uncached path: facts not covered by cache --- *)
+        val uncached_facts = case cache_opt of
+            NONE => Facts.dest_static false [] facts
+          | SOME (_, cached_facts) => Facts.dest_static false [cached_facts] facts
+
+        val t_dest = Time.now ()
+        val _ = tracing (String.concat [
+          "[perf.theorems_cb] uncached_facts: ",
+          Int.toString (length uncached_facts), " (",
+          Int.toString (Time.toMilliseconds (Time.- (t_dest, t_start))), "ms)"])
+
+        val t_loop = Time.now ()
+        val (uncached_entries, _) = fold (fn (name, thms) => fn (acc, remaining) =>
            if remaining = 0 then (acc, 0)
            else
            let val entry = try (Name_Space.the_entry fact_space) name
@@ -377,7 +438,7 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                        if remaining = 0 then (acc, 0)
                        else
                        let val thm' = Thm.transfer thy thm
-                       in if not (thm_matches thm') then (acc, remaining)
+                       in if not (prop_matches (Thm.full_prop_of thm')) then (acc, remaining)
                           else
                             let val pass_filter = case filter_opt of
                                   NONE => true
@@ -387,14 +448,64 @@ fun make_theorems_callback filter_opt (context : Context.generic)
                                  let val k = Universal_Key.key_of_theorem' NONE ctx thm'
                                  in if Bytehashtab.defined seen k then (acc, remaining)
                                     else (Bytehashtab.update seen (k, ());
-                                          ((k, epos) :: acc, remaining - 1))
+                                          ((k, name, epos) :: acc, remaining - 1))
                                  end
                             end
                        end) thms (acc, remaining)
                        end
                   end
-           end) (Facts.dest_static false [] facts) ([], limit)
-      in (rev entries, warnings) end,
+           end) uncached_facts ([], limit)
+
+        val t_uncached = Time.now ()
+        val _ = tracing (String.concat [
+          "[perf.theorems_cb] uncached_loop: ",
+          Int.toString (Time.toMilliseconds (Time.- (t_uncached, t_loop))), "ms (",
+          Int.toString (length uncached_entries), " entries)"])
+
+        (* --- Cached path: apply only query-specific filters --- *)
+        (* limit < 0 means unlimited; otherwise subtract what uncached already consumed *)
+        val remaining_after_uncached =
+          if limit < 0 then ~1 else Int.max (0, limit - length uncached_entries)
+        val cached_entries = case cache_opt of
+            NONE => []
+          | SOME (cached, _) =>
+              if remaining_after_uncached = 0 then []
+              else
+              let val (results, _) = fold (fn (entry : cached_thm_entry) => fn (acc, remaining) =>
+                    if remaining = 0 then (acc, 0)
+                    else
+                    let val ethy = #thy_name entry
+                        val dominated = case exclude_set of
+                             NONE => ethy <> target_name
+                           | SOME es => Strhashtab.defined es ethy
+                        val included = case include_set of
+                             NONE => true
+                           | SOME is => Strhashtab.defined is ethy
+                    in if dominated orelse not included then (acc, remaining)
+                       else if not (name_filter (#name entry)) then (acc, remaining)
+                       else if not (prop_matches (Thm.full_prop_of (#thm entry))) then (acc, remaining)
+                       else if Bytehashtab.defined seen (#uk entry) then (acc, remaining)
+                       else (Bytehashtab.update seen (#uk entry, ());
+                             ((#uk entry, #name entry, #pos entry) :: acc, remaining - 1))
+                    end) cached ([], remaining_after_uncached)
+              in results end
+
+        val t_cached = Time.now ()
+        val _ = tracing (String.concat [
+          "[perf.theorems_cb] cached_loop: ",
+          Int.toString (Time.toMilliseconds (Time.- (t_cached, t_uncached))), "ms (",
+          Int.toString (length cached_entries), " entries from ",
+          Int.toString (case cache_opt of NONE => 0 | SOME (c, _) => length c),
+          " cached)"])
+
+        val entries = rev uncached_entries @ rev cached_entries
+
+        val t_end = Time.now ()
+        val _ = tracing (String.concat [
+          "[perf.theorems_cb] total: ",
+          Int.toString (Time.toMilliseconds (Time.- (t_end, t_start))), "ms (",
+          Int.toString (length entries), " entries)"])
+      in (entries, warnings) end,
     timeout = NONE
   }
 
@@ -522,8 +633,10 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
           if remaining = 0 then (acc, 0)
           else
           let val thm = Thm.transfer thy thm
-              val name = Thm.raw_derivation_name thm
-          in if name = "" orelse Strhashtab.defined seen name then (acc, remaining)
+          in if not (Thm.has_name_hint thm) then (acc, remaining)
+             else
+          let val name = Thm.get_name_hint thm
+          in if Strhashtab.defined seen name then (acc, remaining)
              else
                let
                  val entry_opt = try (Name_Space.the_entry fact_space) name
@@ -555,10 +668,11 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
                          in (Strhashtab.update seen (name, ());
                              if Bytehashtab.defined key_seen k then (acc, remaining)
                              else (Bytehashtab.update key_seen (k, ());
-                                   ((k, epos) :: acc, remaining - 1)))
+                                   ((k, name, epos) :: acc, remaining - 1)))
                          end
                     end
                end
+          end
           end) thms ([], limit)
       in (rev entries, warnings) end,
     timeout = NONE

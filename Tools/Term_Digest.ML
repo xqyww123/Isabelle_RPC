@@ -223,14 +223,15 @@ val thm128_cache : digest128 Strhashtab.table Synchronized.var =
   Synchronized.var "Hasher.thm128_cache" (Strhashtab.empty 1024)
 
 fun thm128 thm =
-  case Thm.raw_derivation_name thm of
-    "" => term128 (Thm.prop_of thm)
-  | name =>
-      Synchronized.change_result thm128_cache (fn tab =>
+  if not (Thm.has_name_hint thm) then term128 (Thm.prop_of thm)
+  else
+    let val name = Thm.get_name_hint thm
+    in Synchronized.change_result thm128_cache (fn tab =>
         case Strhashtab.lookup tab name of
           SOME h => (h, tab)
         | NONE =>
             let val h = term128 (Thm.prop_of thm)
             in (h, (Strhashtab.update tab (name, h); tab)) end)
+    end
 
 end

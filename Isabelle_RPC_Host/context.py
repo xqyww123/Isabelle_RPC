@@ -31,8 +31,8 @@ from .rpc import Connection
 from .position import IsabellePosition
 from .universal_key import EntityKind, universal_key
 
-# (universal_key, definition_position_or_None)
-type entity_entry = tuple[universal_key, IsabellePosition | None]
+# (universal_key, full_name, definition_position_or_None)
+type entity_entry = tuple[universal_key, str, IsabellePosition | None]
 
 # # Debug reverse map: universal_key → readable name
 # _debug_key_names: dict[bytes, str] = {}
@@ -65,8 +65,8 @@ async def _call(connection: Connection, callback_name: str,
                  term_patterns, type_patterns, theories_include,
                  name_contains, limit))
     entries: list[entity_entry] = []
-    for k_raw, (file, line, offset) in entries_raw:
-        entries.append((bytes(k_raw), _mk_pos(file, line, offset)))
+    for k_raw, name, (file, line, offset) in entries_raw:
+        entries.append((bytes(k_raw), name, _mk_pos(file, line, offset)))
     return entries, list(warnings)
 
 
@@ -241,12 +241,17 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     Warnings include notices about undeclared free variables in term patterns.
     limit<0 (default -1) means no limit; limit>0 caps each per-kind RPC call.
     """
+    import logging as _logging
+    import time as _time
+    _perf_log = _logging.getLogger("perf.entities_of")
+    _t_total = _time.perf_counter()
     result: list[entity_entry] = []
     all_warnings: list[str] = []
     for kind in kinds:
         func = _KIND_TO_FUNC.get(kind)
         if func is None:
             continue
+        _t_kind = _time.perf_counter()
         # Pass only the parameters each function accepts
         if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE):
             entries, warnings = await func(connection, theory, the_theory_only,
@@ -270,8 +275,11 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
                                   theories_include=theories_include,
                                   name_contains=name_contains,
                                   limit=limit)
+        _perf_log.info("entities_of: kind=%s %.3fs (%d entries)",
+                       kind.name, _time.perf_counter() - _t_kind, len(entries))
         result.extend(entries)
         all_warnings.extend(warnings)
+    _perf_log.info("entities_of: total %.3fs (%d entries)", _time.perf_counter() - _t_total, len(result))
     return result, all_warnings
 
 
