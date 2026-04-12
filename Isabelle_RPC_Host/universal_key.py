@@ -84,12 +84,27 @@ class UndefinedEntity(Exception):
         super().__init__(f"Undefined {kind.label}: {name!r}")
 
 
-async def universal_key_of(connection: Connection, kind: EntityKind, name: str) -> bytes:
-    """Request the universal key for an Isabelle entity via callback."""
+async def universal_key_and_name_of(
+    connection: Connection, kind: EntityKind, name: str
+) -> tuple[universal_key, str]:
+    """Request the universal key and resolved full name for an Isabelle entity.
+
+    The ML callback interns the given xname and returns both the universal key
+    and the fully-qualified name. Callers that need the canonical full name
+    (e.g. to avoid using a user-provided short name as an entity identifier)
+    should prefer this over ``universal_key_of``.
+    """
     try:
-        return await connection.callback("universal_key_of", (int(kind), name))
+        uk, full_name = await connection.callback("universal_key_of", (int(kind), name))
+        return (bytes(uk), full_name)
     except IsabelleError as e:
         msg = e.errors[0] if e.errors else str(e)
         if msg.startswith("Undefined "):
             raise UndefinedEntity(kind, name, msg)
         raise
+
+
+async def universal_key_of(connection: Connection, kind: EntityKind, name: str) -> universal_key:
+    """Request the universal key for an Isabelle entity via callback."""
+    uk, _ = await universal_key_and_name_of(connection, kind, name)
+    return uk

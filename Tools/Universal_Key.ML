@@ -62,18 +62,21 @@ val hasher : universal_key -> word
 structure UK_Table : HASH_TABLE where type key = universal_key
 
 val key_of_theory'  : theory -> universal_key
-val key_of_theory   : Context.generic -> xstring -> universal_key
-val key_of_constant : Context.generic -> xstring -> universal_key
+val key_of_theory   : Context.generic -> xstring -> universal_key * string
+val key_of_constant : Context.generic -> xstring -> universal_key * string
 type thm_uk_cache
 val new_thm_uk_cache : unit -> thm_uk_cache
-val key_of_theorem  : thm_uk_cache option -> Context.generic -> xstring -> universal_key * thm * bool
+val key_of_theorem  : thm_uk_cache option -> Context.generic -> xstring
+                    -> universal_key * thm * bool * string
 val key_of_theorem' : thm_uk_cache option -> Context.generic -> thm -> universal_key
-val key_of_type     : Context.generic -> xstring -> universal_key
-val key_of_class    : Context.generic -> xstring -> universal_key
-val key_of_locale   : Context.generic -> xstring -> universal_key
-val key_of_introduction_rule  : thm_uk_cache option -> Context.generic -> xstring -> universal_key
+val key_of_type     : Context.generic -> xstring -> universal_key * string
+val key_of_class    : Context.generic -> xstring -> universal_key * string
+val key_of_locale   : Context.generic -> xstring -> universal_key * string
+val key_of_introduction_rule  : thm_uk_cache option -> Context.generic -> xstring
+                              -> universal_key * string
 val key_of_introduction_rule' : thm_uk_cache option -> Context.generic -> thm -> universal_key
-val key_of_elimination_rule   : thm_uk_cache option -> Context.generic -> xstring -> universal_key
+val key_of_elimination_rule   : thm_uk_cache option -> Context.generic -> xstring
+                              -> universal_key * string
 val key_of_elimination_rule'  : thm_uk_cache option -> Context.generic -> thm -> universal_key
 val key_of          : thm_uk_cache option -> Context.generic -> entity -> universal_key
 (* key_of'' pre-captures name spaces from the context, returning a closure.
@@ -246,15 +249,17 @@ fun key_of_ns_entity tag make_ck space context xname =
     val ns_entry = Name_Space.the_entry space fq_name
     val thy_long_name = default_thy_long_name context (#theory_long_name ns_entry)
     val ck = (make_ck fq_name, thy_long_name)
-  in
-    cached_key ck (fn () =>
-      build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                tag (ent_string fq_name))
-  end
+    val uk =
+      cached_key ck (fn () =>
+        build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
+                  tag (ent_string fq_name))
+  in (uk, fq_name) end
 
 fun key_of_theory' thy = Theory_Hash.hash_of thy
 
-fun key_of_theory context xname = key_of_theory' (resolve_theory context xname)
+fun key_of_theory context xname =
+  let val thy = resolve_theory context xname
+  in (key_of_theory' thy, Context.theory_long_name thy) end
 
 fun key_of_constant context =
   key_of_ns_entity 0wx01 Constant
@@ -334,7 +339,7 @@ fun key_of_theorem cache context =
         then cached_key (Named_Theorem (Thm.get_name_hint thm), thy_long_name) compute
         else cached_thm_key cache thm compute
       val is_global = Facts.defined global_facts full_name
-    in (uk, thm, is_global) end
+    in (uk, thm, is_global, full_name) end
   end
 
 end (* local parse_thm_xname *)
@@ -392,21 +397,23 @@ val key_of_elimination_rule'  = key_of_rule 0wx22 Named_Elimination_Rule
 end
 
 fun key_of_introduction_rule cache context xname =
-  key_of_introduction_rule' cache context (#2 (key_of_theorem cache context xname))
+  let val (_, thm, _, full_name) = key_of_theorem cache context xname
+  in (key_of_introduction_rule' cache context thm, full_name) end
 
 fun key_of_elimination_rule cache context xname =
-  key_of_elimination_rule' cache context (#2 (key_of_theorem cache context xname))
+  let val (_, thm, _, full_name) = key_of_theorem cache context xname
+  in (key_of_elimination_rule' cache context thm, full_name) end
 
-fun key_of cache context (Constant name) = key_of_constant context name
+fun key_of _     context (Constant name) = #1 (key_of_constant context name)
   | key_of cache context (Theorem thm) = key_of_theorem' cache context thm
   | key_of cache context (Named_Theorem name) = #1 (key_of_theorem cache context name)
-  | key_of _ context (Type name) = key_of_type context name
-  | key_of _ context (Class name) = key_of_class context name
-  | key_of _ context (Locale name) = key_of_locale context name
+  | key_of _     context (Type name) = #1 (key_of_type context name)
+  | key_of _     context (Class name) = #1 (key_of_class context name)
+  | key_of _     context (Locale name) = #1 (key_of_locale context name)
   | key_of cache context (Introduction_Rule thm) = key_of_introduction_rule' cache context thm
-  | key_of cache context (Named_Introduction_Rule name) = key_of_introduction_rule cache context name
+  | key_of cache context (Named_Introduction_Rule name) = #1 (key_of_introduction_rule cache context name)
   | key_of cache context (Elimination_Rule thm) = key_of_elimination_rule' cache context thm
-  | key_of cache context (Named_Elimination_Rule name) = key_of_elimination_rule cache context name
+  | key_of cache context (Named_Elimination_Rule name) = #1 (key_of_elimination_rule cache context name)
 
 fun key_of'' cache context =
   let
@@ -415,12 +422,12 @@ fun key_of'' cache context =
     val type_key   = key_of_type context
     val class_key  = key_of_class context
     val locale_key = key_of_locale context
-  in fn (Constant name)      => const_key name
+  in fn (Constant name)      => #1 (const_key name)
       | (Theorem thm)        => key_of_theorem' cache context thm
       | (Named_Theorem name) => #1 (thm_key name)
-      | (Type name)          => type_key name
-      | (Class name)         => class_key name
-      | (Locale name)        => locale_key name
+      | (Type name)          => #1 (type_key name)
+      | (Class name)         => #1 (class_key name)
+      | (Locale name)        => #1 (locale_key name)
       | (Introduction_Rule thm) => key_of_introduction_rule' cache context thm
       | (Named_Introduction_Rule name) =>
           key_of_introduction_rule' cache context (#2 (thm_key name))
@@ -441,12 +448,15 @@ fun make_universal_key_callback' (cache : thm_uk_cache option) (context : Contex
     arg_schema = MessagePackBinIO.Unpack.unpackPair
                    (MessagePackBinIO.Unpack.unpackInt,
                     MessagePackBinIO.Unpack.unpackString),
-    ret_schema = MessagePackBinIO.Pack.packBytes,
+    ret_schema = MessagePackBinIO.Pack.packPair
+                   (MessagePackBinIO.Pack.packBytes,
+                    MessagePackBinIO.Pack.packString),
     function = fn (kind, name) =>
       case kind of
         0 => key_of_theory context name
       | 1 => key_of_constant context name
-      | 2 => #1 (key_of_theorem cache context name)
+      | 2 => let val (uk, _, _, full_name) = key_of_theorem cache context name
+             in (uk, full_name) end
       | 3 => key_of_type context name
       | 4 => key_of_class context name
       | 5 => key_of_locale context name

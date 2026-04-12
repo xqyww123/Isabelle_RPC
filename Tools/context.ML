@@ -362,7 +362,7 @@ fun make_constants_callback filter_opt (context : Context.generic)
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
-        val key_of = Universal_Key.key_of_constant ctx
+        val key_of = #1 o Universal_Key.key_of_constant ctx
         val space = Consts.space_of (Context.cases Sign.consts_of Proof_Context.consts_of ctx)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
@@ -519,7 +519,7 @@ fun make_types_callback filter_opt (context : Context.generic)
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
-        val key_of = Universal_Key.key_of_type ctx
+        val key_of = #1 o Universal_Key.key_of_type ctx
         val space = Context.cases Sign.type_space Proof_Context.type_space ctx
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
@@ -538,7 +538,7 @@ fun make_classes_callback filter_opt (context : Context.generic)
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
-        val key_of = Universal_Key.key_of_class ctx
+        val key_of = #1 o Universal_Key.key_of_class ctx
         val space = Context.cases Sign.class_space Proof_Context.class_space ctx
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
@@ -557,7 +557,7 @@ fun make_locales_callback filter_opt (context : Context.generic)
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
-        val key_of = Universal_Key.key_of_locale ctx
+        val key_of = #1 o Universal_Key.key_of_locale ctx
         val space = Locale.locale_space (Context.theory_of ctx)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)

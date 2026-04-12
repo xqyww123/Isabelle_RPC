@@ -35,7 +35,8 @@ class ColorFormatter(logging.Formatter):
 
 class IsabelleError(Exception):
     def __init__(self, errors : list[str], errobj: Any):
-        self.errors = errors
+        from .unicode import pretty_unicode
+        self.errors = [pretty_unicode(e) for e in errors]
         self.obj = errobj
         super().__init__(self.errors)
 
