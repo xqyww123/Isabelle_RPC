@@ -73,6 +73,12 @@ signature CONTEXT_CALLBACKS = sig
   val make_elimination_rules_callback :
     (Context.generic -> thm list) -> (string * thm -> bool) option ->
     Context.generic -> Remote_Procedure_Calling.callback'
+  val make_induction_rules_callback :
+    (Context.generic -> thm list) -> (string * thm -> bool) option ->
+    Context.generic -> Remote_Procedure_Calling.callback'
+  val make_case_split_rules_callback :
+    (Context.generic -> thm list) -> (string * thm -> bool) option ->
+    Context.generic -> Remote_Procedure_Calling.callback'
 end
 
 structure Context_Callbacks : CONTEXT_CALLBACKS = struct
@@ -684,6 +690,12 @@ fun make_introduction_rules_callback extract_thms =
 fun make_elimination_rules_callback extract_thms =
   make_rules_callback "Context.elimination_rules"
     (Universal_Key.key_of_elimination_rule' NONE) extract_thms
+fun make_induction_rules_callback extract_thms =
+  make_rules_callback "Context.induction_rules"
+    (Universal_Key.key_of_induction_rule' NONE) extract_thms
+fun make_case_split_rules_callback extract_thms =
+  make_rules_callback "Context.case_split_rules"
+    (Universal_Key.key_of_case_split_rule' NONE) extract_thms
 end
 
 end (*local*)

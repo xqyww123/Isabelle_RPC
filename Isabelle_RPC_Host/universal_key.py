@@ -15,6 +15,8 @@ class EntityKind(IntEnum):
     LOCALE = 5
     INTRODUCTION_RULE = 0x12
     ELIMINATION_RULE = 0x22
+    INDUCTION_RULE = 0x32
+    CASE_SPLIT_RULE = 0x42
 
     @property
     def label(self) -> str:
@@ -26,7 +28,8 @@ class EntityKind(IntEnum):
 
 EntityKind.ALL = [EntityKind.CONSTANT, EntityKind.THEOREM, EntityKind.TYPE,  # type: ignore
                   EntityKind.CLASS, EntityKind.LOCALE,
-                  EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE]
+                  EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
+                  EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE]
 
 _ENTITY_LABELS = {
     EntityKind.CONSTANT: "constant",
@@ -36,6 +39,8 @@ _ENTITY_LABELS = {
     EntityKind.LOCALE: "locale",
     EntityKind.INTRODUCTION_RULE: "introduction rule",
     EntityKind.ELIMINATION_RULE: "elimination rule",
+    EntityKind.INDUCTION_RULE: "induction rule",
+    EntityKind.CASE_SPLIT_RULE: "case-split rule",
 }
 
 _LABEL_TO_ENTITY = {v: k for k, v in _ENTITY_LABELS.items()}
@@ -69,7 +74,8 @@ def destruct_key(key: universal_key) -> Entity:
         return Entity(theory=theory, kind=EntityKind.THEORY, name=None)
     kind = EntityKind(key[16])
     payload = key[17:]
-    if kind in (EntityKind.THEOREM, EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE):
+    if kind in (EntityKind.THEOREM, EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
+                EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE):
         name = bytes(payload)  # raw 15-byte digest
     else:
         name = payload.decode("utf-8")

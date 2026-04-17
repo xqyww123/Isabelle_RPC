@@ -21,7 +21,8 @@
   - tag: 1-byte entity kind discriminator:
       0x01 = Constant, 0x02 = Theorem,
       0x03 = Type, 0x04 = Class, 0x05 = Locale,
-      0x12 = Introduction_Rule, 0x22 = Elimination_Rule
+      0x12 = Introduction_Rule, 0x22 = Elimination_Rule,
+      0x32 = Induction_Rule, 0x42 = Case_Split_Rule
   - entity: variable-length payload identifying the entity within its theory.
 
   Key sizes
@@ -31,6 +32,7 @@
   - Namespace entity keys: 17 + |name| bytes  (constant, type, class, locale)
   - Theorem keys:          32 bytes  (16 + 1 + 15, always)
   - Intro/Elim rule keys:  32 bytes  (same layout as theorem keys)
+  - Induct/Cases rule keys: 32 bytes (same layout as theorem keys)
 
   Theorem keys (and introduction/elimination rule keys) use the first 15 bytes
   of the 128-bit term digest (Term_Digest.thm128) as entity payload,
@@ -44,6 +46,7 @@ type theory_long_name = string
 
 datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
                      | IntroductionRuleK | EliminationRuleK
+                     | InductionRuleK | CaseSplitRuleK
 
 datatype entity =
       Constant of fully_quantified_name
@@ -56,6 +59,10 @@ datatype entity =
     | Named_Introduction_Rule of fully_quantified_name
     | Elimination_Rule of thm
     | Named_Elimination_Rule of fully_quantified_name
+    | Induction_Rule of thm
+    | Named_Induction_Rule of fully_quantified_name
+    | Case_Split_Rule of thm
+    | Named_Case_Split_Rule of fully_quantified_name
 
 val hasher : universal_key -> word
 
@@ -78,6 +85,12 @@ val key_of_introduction_rule' : thm_uk_cache option -> Context.generic -> thm ->
 val key_of_elimination_rule   : thm_uk_cache option -> Context.generic -> xstring
                               -> universal_key * string
 val key_of_elimination_rule'  : thm_uk_cache option -> Context.generic -> thm -> universal_key
+val key_of_induction_rule     : thm_uk_cache option -> Context.generic -> xstring
+                              -> universal_key * string
+val key_of_induction_rule'    : thm_uk_cache option -> Context.generic -> thm -> universal_key
+val key_of_case_split_rule    : thm_uk_cache option -> Context.generic -> xstring
+                              -> universal_key * string
+val key_of_case_split_rule'   : thm_uk_cache option -> Context.generic -> thm -> universal_key
 val key_of          : thm_uk_cache option -> Context.generic -> entity -> universal_key
 (* key_of'' pre-captures name spaces from the context, returning a closure.
    Use when computing keys for many entities from the same context. *)
@@ -103,6 +116,7 @@ type fully_quantified_name = string
 type theory_long_name = string
 datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
                      | IntroductionRuleK | EliminationRuleK
+                     | InductionRuleK | CaseSplitRuleK
 datatype entity =
       Constant of fully_quantified_name
     | Theorem  of thm
@@ -114,6 +128,10 @@ datatype entity =
     | Named_Introduction_Rule of fully_quantified_name
     | Elimination_Rule of thm
     | Named_Elimination_Rule of fully_quantified_name
+    | Induction_Rule of thm
+    | Named_Induction_Rule of fully_quantified_name
+    | Case_Split_Rule of thm
+    | Named_Case_Split_Rule of fully_quantified_name
 type caching_key = entity * theory_long_name
 type universal_key = Word8Vector.vector
 val hasher = Hashers.bitvec
@@ -147,6 +165,16 @@ structure CacheTab = Hash_Table(struct
                    Hashers.string thy))
     | hash (Named_Elimination_Rule name, thy) =
         Word.xorb (0wx23, Word.xorb (Hashers.string name, Hashers.string thy))
+    | hash (Induction_Rule thm, thy) =
+        Word.xorb (0wx32, Word.xorb (Term_Digest.digest128_hasher (Term_Digest.thm128 thm),
+                   Hashers.string thy))
+    | hash (Named_Induction_Rule name, thy) =
+        Word.xorb (0wx33, Word.xorb (Hashers.string name, Hashers.string thy))
+    | hash (Case_Split_Rule thm, thy) =
+        Word.xorb (0wx42, Word.xorb (Term_Digest.digest128_hasher (Term_Digest.thm128 thm),
+                   Hashers.string thy))
+    | hash (Named_Case_Split_Rule name, thy) =
+        Word.xorb (0wx43, Word.xorb (Hashers.string name, Hashers.string thy))
   fun eq ((Constant n1, t1), (Constant n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Theorem thm1, t1), (Theorem thm2, t2)) =
         Thm.eq_thm (thm1, thm2) andalso t1 = t2
@@ -161,6 +189,14 @@ structure CacheTab = Hash_Table(struct
     | eq ((Elimination_Rule thm1, t1), (Elimination_Rule thm2, t2)) =
         Thm.eq_thm (thm1, thm2) andalso t1 = t2
     | eq ((Named_Elimination_Rule n1, t1), (Named_Elimination_Rule n2, t2)) =
+        n1 = n2 andalso t1 = t2
+    | eq ((Induction_Rule thm1, t1), (Induction_Rule thm2, t2)) =
+        Thm.eq_thm (thm1, thm2) andalso t1 = t2
+    | eq ((Named_Induction_Rule n1, t1), (Named_Induction_Rule n2, t2)) =
+        n1 = n2 andalso t1 = t2
+    | eq ((Case_Split_Rule thm1, t1), (Case_Split_Rule thm2, t2)) =
+        Thm.eq_thm (thm1, thm2) andalso t1 = t2
+    | eq ((Named_Case_Split_Rule n1, t1), (Named_Case_Split_Rule n2, t2)) =
         n1 = n2 andalso t1 = t2
     | eq _ = false
 end)
@@ -394,6 +430,8 @@ fun key_of_rule tag make_named cache context thm =
 in
 val key_of_introduction_rule' = key_of_rule 0wx12 Named_Introduction_Rule
 val key_of_elimination_rule'  = key_of_rule 0wx22 Named_Elimination_Rule
+val key_of_induction_rule'    = key_of_rule 0wx32 Named_Induction_Rule
+val key_of_case_split_rule'   = key_of_rule 0wx42 Named_Case_Split_Rule
 end
 
 fun key_of_introduction_rule cache context xname =
@@ -403,6 +441,14 @@ fun key_of_introduction_rule cache context xname =
 fun key_of_elimination_rule cache context xname =
   let val (_, thm, _, full_name) = key_of_theorem cache context xname
   in (key_of_elimination_rule' cache context thm, full_name) end
+
+fun key_of_induction_rule cache context xname =
+  let val (_, thm, _, full_name) = key_of_theorem cache context xname
+  in (key_of_induction_rule' cache context thm, full_name) end
+
+fun key_of_case_split_rule cache context xname =
+  let val (_, thm, _, full_name) = key_of_theorem cache context xname
+  in (key_of_case_split_rule' cache context thm, full_name) end
 
 fun key_of _     context (Constant name) = #1 (key_of_constant context name)
   | key_of cache context (Theorem thm) = key_of_theorem' cache context thm
@@ -414,6 +460,10 @@ fun key_of _     context (Constant name) = #1 (key_of_constant context name)
   | key_of cache context (Named_Introduction_Rule name) = #1 (key_of_introduction_rule cache context name)
   | key_of cache context (Elimination_Rule thm) = key_of_elimination_rule' cache context thm
   | key_of cache context (Named_Elimination_Rule name) = #1 (key_of_elimination_rule cache context name)
+  | key_of cache context (Induction_Rule thm) = key_of_induction_rule' cache context thm
+  | key_of cache context (Named_Induction_Rule name) = #1 (key_of_induction_rule cache context name)
+  | key_of cache context (Case_Split_Rule thm) = key_of_case_split_rule' cache context thm
+  | key_of cache context (Named_Case_Split_Rule name) = #1 (key_of_case_split_rule cache context name)
 
 fun key_of'' cache context =
   let
@@ -434,6 +484,12 @@ fun key_of'' cache context =
       | (Elimination_Rule thm) => key_of_elimination_rule' cache context thm
       | (Named_Elimination_Rule name) =>
           key_of_elimination_rule' cache context (#2 (thm_key name))
+      | (Induction_Rule thm) => key_of_induction_rule' cache context thm
+      | (Named_Induction_Rule name) =>
+          key_of_induction_rule' cache context (#2 (thm_key name))
+      | (Case_Split_Rule thm) => key_of_case_split_rule' cache context thm
+      | (Named_Case_Split_Rule name) =>
+          key_of_case_split_rule' cache context (#2 (thm_key name))
   end
 
 val pack_universal_key = MessagePackBinIO.Pack.packBytes
@@ -462,6 +518,8 @@ fun make_universal_key_callback' (cache : thm_uk_cache option) (context : Contex
       | 5 => key_of_locale context name
       | 18 (* 0x12 *) => key_of_introduction_rule cache context name
       | 34 (* 0x22 *) => key_of_elimination_rule cache context name
+      | 50 (* 0x32 *) => key_of_induction_rule cache context name
+      | 66 (* 0x42 *) => key_of_case_split_rule cache context name
       | _ => error ("Unknown entity kind: " ^ Int.toString kind),
     timeout = NONE
   }
@@ -485,6 +543,10 @@ fun pack_entity_kind (Constant _)               = packInt 1
   | pack_entity_kind (Named_Introduction_Rule _) = packInt 0x12
   | pack_entity_kind (Elimination_Rule _)       = packInt 0x22
   | pack_entity_kind (Named_Elimination_Rule _) = packInt 0x22
+  | pack_entity_kind (Induction_Rule _)        = packInt 0x32
+  | pack_entity_kind (Named_Induction_Rule _)  = packInt 0x32
+  | pack_entity_kind (Case_Split_Rule _)       = packInt 0x42
+  | pack_entity_kind (Named_Case_Split_Rule _) = packInt 0x42
 
 fun pack_entity_kind' ConstantK         = packInt 1
   | pack_entity_kind' TheoremK          = packInt 2
@@ -493,6 +555,8 @@ fun pack_entity_kind' ConstantK         = packInt 1
   | pack_entity_kind' LocaleK           = packInt 5
   | pack_entity_kind' IntroductionRuleK = packInt 0x12
   | pack_entity_kind' EliminationRuleK  = packInt 0x22
+  | pack_entity_kind' InductionRuleK    = packInt 0x32
+  | pack_entity_kind' CaseSplitRuleK    = packInt 0x42
 
 val unpack_entity_kind : entity_kind unpacker = fn ins =>
   let val (k, ins') = unpackInt ins
@@ -500,6 +564,7 @@ val unpack_entity_kind : entity_kind unpacker = fn ins =>
         1 => ConstantK | 2 => TheoremK | 3 => TypeK
       | 4 => ClassK | 5 => LocaleK
       | 0x12 => IntroductionRuleK | 0x22 => EliminationRuleK
+      | 0x32 => InductionRuleK | 0x42 => CaseSplitRuleK
       | _ => raise Unpack, ins')
   end
 
@@ -518,6 +583,10 @@ fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
   | pack_entity (Named_Introduction_Rule name) = packPair (packInt, packString) (0x12, name)
   | pack_entity (Elimination_Rule thm)       = pack_thm_entity 0x22 thm
   | pack_entity (Named_Elimination_Rule name) = packPair (packInt, packString) (0x22, name)
+  | pack_entity (Induction_Rule thm)        = pack_thm_entity 0x32 thm
+  | pack_entity (Named_Induction_Rule name)  = packPair (packInt, packString) (0x32, name)
+  | pack_entity (Case_Split_Rule thm)       = pack_thm_entity 0x42 thm
+  | pack_entity (Named_Case_Split_Rule name) = packPair (packInt, packString) (0x42, name)
 
 val unpack_entity : entity unpacker =
   unpackPair_dep' unpack_entity_kind (fn kind => case kind of
@@ -527,7 +596,9 @@ val unpack_entity : entity unpacker =
     | ClassK            => unpackString >> Class
     | LocaleK           => unpackString >> Locale
     | IntroductionRuleK => unpackString >> Named_Introduction_Rule
-    | EliminationRuleK  => unpackString >> Named_Elimination_Rule)
+    | EliminationRuleK  => unpackString >> Named_Elimination_Rule
+    | InductionRuleK    => unpackString >> Named_Induction_Rule
+    | CaseSplitRuleK    => unpackString >> Named_Case_Split_Rule)
 
 end (* local MessagePackBinIO *)
 
