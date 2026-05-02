@@ -40,6 +40,9 @@
 *)
 signature UNIVERSAL_KEY = sig
 
+type context_unpacker = Context.generic MessagePackBinIO.Unpack.unpacker
+val static_context_unpacker : Context.generic -> context_unpacker
+
 eqtype universal_key
 type fully_quantified_name = string
 type theory_long_name = string
@@ -96,8 +99,8 @@ val key_of          : thm_uk_cache option -> Context.generic -> entity -> univer
    Use when computing keys for many entities from the same context. *)
 val key_of''        : thm_uk_cache option -> Context.generic -> entity -> universal_key
 
-val make_universal_key_callback  : Context.generic -> Remote_Procedure_Calling.callback'
-val make_universal_key_callback' : thm_uk_cache option -> Context.generic -> Remote_Procedure_Calling.callback'
+val make_universal_key_callback  : context_unpacker -> Remote_Procedure_Calling.callback'
+val make_universal_key_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
 
 val pack_universal_key : universal_key MessagePackBinIO.Pack.packer
 val unpack_universal_key : universal_key MessagePackBinIO.Unpack.unpacker
@@ -111,6 +114,12 @@ val unpack_entity : entity MessagePackBinIO.Unpack.unpacker
 end
 
 structure Universal_Key : UNIVERSAL_KEY = struct
+
+type context_unpacker = Context.generic MessagePackBinIO.Unpack.unpacker
+
+fun static_context_unpacker (ctx: Context.generic) : context_unpacker =
+  fn src => let val (_, src') = MessagePackBinIO.Unpack.unpackUnit src
+            in (ctx, src') end
 
 type fully_quantified_name = string
 type theory_long_name = string
@@ -497,17 +506,20 @@ val unpack_universal_key = MessagePackBinIO.Unpack.unpackBytes
 
 (* --- Callback for Python --- *)
 
-fun make_universal_key_callback' (cache : thm_uk_cache option) (context : Context.generic)
+fun make_universal_key_callback' (cache : thm_uk_cache option)
+    (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "universal_key_of",
     arg_schema = MessagePackBinIO.Unpack.unpackPair
-                   (MessagePackBinIO.Unpack.unpackInt,
-                    MessagePackBinIO.Unpack.unpackString),
+                   (ctxt_unpack,
+                    MessagePackBinIO.Unpack.unpackPair
+                      (MessagePackBinIO.Unpack.unpackInt,
+                       MessagePackBinIO.Unpack.unpackString)),
     ret_schema = MessagePackBinIO.Pack.packPair
                    (MessagePackBinIO.Pack.packBytes,
                     MessagePackBinIO.Pack.packString),
-    function = fn (kind, name) =>
+    function = fn (context, (kind, name)) =>
       case kind of
         0 => key_of_theory context name
       | 1 => key_of_constant context name
@@ -524,7 +536,7 @@ fun make_universal_key_callback' (cache : thm_uk_cache option) (context : Contex
     timeout = NONE
   }
 
-fun make_universal_key_callback context = make_universal_key_callback' NONE context
+fun make_universal_key_callback ctxt_unpack = make_universal_key_callback' NONE ctxt_unpack
 
 (* --- Entity serialization --- *)
 

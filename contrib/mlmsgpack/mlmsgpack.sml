@@ -74,6 +74,7 @@ functor MessagePack(S : sig
     val unpackTuple6 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker -> ('a * 'b * 'c * 'd * 'e * 'f) unpacker
     val unpackTuple7 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker * 'g unpacker -> ('a * 'b * 'c * 'd * 'e * 'f * 'g) unpacker
     val unpackTuple8 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker * 'g unpacker * 'h unpacker -> ('a * 'b * 'c * 'd * 'e * 'f * 'g * 'h) unpacker
+    val unpackTuple9 : 'a unpacker * 'b unpacker * 'c unpacker * 'd unpacker * 'e unpacker * 'f unpacker * 'g unpacker * 'h unpacker * 'i unpacker -> ('a * 'b * 'c * 'd * 'e * 'f * 'g * 'h * 'i) unpacker
 
     val unpackMapFold : ('a unpacker * 'b unpacker) -> ('a * 'b * 'c -> 'c) -> 'c -> 'c unpacker
     val unpackPairList : ('a unpacker * 'b unpacker) -> ('a * 'b) list unpacker
@@ -578,6 +579,22 @@ end = struct
         val (v8, ins8) = u8 ins7
       in
         ((v1, v2, v3, v4, v5, v6, v7, v8), ins8)
+      end
+
+    fun unpackTuple9 (u1, u2, u3, u4, u5, u6, u7, u8, u9) ins =
+      let
+        val ins0 = expect (fixArray 9) ins
+        val (v1, ins1) = u1 ins0
+        val (v2, ins2) = u2 ins1
+        val (v3, ins3) = u3 ins2
+        val (v4, ins4) = u4 ins3
+        val (v5, ins5) = u5 ins4
+        val (v6, ins6) = u6 ins5
+        val (v7, ins7) = u7 ins6
+        val (v8, ins8) = u8 ins7
+        val (v9, ins9) = u9 ins8
+      in
+        ((v1, v2, v3, v4, v5, v6, v7, v8, v9), ins9)
       end
 
     local

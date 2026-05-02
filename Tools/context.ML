@@ -1,14 +1,21 @@
 (*
   Context entity enumeration callbacks.
 
-  Each callback generator captures a Context.generic and returns a callback
-  that takes:
+  Each callback generator takes a `context_unpacker` — a msgpack unpacker that
+  reads context-identifying data from the callback argument stream and returns
+  a Context.generic.  Static callers supply `static_context_unpacker ctx` which
+  reads msgpack nil and returns the fixed context; the agent supplies an unpacker
+  that reads a state-id string and resolves the current proof state.
+
+  Each callback's wire argument is a pair  (ctxt_data, payload)  where
+  ctxt_data is consumed by the unpacker and payload is:
     (target_theory: string option, the_theory_only: bool, exclude: string list,
      term_patterns: string list, type_patterns: string list,
-     theories_include: string list, name_contains: string list, limit: int)
+     theories_include: string list, name_contains: string list, limit: int,
+     target_type: string)
 
   - target_theory: if SOME, resolve that long theory name and enumerate entities
-    from its context; if NONE, use the captured context.
+    from its context; if NONE, use the unpacked context.
   - the_theory_only: if true, return only entities defined in the target theory
     itself; otherwise all entities from the target theory and its ancestors.
     The exclude list is ignored in this case.
@@ -46,6 +53,11 @@ signature CONTEXT_CALLBACKS = sig
     thm: thm
   }
 
+  (* A msgpack unpacker that produces a Context.generic from the argument stream.
+     Static callers read nil; agent callers read a state-id string. *)
+  type context_unpacker = Universal_Key.context_unpacker
+  val static_context_unpacker : Context.generic -> context_unpacker
+
   (* Exported utilities for building caches externally *)
   val entry_def_pos : {pos: Position.T, serial: serial, group: serial,
     suppress: bool list, theory_long_name: string, concealed: bool} -> def_pos
@@ -53,35 +65,39 @@ signature CONTEXT_CALLBACKS = sig
   val mk_name_filter : string list -> string -> bool
   val mk_prop_pattern_matcher : Proof.context -> term list -> typ list -> term -> bool
 
-  val make_constants_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
+  val make_constants_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   (* cache_opt: when SOME (entries, facts), uses cached entries for global theorems
      and only runs the full pipeline on facts not in the cached Facts.T. *)
   val make_theorems_callback :
     (string * thm -> bool) option ->
     (cached_thm_entry list * Facts.T) option ->
-    Context.generic -> Remote_Procedure_Calling.callback'
-  val make_types_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
-  val make_classes_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
-  val make_locales_callback : (string -> bool) option -> Context.generic -> Remote_Procedure_Calling.callback'
-  val make_theory_long_name_callback : Context.generic -> Remote_Procedure_Calling.callback'
-  val make_theory_long_name_and_path_callback : Context.generic -> Remote_Procedure_Calling.callback'
+    context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_types_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_classes_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* The thm list extractor is supplied by the caller because Classical requires HOL,
      which is not available in this Pure-level file. *)
   val make_introduction_rules_callback :
     (Context.generic -> thm list) -> (string * thm -> bool) option ->
-    Context.generic -> Remote_Procedure_Calling.callback'
+    context_unpacker -> Remote_Procedure_Calling.callback'
   val make_elimination_rules_callback :
     (Context.generic -> thm list) -> (string * thm -> bool) option ->
-    Context.generic -> Remote_Procedure_Calling.callback'
+    context_unpacker -> Remote_Procedure_Calling.callback'
   val make_induction_rules_callback :
     (Context.generic -> thm list) -> (string * thm -> bool) option ->
-    Context.generic -> Remote_Procedure_Calling.callback'
+    context_unpacker -> Remote_Procedure_Calling.callback'
   val make_case_split_rules_callback :
     (Context.generic -> thm list) -> (string * thm -> bool) option ->
-    Context.generic -> Remote_Procedure_Calling.callback'
+    context_unpacker -> Remote_Procedure_Calling.callback'
 end
 
 structure Context_Callbacks : CONTEXT_CALLBACKS = struct
+
+type context_unpacker = Universal_Key.context_unpacker
+
+val static_context_unpacker = Universal_Key.static_context_unpacker
 
 type def_pos = string * int * int
 
@@ -289,6 +305,47 @@ fun mk_thm_pattern_matcher ctxt term_pats type_pats : thm -> bool =
   let val prop_matcher = mk_prop_pattern_matcher ctxt term_pats type_pats
   in fn thm => prop_matcher (Thm.full_prop_of thm) end
 
+(* Permissive: returns types of *all* schematic Vars in the rule's prop, not
+   only the inducted-on variable.  A more targeted extraction (e.g. only the
+   conclusion's last arg) would miss case-split rules whose conclusion is a
+   bare ?P, miss mutual induction with multiple eigen-vars, and miss rules
+   whose major premise has constraint shape (well_founded ?r ⟹ ...).  The
+   downstream filter is bidirectional unification, so extra candidate types
+   only widen the match and never produce false negatives. *)
+fun rule_target_types thm : typ list =
+  let
+    val prop = Thm.full_prop_of thm
+    val vars = Term.fold_aterms
+                 (fn t as Var _ => cons t | _ => I) prop []
+  in distinct (op =) (map (#2 o Term.dest_Var) vars) end
+  handle THM _ => [] | TERM _ => []
+
+(* Build a target-type filter for induction / case-split rules. NONE = no filter
+   (always true). SOME qT = keep rule iff some Var-type in the rule unifies with
+   qT in either direction (bidirectional Sign.typ_instance handles wildcards on
+   both sides). *)
+fun mk_target_type_filter _   NONE      = (fn _ : thm => true)
+  | mk_target_type_filter ctx (SOME qT) =
+      let val thy = Context.theory_of ctx
+          val typ_inst = Sign.typ_instance thy
+          fun unifies rT =
+            (typ_inst (qT, rT) handle TYPE _ => false)
+            orelse (typ_inst (rT, qT) handle TYPE _ => false)
+      in fn thm => List.exists unifies (rule_target_types thm) end
+
+(* "" => no filter (NONE).  Parse failure => no filter + warning (so the
+   agent learns the type string was malformed instead of silently getting
+   unfiltered results). *)
+fun parse_target_type context "" = (NONE, [])
+  | parse_target_type context s =
+      let val ctxt = Context.cases Proof_Context.init_global I context
+          val ctxt_pat = Proof_Context.set_mode Proof_Context.mode_pattern ctxt
+      in
+        \<^try>\<open>(SOME (Syntax.read_typ ctxt_pat s), [])
+        catch _ =>
+          (NONE, ["target_type " ^ quote s ^ " could not be parsed; filter ignored."])\<close>
+      end
+
 (* Build a constant-name filter from parsed type patterns.
    Only type_pats apply; term_pats are ignored for constants.
    Returns (string -> bool). Always true when type_pats is empty. *)
@@ -361,11 +418,12 @@ fun ns_filter limit key_of space target_name exclude_set include_set extra_filte
 
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 
-val arg_schema = unpackTuple8 (unpackOption unpackString, unpackBool,
+val arg_schema = unpackTuple9 (unpackOption unpackString, unpackBool,
       unpackList unpackString, unpackList unpackString,
       unpackList unpackString, unpackList unpackString,
       unpackList unpackString (* name_contains *),
-      unpackInt (* limit, <0 = no limit *))
+      unpackInt (* limit, <0 = no limit *),
+      unpackString (* target_type, "" = no filter; only used by induction/case-split rules *))
 
 val pack_pos = packTuple3 (packString, packInt, packInt)
 
@@ -373,14 +431,14 @@ val ret_schema = packPair (
   packList (packTuple3 (Universal_Key.pack_universal_key, packString, pack_pos)),
   packList packString (* warnings *))
 
-fun make_constants_callback filter_opt (context : Context.generic)
+fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.constants",
-    arg_schema = arg_schema,
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude,
-                    _, type_pat_strs, theories_include, name_contains, limit) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude,
+                    _, type_pat_strs, theories_include, name_contains, limit, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -398,14 +456,14 @@ fun make_constants_callback filter_opt (context : Context.generic)
     timeout = NONE
   }
 
-fun make_theorems_callback filter_opt cache_opt (context : Context.generic)
+fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theorems",
-    arg_schema = arg_schema,
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude,
-                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude,
+                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit, _)) =>
       let
         val t_start = Time.now ()
         val ctx = resolve_ctx context target_thy_opt
@@ -531,13 +589,13 @@ fun make_theorems_callback filter_opt cache_opt (context : Context.generic)
     timeout = NONE
   }
 
-fun make_types_callback filter_opt (context : Context.generic)
+fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.types",
-    arg_schema = arg_schema,
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -550,13 +608,13 @@ fun make_types_callback filter_opt (context : Context.generic)
     timeout = NONE
   }
 
-fun make_classes_callback filter_opt (context : Context.generic)
+fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.classes",
-    arg_schema = arg_schema,
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -569,13 +627,13 @@ fun make_classes_callback filter_opt (context : Context.generic)
     timeout = NONE
   }
 
-fun make_locales_callback filter_opt (context : Context.generic)
+fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.locales",
-    arg_schema = arg_schema,
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -588,23 +646,24 @@ fun make_locales_callback filter_opt (context : Context.generic)
     timeout = NONE
   }
 
-fun make_theory_long_name_callback (context : Context.generic)
+fun make_theory_long_name_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  let val name = Context.theory_long_name (Context.theory_of context)
-  in
-    Remote_Procedure_Calling.mk_callback {
-      name = "Context.the_theory_long_name",
-      arg_schema = unpackUnit,
-      ret_schema = packString,
-      function = fn () => name,
-      timeout = NONE
-    }
-  end
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.the_theory_long_name",
+    arg_schema = ctxt_unpack,
+    ret_schema = packString,
+    function = fn context =>
+      Context.theory_long_name (Context.theory_of context),
+    timeout = NONE
+  }
 
-fun make_theory_long_name_and_path_callback (context : Context.generic)
+fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  let
-    fun theory_long_name_and_path name =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.theory_long_name_and_path",
+    arg_schema = unpackPair (ctxt_unpack, unpackString),
+    ret_schema = packPair (packString, packString),
+    function = fn (context, name) =>
       let
         val thy = Theory_Hash.resolve_theory context name
         val thy_name = Context.theory_long_name thy
@@ -612,28 +671,22 @@ fun make_theory_long_name_and_path_callback (context : Context.generic)
         val thy_base = Long_Name.base_name thy_name
         val thy_file = Path.ext "thy" (master_dir + Path.basic thy_base)
         val file_path = File.platform_path (File.full_path master_dir thy_file)
-      in (thy_name, file_path) end
-  in
-    Remote_Procedure_Calling.mk_callback {
-      name = "Context.theory_long_name_and_path",
-      arg_schema = unpackString,
-      ret_schema = packPair (packString, packString),
-      function = theory_long_name_and_path,
-      timeout = NONE
-    }
-  end
+      in (thy_name, file_path) end,
+    timeout = NONE
+  }
 
 (* Introduction / elimination rule callbacks.
    The extract_thms function is provided by the caller (requires Classical from HOL). *)
 local
-fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Context.generic)
+fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = cb_name,
-    arg_schema = arg_schema,
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (target_thy_opt, the_theory_only, exclude,
-                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude,
+                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit,
+                    target_type_str)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val thy = Context.theory_of ctx
@@ -650,6 +703,8 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
+        val (target_type_opt, target_type_warnings) = parse_target_type ctx target_type_str
+        val target_type_filter = mk_target_type_filter ctx target_type_opt
         val name_filter = mk_name_filter name_contains
         val (entries, _) = fold (fn thm => fn (acc, remaining) =>
           if remaining = 0 then (acc, 0)
@@ -675,28 +730,30 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (context : Contex
                    | SOME is => (case thy_name_of of
                          SOME tn => Strhashtab.defined is tn
                        | NONE => true)
+                 (* Filters ordered cheap-to-expensive: target_type_filter walks
+                    the whole prop with bidir typ_instance per schematic Var,
+                    so push it after the infra filter_opt. *)
+                 fun check_filter_opt () = case filter_opt of
+                       NONE => true
+                     | SOME f => f (name, thm)
                in if not pass orelse not pass_include then (acc, remaining)
                   else if not (name_filter name) then (acc, remaining)
+                  else if not (check_filter_opt ()) then (acc, remaining)
                   else if not (thm_matches thm) then (acc, remaining)
+                  else if not (target_type_filter thm) then (acc, remaining)
                   else
-                    let val pass_filter = case filter_opt of
-                          NONE => true
-                        | SOME f => f (name, thm)
-                    in if not pass_filter then (acc, remaining)
-                       else
-                         let val k = key_of ctx thm
-                             val epos = case entry_opt of
-                                 SOME e => entry_def_pos e | NONE => ("", 0, 0)
-                         in (Strhashtab.update seen (name, ());
-                             if Bytehashtab.defined key_seen k then (acc, remaining)
-                             else (Bytehashtab.update key_seen (k, ());
-                                   ((k, name, epos) :: acc, remaining - 1)))
-                         end
+                    let val k = key_of ctx thm
+                        val epos = case entry_opt of
+                            SOME e => entry_def_pos e | NONE => ("", 0, 0)
+                    in (Strhashtab.update seen (name, ());
+                        if Bytehashtab.defined key_seen k then (acc, remaining)
+                        else (Bytehashtab.update key_seen (k, ());
+                              ((k, name, epos) :: acc, remaining - 1)))
                     end
                end
           end
           end) thms ([], limit)
-      in (rev entries, include_warnings @ warnings) end,
+      in (rev entries, include_warnings @ warnings @ target_type_warnings) end,
     timeout = NONE
   }
 in

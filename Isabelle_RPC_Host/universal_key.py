@@ -1,5 +1,5 @@
 from enum import IntEnum
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from .rpc import Connection, IsabelleError
 from .theory_hash import theory_hash
 
@@ -91,7 +91,7 @@ class UndefinedEntity(Exception):
 
 
 async def universal_key_and_name_of(
-    connection: Connection, kind: EntityKind, name: str
+    connection: Connection, kind: EntityKind, name: str, ctxt: Any = None
 ) -> tuple[universal_key, str]:
     """Request the universal key and resolved full name for an Isabelle entity.
 
@@ -101,7 +101,7 @@ async def universal_key_and_name_of(
     should prefer this over ``universal_key_of``.
     """
     try:
-        uk, full_name = await connection.callback("universal_key_of", (int(kind), name))
+        uk, full_name = await connection.callback("universal_key_of", (ctxt, (int(kind), name)))
         return (bytes(uk), full_name)
     except IsabelleError as e:
         msg = e.errors[0] if e.errors else str(e)
@@ -110,7 +110,7 @@ async def universal_key_and_name_of(
         raise
 
 
-async def universal_key_of(connection: Connection, kind: EntityKind, name: str) -> universal_key:
+async def universal_key_of(connection: Connection, kind: EntityKind, name: str, ctxt: Any = None) -> universal_key:
     """Request the universal key for an Isabelle entity via callback."""
-    uk, _ = await universal_key_and_name_of(connection, kind, name)
+    uk, _ = await universal_key_and_name_of(connection, kind, name, ctxt=ctxt)
     return uk

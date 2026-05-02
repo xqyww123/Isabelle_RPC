@@ -173,9 +173,9 @@ class Connection:
 
         return result
 
-    async def config_lookup(self, name: str) -> Any:
+    async def config_lookup(self, name: str, ctxt: Any = None) -> Any:
         """Look up an Isabelle config option by name via the Config.lookup callback."""
-        return await self.callback("Config.lookup", name)
+        return await self.callback("Config.lookup", (ctxt, name))
 
     # -- Isabelle logging via "log" callback ----------------------------------
 
