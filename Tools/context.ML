@@ -465,7 +465,6 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
     function = fn (context, (target_thy_opt, the_theory_only, exclude,
                     term_pat_strs, type_pat_strs, theories_include, name_contains, limit, _)) =>
       let
-        val t_start = Time.now ()
         val ctx = resolve_ctx context target_thy_opt
         val thy = Context.theory_of ctx
         val target_name = Context.theory_long_name thy
@@ -485,13 +484,6 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
             NONE => Facts.dest_static false [] facts
           | SOME (_, cached_facts) => Facts.dest_static false [cached_facts] facts
 
-        val t_dest = Time.now ()
-        val _ = tracing (String.concat [
-          "[perf.theorems_cb] uncached_facts: ",
-          Int.toString (length uncached_facts), " (",
-          Int.toString (Time.toMilliseconds (Time.- (t_dest, t_start))), "ms)"])
-
-        val t_loop = Time.now ()
         val (uncached_entries, _) = fold (fn (name, thms) => fn (acc, remaining) =>
            if remaining = 0 then (acc, 0)
            else
@@ -536,12 +528,6 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                   end
            end) uncached_facts ([], limit)
 
-        val t_uncached = Time.now ()
-        val _ = tracing (String.concat [
-          "[perf.theorems_cb] uncached_loop: ",
-          Int.toString (Time.toMilliseconds (Time.- (t_uncached, t_loop))), "ms (",
-          Int.toString (length uncached_entries), " entries)"])
-
         (* --- Cached path: apply only query-specific filters --- *)
         (* limit < 0 means unlimited; otherwise subtract what uncached already consumed *)
         val remaining_after_uncached =
@@ -570,21 +556,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                     end) cached ([], remaining_after_uncached)
               in results end
 
-        val t_cached = Time.now ()
-        val _ = tracing (String.concat [
-          "[perf.theorems_cb] cached_loop: ",
-          Int.toString (Time.toMilliseconds (Time.- (t_cached, t_uncached))), "ms (",
-          Int.toString (length cached_entries), " entries from ",
-          Int.toString (case cache_opt of NONE => 0 | SOME (c, _) => length c),
-          " cached)"])
-
         val entries = rev uncached_entries @ rev cached_entries
-
-        val t_end = Time.now ()
-        val _ = tracing (String.concat [
-          "[perf.theorems_cb] total: ",
-          Int.toString (Time.toMilliseconds (Time.- (t_end, t_start))), "ms (",
-          Int.toString (length entries), " entries)"])
       in (entries, include_warnings @ warnings) end,
     timeout = NONE
   }
