@@ -525,12 +525,22 @@ def fork_and_launch__():
     so.close()
     se.close()
 
-    # Write PID file (fixed name per address, so each launch overwrites the previous)
-    host_part, port_part = addr.rsplit(":", 1)
-    pid_file = os.path.join(os.path.dirname(log_file), f"RPC_{host_part}_{port_part}.pid")
-    with open(pid_file, "w") as f:
-        f.write(str(os.getpid()))
+    try:
+        # Write PID file (fixed name per address, so each launch overwrites the previous)
+        host_part, port_part = addr.rsplit(":", 1)
+        pid_file = os.path.join(os.path.dirname(log_file), f"RPC_{host_part}_{port_part}.pid")
+        with open(pid_file, "w") as f:
+            f.write(str(os.getpid()))
 
-    logger = mk_logger_(addr, log_file)
-    debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
-    launch_server_(addr, logger, debugging)
+        logger = mk_logger_(addr, log_file)
+        debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
+        launch_server_(addr, logger, debugging)
+    except Exception:
+        import traceback
+        msg = traceback.format_exc()
+        try:
+            logger.critical("RPC server failed to start", exc_info=True)  # type: ignore[possibly-undefined]
+        except Exception:
+            with open(log_file, "a") as f:
+                f.write(f"CRITICAL: RPC server failed to start\n{msg}")
+        os._exit(1)
