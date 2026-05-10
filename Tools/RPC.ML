@@ -163,10 +163,14 @@ val python_cmd =
       else py_path
   end
 
+val log_dir = (Path.variable "ISABELLE_HOME_USER" + Path.basic "log")
+           |> Isabelle_System.make_directory
+
+fun pid_file_path (host, port) =
+  log_dir + Path.basic (String.concat ["RPC_", host, "_", port, ".pid"])
+
 fun launch_RPC_host (host,port) =
-  let val log_dir = (Path.variable "ISABELLE_HOME_USER" + Path.basic "log")
-                 |> Isabelle_System.make_directory
-      fun mk_log_file () =
+  let fun mk_log_file () =
         let val result = Isabelle_System.bash_process (Bash.script "date '+%Y%m%d_%H%M%S'")
             val _ = Process_Result.check result
             val name = String.concat ["RPC_", host, "_", port, Process_Result.out result]
@@ -189,47 +193,91 @@ fun launch_RPC_host (host,port) =
                  ^ Process_Result.err result)
   end
 
-fun connect_agent_socket can_launch =
-  let val addr = get_addr ()
-      val sock = INetSock.TCP.socket ()
+fun kill_RPC_host (host, port) =
+  let val path = pid_file_path (host, port)
+   in if File.exists path
+      then
+        let val pid = File.read path |> Library.trim_line
+            val _ = try (fn () =>
+              Isabelle_System.bash_process (Bash.script ("kill " ^ Bash.string pid))) ()
+            val _ = try File.rm path
+         in () end
+      else ()
+  end
 
-      fun parse_addr (h,p) =
-         let fun err () = error ("Bad address " ^ h ^ ":" ^ p)
-             val host = case NetHostDB.getByName h of SOME host => host | NONE => err ()
-             val port = case Int.fromString p of SOME port => port | NONE => err ()
-          in INetSock.toAddr (NetHostDB.addr host, port)
-         end
-      val addr' = parse_addr addr
+fun parse_addr (h,p) =
+   let fun err () = error ("Bad address " ^ h ^ ":" ^ p)
+       val host = case NetHostDB.getByName h of SOME host => host | NONE => err ()
+       val port = case Int.fromString p of SOME port => port | NONE => err ()
+    in INetSock.toAddr (NetHostDB.addr host, port)
+   end
 
-   in if Socket.connectNB (sock, addr')
-    then sock
-    else let
-      val timeout = SOME (Time.fromSeconds 5)
-      val {wrs, exs, ...} = Socket.select {
-          rds = [],
-          wrs = [Socket.sockDesc sock],
-          exs = [Socket.sockDesc sock],
-          timeout = timeout
-      }
-      fun handle_err () = (
-          Socket.close sock;
-          if can_launch
-          then ( launch_RPC_host addr
-               ; connect_agent_socket false )
-          else error ("Fail to either connect or launch the RPC host on " ^ #1 addr ^ ":" ^ #2 addr) )
-     in case (wrs, exs)
-          of (_::_, []) => (* Ready for writing - check for errors *)
-              let val errorOccurred = Socket.Ctl.getERROR sock
-               in if errorOccurred
-                  then handle_err ()
-                  else sock
-              end
-           | _ => handle_err ()
+fun connect_retry addr remaining =
+  if remaining <= 0
+  then ( kill_RPC_host addr
+       ; error (String.concat
+           ["Fail to connect to RPC host on ", #1 addr, ":", #2 addr,
+            " after launch (timed out)."]) )
+  else
+    let val sock = INetSock.TCP.socket ()
+        val addr' = parse_addr addr
+     in if Socket.connectNB (sock, addr')
+        then (tracing (String.concat ["RPC Host on ", #1 addr, ":", #2 addr, " is ready."]); sock)
+        else let
+          val {wrs, exs, ...} = Socket.select {
+              rds = [],
+              wrs = [Socket.sockDesc sock],
+              exs = [Socket.sockDesc sock],
+              timeout = SOME (Time.fromSeconds 1) }
+         in case (wrs, exs)
+              of (_::_, []) =>
+                  if Socket.Ctl.getERROR sock
+                  then (Socket.close sock; OS.Process.sleep (Time.fromSeconds 1);
+                        connect_retry addr (remaining - 1))
+                  else (tracing (String.concat ["RPC Host on ", #1 addr, ":", #2 addr, " is ready."]); sock)
+               | _ => (Socket.close sock; OS.Process.sleep (Time.fromSeconds 1);
+                       connect_retry addr (remaining - 1))
+        end
     end
+
+val launch_lock : unit Synchronized.var = Synchronized.var "RPC.launch_lock" ()
+
+fun try_connect addr =
+  let val sock = INetSock.TCP.socket ()
+      val addr' = parse_addr addr
+   in if Socket.connectNB (sock, addr')
+      then SOME sock
+      else let
+        val {wrs, exs, ...} = Socket.select {
+            rds = [],
+            wrs = [Socket.sockDesc sock],
+            exs = [Socket.sockDesc sock],
+            timeout = SOME (Time.fromSeconds 5) }
+       in case (wrs, exs)
+            of (_::_, []) =>
+                if Socket.Ctl.getERROR sock
+                then (Socket.close sock; NONE)
+                else SOME sock
+             | _ => (Socket.close sock; NONE)
+      end
+  end
+
+fun launch_and_retry addr =
+  Synchronized.change_result launch_lock (fn () =>
+    case try_connect addr
+      of SOME sock => (sock, ())
+       | NONE => ( launch_RPC_host addr
+                 ; (connect_retry addr 20, ()) ))
+
+fun connect_agent_socket () =
+  let val addr = get_addr ()
+   in case try_connect addr
+        of SOME sock => sock
+         | NONE => launch_and_retry addr
   end
 
 fun make_connection () : connection =
-  let val socket = connect_agent_socket true
+  let val socket = connect_agent_socket ()
       val (cin,cout) = make_streams_timeout socket
    in (Unsynchronized.ref cin, cout, Unsynchronized.ref NONE)
   end
