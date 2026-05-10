@@ -273,8 +273,25 @@ class Server:
                         self.logger.error(f"From {client_addr}, unknown RPC function {func_name}")
                         await connection.write_error(f"Unknown procedure {func_name}")
                         continue
+                    func_task = asyncio.create_task(func(arg, connection))
+                    reader_task = connection._reader_task
                     try:
-                        result = await func(arg, connection)
+                        if reader_task is not None and not reader_task.done():
+                            done, _ = await asyncio.wait(
+                                [func_task, reader_task],
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if reader_task in done:
+                                func_task.cancel()
+                                try:
+                                    await func_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                self.logger.info(f"From {client_addr}, cancelled {func_name} (connection closed)")
+                                return
+                            result = func_task.result()
+                        else:
+                            result = await func_task
                     except Exception as e:
                         self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
                         await connection.write_error(e)
