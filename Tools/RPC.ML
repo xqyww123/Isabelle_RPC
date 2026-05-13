@@ -269,11 +269,22 @@ fun launch_and_retry addr =
        | NONE => ( launch_RPC_host addr
                  ; (connect_retry addr 20, ()) ))
 
+fun auto_start_enabled () =
+  case getenv "AUTO_START_RPC_SERVER" of
+      "" => true
+    | s => (case String.map Char.toLower s of
+                "0" => false | "false" => false | _ => true)
+
 fun connect_agent_socket () =
   let val addr = get_addr ()
    in case try_connect addr
         of SOME sock => sock
-         | NONE => launch_and_retry addr
+         | NONE =>
+            if auto_start_enabled ()
+            then launch_and_retry addr
+            else error (String.concat
+                   ["Cannot connect to RPC host on ", #1 addr, ":", #2 addr,
+                    " (auto-start disabled by AUTO_START_RPC_SERVER)"])
   end
 
 fun make_connection () : connection =
