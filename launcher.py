@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import Isabelle_RPC_Host
 import logging
 import os
@@ -22,4 +23,4 @@ if __name__ == "__main__":
 
     # Create and start the server
     with Isabelle_RPC_Host.Server(addr, logger) as server:
-        server.run_server()
+        asyncio.run(server.run_server())
