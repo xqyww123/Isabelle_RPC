@@ -318,7 +318,6 @@ class Server:
                     raise
                 except Exception as e:
                     if self.debugging:
-                        import traceback
                         traceback.print_exc()
                         self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
                         raise
