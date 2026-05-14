@@ -7,6 +7,7 @@ import sys
 import socket
 import os
 import tempfile
+import traceback
 from enum import IntEnum
 from typing import Callable, TypeAlias, Any, Awaitable
 import importlib
@@ -293,8 +294,10 @@ class Server:
                         else:
                             result = await func_task
                     except Exception as e:
-                        self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}: {e}")
-                        await connection.write_error(e)
+                        tb = traceback.format_exception(e)
+                        tb_str = "".join(tb)
+                        self.logger.warning(f"From {client_addr}, error calling RPC function {func_name}:\n{tb_str}")
+                        await connection.write_error(tb_str)
                         if self.debugging:
                             raise
                         continue
