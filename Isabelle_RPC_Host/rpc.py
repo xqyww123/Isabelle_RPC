@@ -283,9 +283,16 @@ class Server:
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
                             if reader_task in done:
-                                func_task.cancel()
+                                # Grace period: let func_task finish processing
+                                # any already-resolved IsabelleError before cancelling.
                                 try:
-                                    await func_task
+                                    await asyncio.wait_for(asyncio.shield(func_task), timeout=3)
+                                except asyncio.TimeoutError:
+                                    func_task.cancel()
+                                    try:
+                                        await func_task
+                                    except (asyncio.CancelledError, Exception):
+                                        pass
                                 except (asyncio.CancelledError, Exception):
                                     pass
                                 self.logger.info(f"From {client_addr}, cancelled {func_name} (connection closed)")

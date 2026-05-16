@@ -306,10 +306,23 @@ fun key_of_theory context xname =
   let val thy = resolve_theory context xname
   in (key_of_theory' thy, Context.theory_long_name thy) end
 
-fun key_of_constant context =
-  key_of_ns_entity 0wx01 Constant
-    (Consts.space_of (Context.cases Sign.consts_of Proof_Context.consts_of context))
-    context
+fun key_of_constant context xname =
+  let val space = Consts.space_of (Context.cases Sign.consts_of Proof_Context.consts_of context)
+  in
+    if Name_Space.declared space (Name_Space.intern space xname) then
+      key_of_ns_entity 0wx01 Constant space context xname
+    else
+      Context.cases
+        (fn _ => error ("Undefined constant: " ^ quote xname))
+        (fn ctxt =>
+          case Variable.lookup_fixed ctxt xname of
+            SOME fq_name =>
+              let val thy = Proof_Context.theory_of ctxt
+              in (build_key (Theory_Hash.hash_of thy) 0wx01 (ent_string fq_name),
+                  fq_name) end
+          | NONE => error ("Undefined constant: " ^ quote xname))
+        context
+  end
 
 fun key_of_type context =
   key_of_ns_entity 0wx03 Type
