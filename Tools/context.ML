@@ -684,16 +684,19 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : co
           let val thm = Thm.transfer thy thm
           in if not (Thm.has_name_hint thm) then (acc, remaining)
              else
-          let val name = Thm.get_name_hint thm
-          in if Strhashtab.defined seen name then (acc, remaining)
+          let
+            val name = Thm.get_name_hint thm
+            val name_str = Thm_Name.print name
+          in if Strhashtab.defined seen name_str then (acc, remaining)
              else
                let
-                 val entry_opt = try (Name_Space.the_entry fact_space) name
+                 (* the_entry is keyed on the bare fact name, not the index *)
+                 val entry_opt = try (Name_Space.the_entry fact_space) (#1 name)
                  val thy_name_of = case entry_opt of
                      SOME e => (case #theory_long_name e of "" => NONE | tn => SOME tn)
                    | NONE => NONE
                  val pass = case exclude_set of
-                     NONE => String.isPrefix target_prefix name
+                     NONE => String.isPrefix target_prefix name_str
                    | SOME es => (case thy_name_of of
                          SOME tn => not (Strhashtab.defined es tn)
                        | NONE => true)
@@ -707,9 +710,9 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : co
                     so push it after the infra filter_opt. *)
                  fun check_filter_opt () = case filter_opt of
                        NONE => true
-                     | SOME f => f (name, thm)
+                     | SOME f => f (name_str, thm)
                in if not pass orelse not pass_include then (acc, remaining)
-                  else if not (name_filter name) then (acc, remaining)
+                  else if not (name_filter name_str) then (acc, remaining)
                   else if not (check_filter_opt ()) then (acc, remaining)
                   else if not (thm_matches thm) then (acc, remaining)
                   else if not (target_type_filter thm) then (acc, remaining)
@@ -717,10 +720,10 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : co
                     let val k = key_of ctx thm
                         val epos = case entry_opt of
                             SOME e => entry_def_pos e | NONE => ("", 0, 0)
-                    in (Strhashtab.update seen (name, ());
+                    in (Strhashtab.update seen (name_str, ());
                         if Bytehashtab.defined key_seen k then (acc, remaining)
                         else (Bytehashtab.update key_seen (k, ());
-                              ((k, name, epos) :: acc, remaining - 1)))
+                              ((k, name_str, epos) :: acc, remaining - 1)))
                     end
                end
           end

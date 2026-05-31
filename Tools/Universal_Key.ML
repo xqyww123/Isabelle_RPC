@@ -394,7 +394,7 @@ fun key_of_theorem cache context =
         build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                   0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
       val uk = if Thm.has_name_hint thm
-        then cached_key (Named_Theorem (Thm.get_name_hint thm), thy_long_name) compute
+        then cached_key (Named_Theorem (Thm_Name.print (Thm.get_name_hint thm)), thy_long_name) compute
         else cached_thm_key cache thm compute
       val is_global = Facts.defined global_facts full_name
     in (uk, thm, is_global, full_name) end
@@ -409,13 +409,15 @@ fun key_of_theorem' cache context thm =
       val fact_space = Facts.space_of
             (Context.cases Global_Theory.facts_of Proof_Context.facts_of context)
       val thy_long_name = default_thy_long_name context
-        (case try (Name_Space.the_entry fact_space) deriv_name of
+        (* the_entry is keyed on the bare fact name; the Thm_Name index
+           selects a theorem within a fact and is not a name-space key. *)
+        (case try (Name_Space.the_entry fact_space) (#1 deriv_name) of
            SOME e => #theory_long_name e
          | NONE => "")
       fun compute () =
         build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                   0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
-    in cached_key (Named_Theorem deriv_name, thy_long_name) compute end
+    in cached_key (Named_Theorem (Thm_Name.print deriv_name), thy_long_name) compute end
   else
     let
       val thy_long_name = default_thy_long_name context ""
@@ -435,13 +437,15 @@ fun key_of_rule tag make_named cache context thm =
       val fact_space = Facts.space_of
             (Context.cases Global_Theory.facts_of Proof_Context.facts_of context)
       fun thy_long_name () = default_thy_long_name context
-        (case try (Name_Space.the_entry fact_space) deriv_name of
+        (* the_entry is keyed on the bare fact name; the Thm_Name index
+           selects a theorem within a fact and is not a name-space key. *)
+        (case try (Name_Space.the_entry fact_space) (#1 deriv_name) of
            SOME e => #theory_long_name e
          | NONE => "")
       fun compute () =
         build_key (Theory_Hash.hash_of (resolve_theory context (thy_long_name ())))
                   tag (ent_digest128_15 (Term_Digest.thm128 thm))
-    in cached_key (make_named deriv_name, thy_long_name ()) compute end
+    in cached_key (make_named (Thm_Name.print deriv_name), thy_long_name ()) compute end
   else
     let
       val thy_long_name = default_thy_long_name context ""
@@ -595,7 +599,7 @@ val unpack_entity_kind : entity_kind unpacker = fn ins =>
 
 fun pack_thm_entity tag thm =
   if Thm.has_name_hint thm
-  then packPair (packInt, packString) (tag, Thm.get_name_hint thm)
+  then packPair (packInt, packString) (tag, Thm_Name.print (Thm.get_name_hint thm))
   else error "Cannot pack anonymous thm (no name hint)"
 
 fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
