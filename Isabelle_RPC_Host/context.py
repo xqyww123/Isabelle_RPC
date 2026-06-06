@@ -12,8 +12,10 @@ Args common to all entity functions:
         is ``True``.
     theories_not_include: Long theory names to exclude. Ignored when
         ``the_theory_only`` is ``True``.
-    theories_include: Theory names (short or fully qualified). Empty = no restriction.
-        If non-empty, only return entities defined in these theories.
+    theories_include: Case-insensitive substrings matched against each entity's
+        fully-qualified theory name; an entity is kept if its theory name
+        contains any of them (short fragments and full names both work). Empty =
+        no restriction. A substring matching no loaded theory yields a warning.
 
 Additional filtering (only on applicable entity kinds):
     term_patterns: Isabelle term pattern strings for structural filtering.

@@ -26,8 +26,10 @@
   - type_patterns: Isabelle type pattern strings. Empty = no restriction.
     All patterns must match (conjunction). Uses Sign.typ_instance on subtypes.
     Applicable to thm-like entities (types in proposition) and constants (constant type).
-  - theories_include: theory names (short or fully qualified). Empty = no restriction.
-    If non-empty, only return entities defined in these theories.
+  - theories_include: case-insensitive substrings matched against each entity's
+    fully-qualified theory name (any match keeps it, i.e. disjunction; short
+    fragments and full names both work). Empty = no restriction. A substring
+    matching no loaded theory yields a warning.
   - name_contains: case-insensitive substrings. Empty = no restriction.
     All substrings must match (conjunction).
   - limit: maximum number of results. <0 means no limit.
