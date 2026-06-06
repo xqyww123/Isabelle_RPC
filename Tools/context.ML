@@ -173,27 +173,37 @@ fun matches_subterm ctxt (pat, obj) =
 
 (* --- Pattern filter construction --- *)
 
-(* Resolve theories_include names to a set of long names.
-   Returns (include_set_opt, warnings).
-   - names = [] → (NONE, []) meaning "no restriction"
-   - all names unresolved → (SOME empty_set, warnings) meaning "zero matches"
-   - Unknown names produce warnings but do not abort. *)
-fun resolve_include_set context names =
-  if null names then (NONE, [])
+(* Build a theories_include filter: case-insensitive substring match on a
+   theory's fully-qualified (long) name. A theory passes if its long name
+   contains ANY of the given substrings (OR). Returns (thy_name -> bool,
+   warnings).
+   - names = [] → ((fn _ => true), []) meaning "no restriction".
+   - Substring match on the long name accepts both short fragments
+     ("Transcendental") and fully-qualified names ("HOL.Transcendental").
+   - Each substring that matches no loaded theory (the current theory or any
+     ancestor) yields a warning, so a typo surfaces instead of silently
+     filtering everything out. It does not abort the query. *)
+fun mk_include_filter context names =
+  if null names then ((fn _ : string => true), [])
   else
     let
-      fun resolve_one name =
-        let val long = Context.theory_long_name
-                         (Theory_Hash.resolve_theory context name)
-        in (SOME long, NONE) end
-        handle ERROR _ =>
-          (NONE,
-           SOME ("Unknown theory " ^ quote name ^
-                 " in theories_include; skipped"))
-      val pairs = map resolve_one names
-      val longs = map_filter #1 pairs
-      val warnings = distinct (op =) (map_filter #2 pairs)
-    in (SOME (Strhashtab.make_set longs), warnings) end
+      val pats_lower = map (String.map Char.toLower) names
+      val pred = fn thy_name =>
+        let val lower = String.map Char.toLower thy_name
+        in List.exists (fn pat => String.isSubstring pat lower) pats_lower end
+      val thy = Context.theory_of context
+      val loaded_lower =
+        map (String.map Char.toLower o Context.theory_long_name)
+            (thy :: Theory.ancestors_of thy)
+      val warnings =
+        distinct (op =)
+          (map_filter (fn (orig, pat) =>
+             if List.exists (fn nm => String.isSubstring pat nm) loaded_lower
+             then NONE
+             else SOME ("No loaded theory name contains " ^ quote orig ^
+                        " in theories_include; skipped"))
+           (names ~~ pats_lower))
+    in (pred, warnings) end
 
 (* Parse term and type pattern strings. Returns (term list, typ list, warnings).
    Empty input lists produce empty output lists (= no restriction).
@@ -228,13 +238,14 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
                                          (Term.add_free_names pat [])
              in if null undeclared then []
                 else let val plural = length undeclared > 1
+                         val wildcards = commas_quote (map (fn s => "?" ^ s) undeclared)
                      in [String.concat [
                          "Term pattern ", quote pat_str,
                          " contains undeclared free variable",
                          if plural then "s: " else ": ",
-                         commas_quote undeclared, ". ",
-                         if plural then "They are likely misspelled constants."
-                         else "It is likely a misspelled constant."]]
+                         commas_quote undeclared, ". Use ", wildcards,
+                         if plural then " to express named wildcards."
+                         else " to express a named wildcard."]]
                      end
              end) (term_pat_strs ~~ term_pats))
         val (type_pats, type_parse_warnings) =
@@ -375,7 +386,7 @@ fun mk_name_filter [] = (fn _ : string => true)
 
 (* --- ns_filter: shared for constants, types, classes, locales --- *)
 
-fun ns_filter limit key_of space target_name exclude_set include_set extra_filter filter_opt =
+fun ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt =
   let
     val names = Name_Space.get_names space
     val seen = Bytehashtab.empty 128
@@ -391,9 +402,7 @@ fun ns_filter limit key_of space target_name exclude_set include_set extra_filte
                       val pass = case exclude_set of
                            NONE => thy_name = target_name
                          | SOME es => not (Strhashtab.defined es thy_name)
-                      val pass_include = case include_set of
-                           NONE => true
-                         | SOME is => Strhashtab.defined is thy_name
+                      val pass_include = include_pred thy_name
                   in if not pass orelse not pass_include then NONE
                      else if not (extra_filter name) then NONE
                      else
@@ -446,11 +455,11 @@ fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
         val space = Consts.space_of (Context.cases Sign.consts_of Proof_Context.consts_of ctx)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
-        val (include_set, include_warnings) = resolve_include_set context theories_include
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
         val (_, type_pats, warnings) = parse_patterns context ([], type_pat_strs)
         val const_pat_filter = mk_const_pattern_matcher ctx type_pats
         val name_filter = mk_name_filter name_contains
-        val keys = ns_filter limit key_of space target_name exclude_set include_set
+        val keys = ns_filter limit key_of space target_name exclude_set include_pred
                     (fn name => const_pat_filter name andalso name_filter name) filter_opt
       in (keys, include_warnings @ warnings) end,
     timeout = NONE
@@ -472,7 +481,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
         val fact_space = Facts.space_of facts
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
-        val (include_set, include_warnings) = resolve_include_set context theories_include
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val prop_matches = mk_prop_pattern_matcher ctxt term_pats type_pats
@@ -499,9 +508,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                       val dominated = case exclude_set of
                            NONE => thy_name <> target_name
                          | SOME es => Strhashtab.defined es thy_name
-                      val included = case include_set of
-                           NONE => true
-                         | SOME is => Strhashtab.defined is thy_name
+                      val included = include_pred thy_name
                   in if dominated orelse not included then (acc, remaining)
                      else if not (name_filter name) then (acc, remaining)
                      else
@@ -544,9 +551,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                         val dominated = case exclude_set of
                              NONE => ethy <> target_name
                            | SOME es => Strhashtab.defined es ethy
-                        val included = case include_set of
-                             NONE => true
-                           | SOME is => Strhashtab.defined is ethy
+                        val included = include_pred ethy
                     in if dominated orelse not included then (acc, remaining)
                        else if not (name_filter (#name entry)) then (acc, remaining)
                        else if not (prop_matches (Thm.full_prop_of (#thm entry))) then (acc, remaining)
@@ -575,8 +580,8 @@ fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
         val space = Context.cases Sign.type_space Proof_Context.type_space ctx
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
-        val (include_set, include_warnings) = resolve_include_set context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_set (mk_name_filter name_contains) filter_opt, include_warnings) end,
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
+      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end,
     timeout = NONE
   }
 
@@ -594,8 +599,8 @@ fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
         val space = Context.cases Sign.class_space Proof_Context.class_space ctx
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
-        val (include_set, include_warnings) = resolve_include_set context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_set (mk_name_filter name_contains) filter_opt, include_warnings) end,
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
+      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end,
     timeout = NONE
   }
 
@@ -613,8 +618,8 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
         val space = Locale.locale_space (Context.theory_of ctx)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
-        val (include_set, include_warnings) = resolve_include_set context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_set (mk_name_filter name_contains) filter_opt, include_warnings) end,
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
+      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end,
     timeout = NONE
   }
 
@@ -667,7 +672,7 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : co
         val thms = extract_thms ctx
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
-        val (include_set, include_warnings) = resolve_include_set context theories_include
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
         val fact_space = Facts.space_of
               (Context.cases Global_Theory.facts_of Proof_Context.facts_of ctx)
         val seen : unit Strhashtab.table = Strhashtab.empty 128
@@ -697,11 +702,9 @@ fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : co
                    | SOME es => (case thy_name_of of
                          SOME tn => not (Strhashtab.defined es tn)
                        | NONE => true)
-                 val pass_include = case include_set of
-                     NONE => true
-                   | SOME is => (case thy_name_of of
-                         SOME tn => Strhashtab.defined is tn
-                       | NONE => true)
+                 val pass_include = case thy_name_of of
+                     SOME tn => include_pred tn
+                   | NONE => true
                  (* Filters ordered cheap-to-expensive: target_type_filter walks
                     the whole prop with bidir typ_instance per schematic Var,
                     so push it after the infra filter_opt. *)
