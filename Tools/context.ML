@@ -211,31 +211,55 @@ fun mk_include_filter context names =
    Empty input lists produce empty output lists (= no restriction).
    Warns when term patterns contain undeclared free variables
    (which likely indicate misspelled constant names).
-   Parse errors (ERROR, Par_Exn) are caught and returned as warnings
-   with YXML markup stripped. *)
+   Each pattern is parsed individually so one bad pattern does not discard the
+   rest.  On parse failure, a cascade of fallbacks is tried:
+     1. "(" ^ s ^ ")"     — bare operators: ≤ / < / * via operator section (≤)
+     2. s ^ "(?'_a)"      — type-argument syntax: CARD, TYPE, OFCLASS, …
+     3. s ^ " ?_x"        — prefix unary syntax
+     4. "?_x " ^ s ^ " ?_y" — infix binary syntax
+   If all fail, the pattern is dropped with a warning (reporting the original
+   error). *)
 fun parse_patterns context (term_pat_strs, type_pat_strs) =
   if null term_pat_strs andalso null type_pat_strs then ([], [], [])
   else
     let val ctxt = Context.cases Proof_Context.init_global I context
         val ctxt_pat = Proof_Context.set_mode Proof_Context.mode_pattern ctxt
-        fun handle_parse_exn exn =
+        fun format_parse_exn exn =
           case Par_Exn.dest exn of
             SOME exns =>
               let val msgs = map_filter (fn ERROR msg => SOME msg | _ => NONE) exns
               in if length msgs = length exns
-                 then map RPC_Pretty.trim_markup msgs
+                 then String.concatWith "\n" (map RPC_Pretty.trim_markup msgs)
                  else Exn.reraise exn
               end
           | NONE =>
               (case exn of
-                ERROR msg => [RPC_Pretty.trim_markup msg]
+                ERROR msg => RPC_Pretty.trim_markup msg
               | _ => Exn.reraise exn)
-        val (term_pats, term_parse_warnings) =
-          \<^try>\<open>(map (Syntax.read_term ctxt_pat) term_pat_strs, [])
-          catch exn => ([], handle_parse_exn exn)\<close>
+        fun try_read s =
+          Exn.capture (Syntax.read_term ctxt_pat) s
+        fun try_read_term s =
+          (case try_read s of
+            Exn.Res t => Exn.Res t
+          | Exn.Exn exn =>
+              let val attempts =
+                    ["(" ^ s ^ ")",
+                     s ^ "(?'_a)",
+                     s ^ " ?_x",
+                     "?_x " ^ s ^ " ?_y"]
+              in case get_first (fn a => case try_read a of Exn.Res t => SOME t | _ => NONE) attempts of
+                  SOME t => Exn.Res t
+                | NONE => Exn.Exn exn
+              end)
+        val (term_pairs, term_parse_warnings) =
+          fold_rev (fn pat_str => fn (pairs, warns) =>
+            case try_read_term pat_str of
+              Exn.Res pat => ((pat_str, pat) :: pairs, warns)
+            | Exn.Exn exn => (pairs, format_parse_exn exn :: warns))
+          term_pat_strs ([], [])
+        val term_pats = map snd term_pairs
         val warnings = term_parse_warnings @
-          (if null term_pats then []
-           else maps (fn (pat_str, pat) =>
+          (maps (fn (pat_str, pat) =>
              let val undeclared = filter (not o Variable.is_declared ctxt)
                                          (Term.add_free_names pat [])
              in if null undeclared then []
@@ -249,10 +273,10 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
                          if plural then " to express named wildcards."
                          else " to express a named wildcard."]]
                      end
-             end) (term_pat_strs ~~ term_pats))
+             end) term_pairs)
         val (type_pats, type_parse_warnings) =
           \<^try>\<open>(map (Syntax.read_typ ctxt_pat) type_pat_strs, [])
-          catch exn => ([], handle_parse_exn exn)\<close>
+          catch exn => ([], [format_parse_exn exn])\<close>
     in (term_pats, type_pats, warnings @ type_parse_warnings)
     end
 
