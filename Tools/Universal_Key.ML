@@ -21,6 +21,7 @@
   - tag: 1-byte entity kind discriminator:
       0x01 = Constant, 0x02 = Theorem,
       0x03 = Type, 0x04 = Class, 0x05 = Locale,
+      0x06 = Named_Theorems, 0x07 = Method,
       0x12 = Introduction_Rule, 0x22 = Elimination_Rule,
       0x32 = Induction_Rule, 0x42 = Case_Split_Rule
   - entity: variable-length payload identifying the entity within its theory.
@@ -29,7 +30,8 @@
   ---------
 
   - Theory keys:           16 bytes  (hash only)
-  - Namespace entity keys: 17 + |name| bytes  (constant, type, class, locale)
+  - Namespace entity keys: 17 + |name| bytes  (constant, type, class, locale,
+                                                named_theorems, method)
   - Theorem keys:          32 bytes  (16 + 1 + 15, always)
   - Intro/Elim rule keys:  32 bytes  (same layout as theorem keys)
   - Induct/Cases rule keys: 32 bytes (same layout as theorem keys)
@@ -48,6 +50,7 @@ type fully_quantified_name = string
 type theory_long_name = string
 
 datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
+                     | NamedTheoremsK | MethodK
                      | IntroductionRuleK | EliminationRuleK
                      | InductionRuleK | CaseSplitRuleK
 
@@ -58,6 +61,11 @@ datatype entity =
     | Type     of fully_quantified_name
     | Class    of fully_quantified_name
     | Locale   of fully_quantified_name
+    (* NB: Named_Theorems (plural) is a named-collection entity (tag 0x06),
+       distinct from Named_Theorem (singular) above which is the name-carrying
+       variant of a Theorem (tag 0x02). *)
+    | Named_Theorems of fully_quantified_name
+    | Method   of fully_quantified_name
     | Introduction_Rule of thm
     | Named_Introduction_Rule of fully_quantified_name
     | Elimination_Rule of thm
@@ -82,6 +90,8 @@ val key_of_theorem' : thm_uk_cache option -> Context.generic -> thm -> universal
 val key_of_type     : Context.generic -> xstring -> universal_key * string
 val key_of_class    : Context.generic -> xstring -> universal_key * string
 val key_of_locale   : Context.generic -> xstring -> universal_key * string
+val key_of_named_theorems : Context.generic -> xstring -> universal_key * string
+val key_of_method   : Context.generic -> xstring -> universal_key * string
 val key_of_introduction_rule  : thm_uk_cache option -> Context.generic -> xstring
                               -> universal_key * string
 val key_of_introduction_rule' : thm_uk_cache option -> Context.generic -> thm -> universal_key
@@ -124,6 +134,7 @@ fun static_context_unpacker (ctx: Context.generic) : context_unpacker =
 type fully_quantified_name = string
 type theory_long_name = string
 datatype entity_kind = ConstantK | TheoremK | TypeK | ClassK | LocaleK
+                     | NamedTheoremsK | MethodK
                      | IntroductionRuleK | EliminationRuleK
                      | InductionRuleK | CaseSplitRuleK
 datatype entity =
@@ -133,6 +144,11 @@ datatype entity =
     | Type     of fully_quantified_name
     | Class    of fully_quantified_name
     | Locale   of fully_quantified_name
+    (* NB: Named_Theorems (plural) is a named-collection entity (tag 0x06),
+       distinct from Named_Theorem (singular) above which is the name-carrying
+       variant of a Theorem (tag 0x02). *)
+    | Named_Theorems of fully_quantified_name
+    | Method   of fully_quantified_name
     | Introduction_Rule of thm
     | Named_Introduction_Rule of fully_quantified_name
     | Elimination_Rule of thm
@@ -164,6 +180,10 @@ structure CacheTab = Hash_Table(struct
         Word.xorb (0w5, Word.xorb (Hashers.string name, Hashers.string thy))
     | hash (Locale name, thy) =
         Word.xorb (0w6, Word.xorb (Hashers.string name, Hashers.string thy))
+    | hash (Named_Theorems name, thy) =
+        Word.xorb (0w7, Word.xorb (Hashers.string name, Hashers.string thy))
+    | hash (Method name, thy) =
+        Word.xorb (0w8, Word.xorb (Hashers.string name, Hashers.string thy))
     | hash (Introduction_Rule thm, thy) =
         Word.xorb (0wx12, Word.xorb (Term_Digest.digest128_hasher (Term_Digest.thm128 thm),
                    Hashers.string thy))
@@ -191,6 +211,8 @@ structure CacheTab = Hash_Table(struct
     | eq ((Type n1, t1), (Type n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Class n1, t1), (Class n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Locale n1, t1), (Locale n2, t2)) = n1 = n2 andalso t1 = t2
+    | eq ((Named_Theorems n1, t1), (Named_Theorems n2, t2)) = n1 = n2 andalso t1 = t2
+    | eq ((Method n1, t1), (Method n2, t2)) = n1 = n2 andalso t1 = t2
     | eq ((Introduction_Rule thm1, t1), (Introduction_Rule thm2, t2)) =
         Thm.eq_thm (thm1, thm2) andalso t1 = t2
     | eq ((Named_Introduction_Rule n1, t1), (Named_Introduction_Rule n2, t2)) =
@@ -339,6 +361,18 @@ fun key_of_locale context =
     (Locale.locale_space (Context.theory_of context))
     context
 
+(* Named_Theorems collections live in the fact name space (registered as a
+   dynamic fact via Local_Theory.add_thms_dynamic). *)
+fun key_of_named_theorems context =
+  key_of_ns_entity 0wx06 Named_Theorems
+    (Facts.space_of (Context.cases Global_Theory.facts_of Proof_Context.facts_of context))
+    context
+
+fun key_of_method context =
+  key_of_ns_entity 0wx07 Method
+    (Method.method_space context)
+    context
+
 (* --- Theorems --- *)
 
 local
@@ -478,6 +512,8 @@ fun key_of _     context (Constant name) = #1 (key_of_constant context name)
   | key_of _     context (Type name) = #1 (key_of_type context name)
   | key_of _     context (Class name) = #1 (key_of_class context name)
   | key_of _     context (Locale name) = #1 (key_of_locale context name)
+  | key_of _     context (Named_Theorems name) = #1 (key_of_named_theorems context name)
+  | key_of _     context (Method name) = #1 (key_of_method context name)
   | key_of cache context (Introduction_Rule thm) = key_of_introduction_rule' cache context thm
   | key_of cache context (Named_Introduction_Rule name) = #1 (key_of_introduction_rule cache context name)
   | key_of cache context (Elimination_Rule thm) = key_of_elimination_rule' cache context thm
@@ -494,12 +530,16 @@ fun key_of'' cache context =
     val type_key   = key_of_type context
     val class_key  = key_of_class context
     val locale_key = key_of_locale context
+    val named_theorems_key = key_of_named_theorems context
+    val method_key = key_of_method context
   in fn (Constant name)      => #1 (const_key name)
       | (Theorem thm)        => key_of_theorem' cache context thm
       | (Named_Theorem name) => #1 (thm_key name)
       | (Type name)          => #1 (type_key name)
       | (Class name)         => #1 (class_key name)
       | (Locale name)        => #1 (locale_key name)
+      | (Named_Theorems name) => #1 (named_theorems_key name)
+      | (Method name)        => #1 (method_key name)
       | (Introduction_Rule thm) => key_of_introduction_rule' cache context thm
       | (Named_Introduction_Rule name) =>
           key_of_introduction_rule' cache context (#2 (thm_key name))
@@ -541,6 +581,8 @@ fun make_universal_key_callback' (cache : thm_uk_cache option)
       | 3 => key_of_type context name
       | 4 => key_of_class context name
       | 5 => key_of_locale context name
+      | 6 => key_of_named_theorems context name
+      | 7 => key_of_method context name
       | 18 (* 0x12 *) => key_of_introduction_rule cache context name
       | 34 (* 0x22 *) => key_of_elimination_rule cache context name
       | 50 (* 0x32 *) => key_of_induction_rule cache context name
@@ -556,7 +598,7 @@ fun make_universal_key_callback ctxt_unpack = make_universal_key_callback' NONE 
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 
 (*  1 = Constant, 2 = Theorem/Named_Theorem,
-    3 = Type, 4 = Class, 5 = Locale,
+    3 = Type, 4 = Class, 5 = Locale, 6 = Named_Theorems, 7 = Method,
     0x12 = Introduction_Rule, 0x22 = Elimination_Rule  *)
 fun pack_entity_kind (Constant _)               = packInt 1
   | pack_entity_kind (Theorem _)                = packInt 2
@@ -564,6 +606,8 @@ fun pack_entity_kind (Constant _)               = packInt 1
   | pack_entity_kind (Type _)                   = packInt 3
   | pack_entity_kind (Class _)                  = packInt 4
   | pack_entity_kind (Locale _)                 = packInt 5
+  | pack_entity_kind (Named_Theorems _)         = packInt 6
+  | pack_entity_kind (Method _)                 = packInt 7
   | pack_entity_kind (Introduction_Rule _)      = packInt 0x12
   | pack_entity_kind (Named_Introduction_Rule _) = packInt 0x12
   | pack_entity_kind (Elimination_Rule _)       = packInt 0x22
@@ -578,6 +622,8 @@ fun pack_entity_kind' ConstantK         = packInt 1
   | pack_entity_kind' TypeK             = packInt 3
   | pack_entity_kind' ClassK            = packInt 4
   | pack_entity_kind' LocaleK           = packInt 5
+  | pack_entity_kind' NamedTheoremsK    = packInt 6
+  | pack_entity_kind' MethodK           = packInt 7
   | pack_entity_kind' IntroductionRuleK = packInt 0x12
   | pack_entity_kind' EliminationRuleK  = packInt 0x22
   | pack_entity_kind' InductionRuleK    = packInt 0x32
@@ -588,6 +634,7 @@ val unpack_entity_kind : entity_kind unpacker = fn ins =>
   in (case k of
         1 => ConstantK | 2 => TheoremK | 3 => TypeK
       | 4 => ClassK | 5 => LocaleK
+      | 6 => NamedTheoremsK | 7 => MethodK
       | 0x12 => IntroductionRuleK | 0x22 => EliminationRuleK
       | 0x32 => InductionRuleK | 0x42 => CaseSplitRuleK
       | _ => raise Unpack, ins')
@@ -604,6 +651,8 @@ fun pack_entity (Constant name)      = packPair (packInt, packString) (1, name)
   | pack_entity (Type name)          = packPair (packInt, packString) (3, name)
   | pack_entity (Class name)         = packPair (packInt, packString) (4, name)
   | pack_entity (Locale name)        = packPair (packInt, packString) (5, name)
+  | pack_entity (Named_Theorems name) = packPair (packInt, packString) (6, name)
+  | pack_entity (Method name)        = packPair (packInt, packString) (7, name)
   | pack_entity (Introduction_Rule thm)      = pack_thm_entity 0x12 thm
   | pack_entity (Named_Introduction_Rule name) = packPair (packInt, packString) (0x12, name)
   | pack_entity (Elimination_Rule thm)       = pack_thm_entity 0x22 thm
@@ -620,6 +669,8 @@ val unpack_entity : entity unpacker =
     | TypeK             => unpackString >> Type
     | ClassK            => unpackString >> Class
     | LocaleK           => unpackString >> Locale
+    | NamedTheoremsK    => unpackString >> Named_Theorems
+    | MethodK           => unpackString >> Method
     | IntroductionRuleK => unpackString >> Named_Introduction_Rule
     | EliminationRuleK  => unpackString >> Named_Elimination_Rule
     | InductionRuleK    => unpackString >> Named_Induction_Rule

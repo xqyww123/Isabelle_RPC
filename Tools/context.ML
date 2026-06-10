@@ -67,6 +67,12 @@ signature CONTEXT_CALLBACKS = sig
   val mk_name_filter : string list -> string -> bool
   val mk_prop_pattern_matcher : Proof.context -> term list -> typ list -> term -> bool
 
+  (* Coercion constants to ignore in transparent pattern matching.
+     When a unary Const application (F $ X) has F in this set,
+     the matcher treats it as just X.
+     Mutable hash table — populate at session setup time via Strhashtab.update. *)
+  val coercion_ignores : unit Strhashtab.table
+
   val make_constants_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   (* cache_opt: when SOME (entries, facts), uses cached entries for global theorems
      and only runs the full pipeline on facts not in the cached Facts.T. *)
@@ -77,6 +83,8 @@ signature CONTEXT_CALLBACKS = sig
   val make_types_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_classes_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_named_theorems_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* The thm list extractor is supplied by the caller because Classical requires HOL,
@@ -160,6 +168,8 @@ fun expand_abs t =
 
 fun get_names t = Term.add_const_names t (Term.add_free_names t []);
 
+val coercion_ignores : unit Strhashtab.table = Strhashtab.empty 8
+
 fun matches_subterm ctxt (pat, obj) =
   let
     val thy = Proof_Context.theory_of ctxt;
@@ -171,6 +181,187 @@ fun matches_subterm ctxt (pat, obj) =
       | t $ u => matches t ctxt' orelse matches u ctxt'
       | _ => false);
   in matches obj ctxt end;
+
+
+(* --- Coercion-transparent pattern matching ---
+   Copied from PLPR_Pattern (Performant_Isabelle_ML/library/pattern.ML),
+   modified to: (a) ignore types, (b) skip coercion wrappers in coercion_ignores. *)
+
+local
+  open Pattern (* for MATCH exception, Unif exception *)
+
+  fun idx_t [] j     = raise Unif
+    | idx_t(i::is) j = if (i:int) =j then length is else idx_t is j;
+
+  fun mkabs_t (binders,is,t)  =
+      let fun mk(i::is) = let val (x,T) = nth binders i
+                          in Abs(x,T,mk is) end
+            | mk []     = t
+      in mk is end;
+
+  fun ints_of_t []             = []
+    | ints_of_t (Bound i ::bs) =
+        let val is = ints_of_t bs
+        in if member (op =) is i then raise Pattern else i::is end
+    | ints_of_t _              = raise Pattern;
+
+  fun downto0_t (i :: is, n) = i = n andalso downto0_t (is, n - 1)
+    | downto0_t ([], n) = n = ~1;
+
+  fun mapbnd_t f =
+      let fun mpb d (Bound(i))     = if i < d then Bound(i) else Bound(f(i-d)+d)
+            | mpb d (Abs(s,T,t))   = Abs(s,T,mpb(d+1) t)
+            | mpb d ((u1 $ u2))    = (mpb d u1)$(mpb d u2)
+            | mpb _ atom           = atom
+      in mpb 0 end;
+
+  fun app_t (s,(i::is)) = app_t (s$Bound(i),is)
+    | app_t (s,[])      = s;
+
+  fun red_t (Abs(_,_,s)) (i::is) js = red_t s is (i::js)
+    | red_t t            []      [] = t
+    | red_t t            is      jn = app_t (mapbnd_t (fn k => nth jn k handle Subscript => k) t,is);
+
+  val incr_t = mapbnd_t (fn i => i+1);
+
+  (* First-order matching — type-agnostic, coercion-transparent.
+     Copied from PLPR_Pattern.first_order_match with typ_match removed. *)
+  fun first_order_match_transparent (ignores : unit Strhashtab.table)
+        fixed_bounds bv_tys (t,u) env =
+    let
+      val bs = Inttab.make_set (loose_bnos u)
+      fun mtch bv_tys lev (instsp as (tyinsts,insts)) = fn
+          (Var(ixn,T), t)  =>
+            if forall (Inttab.defined bs) (loose_bnos t)
+            then (case Envir.lookup1 insts (ixn, T) of
+                    NONE => (tyinsts, Vartab.update_new (ixn, (T, t)) insts)
+                  | SOME u => if Envir.aeconv (t, u) then instsp else raise MATCH)
+            else raise MATCH
+        | (Free (a,_), Free (b,_)) =>
+            if a=b then instsp else raise MATCH
+        | (Const (a,_), Const (b,_))  =>
+            if a=b then instsp else raise MATCH
+        | (Bound i, Bound j)  =>  if  i=j  then  instsp  else raise MATCH
+        | (Abs(_,_,t), Abs(_,U,u))  =>
+            mtch bv_tys lev instsp (t,u)
+        | (f$t, g$u) =>
+            (mtch bv_tys lev (mtch bv_tys lev instsp (f,g)) (t, u)
+             handle MATCH =>
+               (case g of Const(name,_) =>
+                  if Strhashtab.defined ignores name
+                  then mtch bv_tys lev instsp (f$t, u)
+                  else raise MATCH
+                | _ => raise MATCH)
+             handle MATCH =>
+               (case f of Const(name,_) =>
+                  if Strhashtab.defined ignores name
+                  then mtch bv_tys lev instsp (t, g$u)
+                  else raise MATCH
+                | _ => raise MATCH))
+        | (t, Abs(_,T,u))  => mtch (T::bv_tys) (lev+1) instsp ((incr_t t)$(Bound 0), u)
+        | _ => raise MATCH
+    in mtch bv_tys 0 env (t,u) end;
+
+  (* Higher-order pattern matching — type-agnostic, coercion-transparent.
+     Copied from PLPR_Pattern.match with typ_match removed. *)
+  fun match_transparent (ignores : unit Strhashtab.table)
+        (fixed_bounds : int -> bool) bvs (po as (pat,obj)) envir =
+  let
+    val len_initial = length bvs
+    fun match_bind_t(itms,binders,ixn,T,is,t) =
+      let val len = length binders
+          val diff = len - len_initial
+          val js = loose_bnos t
+                |> filter (fn i => i < diff orelse not (fixed_bounds (i - diff)))
+      in if null is
+         then if null js then Vartab.update_new (ixn, (T, t)) itms else raise MATCH
+         else if subset (op =) (js, is)
+              then let val t' = if downto0_t(is, diff - 1) then t
+                                else mapbnd_t (idx_t is) t
+                   in Vartab.update_new (ixn, (T, mkabs_t (binders, is, t'))) itms end
+              else raise MATCH
+      end
+
+    fun mtch binders (pat,obj) (env as (iTs,itms)) =
+      case pat of
+        Abs(ns,Ts,ts) =>
+          (case obj of
+             Abs(nt,Tt,tt) => mtch ((nt,Tt)::binders) (ts,tt) env
+           | _ => let val Tt = Envir.subst_type iTs Ts
+                  in mtch((ns,Tt)::binders) (ts,(incr_t obj)$Bound(0)) env end)
+      | _ => (case obj of
+                Abs(nt,Tt,tt) =>
+                  mtch((nt,Tt)::binders) ((incr_t pat)$Bound(0),tt) env
+              | _ => cases(binders,env,pat,obj))
+
+    and cases(binders,env as (iTs,itms),pat,obj) =
+      let val (ph,pargs) = strip_comb pat
+          fun rigrig1(iTs,oargs) = fold (mtch binders) (pargs~~oargs) (iTs,itms)
+            handle ListPair.UnequalLengths => raise MATCH
+          fun rigrig2((a:string,_),(b,_),oargs) =
+                if a <> b then raise MATCH
+                else rigrig1(iTs, oargs)
+      in case ph of
+           Var(ixn,T) =>
+             let val is = ints_of_t pargs
+             in case Envir.lookup1 itms (ixn, T) of
+                  NONE => (iTs,match_bind_t(itms,binders,ixn,T,is,obj))
+                | SOME u => if Envir.aeconv (obj, red_t u is []) then env
+                            else raise MATCH
+             end
+         | _ =>
+             let val (oh,oargs) = strip_comb obj
+             in (case (ph,oh) of
+                   (Const c,Const d) => rigrig2(c,d,oargs)
+                 | (Free f,Free g)   => rigrig2(f,g,oargs)
+                 | (Bound i,Bound j) => if i<>j then raise MATCH
+                                        else rigrig1(iTs,oargs)
+                 | (Abs _, _)        => raise Pattern
+                 | (_, Abs _)        => raise Pattern
+                 | _                 => raise MATCH)
+             handle MATCH =>
+               (case (oh, oargs) of
+                  (Const(name,_), [inner]) =>
+                    if Strhashtab.defined ignores name
+                    then cases(binders, env, pat, inner)
+                    else raise MATCH
+                | _ => raise MATCH)
+             handle MATCH =>
+               (case (ph, pargs) of
+                  (Const(name,_), [inner]) =>
+                    if Strhashtab.defined ignores name
+                    then cases(binders, env, inner, obj)
+                    else raise MATCH
+                | _ => raise MATCH)
+             end
+      end;
+
+    val bvtys = map snd bvs
+  in mtch bvs po envir
+     handle Pattern =>
+       first_order_match_transparent ignores (K true) bvtys po envir
+  end;
+
+in
+
+fun matches_transparent ignores fixed_bounds bvs po =
+  (match_transparent ignores fixed_bounds bvs po (Vartab.empty, Vartab.empty); true)
+  handle MATCH => false
+       | TYPE _ => false
+
+fun matches_subterm_transparent ctxt ignores (pat, obj) =
+  let
+    fun try_match obj ctxt' =
+      matches_transparent ignores (K true) [] (pat, obj) orelse
+      (case obj of
+        Abs _ =>
+          let val ((_, t'), ctxt'') = Variable.dest_abs obj ctxt'
+          in try_match t' ctxt'' end
+      | t $ u => try_match t ctxt' orelse try_match u ctxt'
+      | _ => false);
+  in try_match obj ctxt end
+
+end (* local *)
 
 
 (* --- Pattern filter construction --- *)
@@ -213,10 +404,11 @@ fun mk_include_filter context names =
    (which likely indicate misspelled constant names).
    Each pattern is parsed individually so one bad pattern does not discard the
    rest.  On parse failure, a cascade of fallbacks is tried:
-     1. "(" ^ s ^ ")"     — bare operators: ≤ / < / * via operator section (≤)
-     2. s ^ "(?'_a)"      — type-argument syntax: CARD, TYPE, OFCLASS, …
-     3. s ^ " ?_x"        — prefix unary syntax
-     4. "?_x " ^ s ^ " ?_y" — infix binary syntax
+     1. "(" ^ s ^ ")"      — bare operators: ≤ / < / * via operator section (≤)
+     2. s ^ "('a)"         — type-argument syntax: CARD, TYPE, OFCLASS, …
+                              ('a is generalized to schematic in pattern mode)
+     3. s ^ " ?x"          — prefix unary syntax
+     4. "?x " ^ s ^ " ?y"  — infix binary syntax
    If all fail, the pattern is dropped with a warning (reporting the original
    error). *)
 fun parse_patterns context (term_pat_strs, type_pat_strs) =
@@ -244,9 +436,9 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
           | Exn.Exn exn =>
               let val attempts =
                     ["(" ^ s ^ ")",
-                     s ^ "(?'_a)",
-                     s ^ " ?_x",
-                     "?_x " ^ s ^ " ?_y"]
+                     s ^ "('a)",
+                     s ^ " ?x",
+                     "?x " ^ s ^ " ?y"]
               in case get_first (fn a => case try_read a of Exn.Res t => SOME t | _ => NONE) attempts of
                   SOME t => Exn.Res t
                 | NONE => Exn.Exn exn
@@ -317,21 +509,35 @@ fun type_matches_in_type typ_inst (type_pat_infos : (typ * string list) list) T 
   end
 
 (* Build a prop filter from parsed term/type patterns.
-   Returns (term -> bool). Always true when both lists are empty. *)
+   Returns (term -> bool). Always true when both lists are empty.
+   Uses coercion-transparent matching: coercion wrappers in coercion_ignores
+   are skipped, and type matching is ignored. A budget limits the number of
+   transparent matching attempts to avoid excessive work. *)
 fun mk_prop_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) : term -> bool =
   if null term_pats andalso null type_pats then (fn _ => true)
   else
     let val thy = Proof_Context.theory_of ctxt
         val typ_inst = Sign.typ_instance thy
+        val ignores = coercion_ignores
+        val has_ignores = not (Strhashtab.is_empty ignores)
         val term_pat_infos = map (fn pat =>
           let val pat' = (expand_abs o Envir.eta_contract) pat
-          in (pat', get_names pat') end) term_pats
+              val names = get_names pat'
+              val names_effective =
+                if not has_ignores then names
+                else filter (fn n => not (Strhashtab.defined ignores n)) names
+          in (pat', names_effective) end) term_pats
         val type_pat_infos = mk_type_pat_infos type_pats
+        val budget = Unsynchronized.ref 200
     in fn prop =>
       let val prop_names = get_names prop
-      in List.all (fn (pat', pat_consts) =>
-           subset (op =) (pat_consts, prop_names)
-           andalso matches_subterm ctxt (pat', prop)) term_pat_infos
+      in List.all (fn (pat', names_effective) =>
+           subset (op =) (names_effective, prop_names)
+           andalso not (null names_effective)
+           andalso !budget > 0
+           andalso (budget := !budget - 1;
+                    matches_subterm_transparent ctxt ignores (pat', prop))
+         ) term_pat_infos
          andalso type_matches_in_term typ_inst type_pat_infos prop
       end
     end
@@ -642,6 +848,52 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
         val target_name = Context.theory_long_name (Context.theory_of ctx)
         val key_of = #1 o Universal_Key.key_of_locale ctx
         val space = Locale.locale_space (Context.theory_of ctx)
+        val exclude_set = if the_theory_only then NONE
+                          else SOME (Strhashtab.make_set exclude)
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
+      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end,
+    timeout = NONE
+  }
+
+fun make_named_theorems_callback filter_opt (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.named_theorems",
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
+    ret_schema = ret_schema,
+    function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
+      let
+        val ctx = resolve_ctx context target_thy_opt
+        val target_name = Context.theory_long_name (Context.theory_of ctx)
+        val key_of = #1 o Universal_Key.key_of_named_theorems ctx
+        val ctxt = Context.cases Proof_Context.init_global I ctx
+        val facts = Proof_Context.facts_of ctxt
+        val space = Facts.space_of facts
+        val exclude_set = if the_theory_only then NONE
+                          else SOME (Strhashtab.make_set exclude)
+        val (include_pred, include_warnings) = mk_include_filter context theories_include
+        val name_filter = mk_name_filter name_contains
+        (* Facts.is_dynamic is a cheap (no content forcing) prefilter; named_theorems
+           are dynamic facts, so Named_Theorems.get only runs on dynamic candidates. *)
+        val extra_filter = fn name =>
+          name_filter name andalso Facts.is_dynamic facts name
+          andalso can (Named_Theorems.get ctxt) name
+      in (ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt, include_warnings) end,
+    timeout = NONE
+  }
+
+fun make_methods_callback filter_opt (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.methods",
+    arg_schema = unpackPair (ctxt_unpack, arg_schema),
+    ret_schema = ret_schema,
+    function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
+      let
+        val ctx = resolve_ctx context target_thy_opt
+        val target_name = Context.theory_long_name (Context.theory_of ctx)
+        val key_of = #1 o Universal_Key.key_of_method ctx
+        val space = Method.method_space ctx
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include

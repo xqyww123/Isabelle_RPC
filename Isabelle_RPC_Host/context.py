@@ -196,6 +196,38 @@ async def locales(connection: Connection, theory: str | None = None,
                            name_contains, limit, ctxt=ctxt)
 
 
+async def named_theorems(connection: Connection, theory: str | None = None,
+            the_theory_only: bool = False,
+            theories_not_include: list[str] = [],
+            theories_include: list[str] = [],
+            name_contains: list[str] = [],
+            limit: int = -1,
+            ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
+    """Return (entries, warnings) for all named_theorems collections.
+    Pattern parameters are not applicable to named_theorems.
+    """
+    return await _cached_or_call(connection, "_ctx_named_theorems", "Context.named_theorems",
+                           theory, the_theory_only, theories_not_include,
+                           [], [], theories_include,
+                           name_contains, limit, ctxt=ctxt)
+
+
+async def methods(connection: Connection, theory: str | None = None,
+            the_theory_only: bool = False,
+            theories_not_include: list[str] = [],
+            theories_include: list[str] = [],
+            name_contains: list[str] = [],
+            limit: int = -1,
+            ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
+    """Return (entries, warnings) for all proof methods.
+    Pattern parameters are not applicable to methods.
+    """
+    return await _cached_or_call(connection, "_ctx_methods", "Context.methods",
+                           theory, the_theory_only, theories_not_include,
+                           [], [], theories_include,
+                           name_contains, limit, ctxt=ctxt)
+
+
 async def introduction_rules(connection: Connection, theory: str | None = None,
                        the_theory_only: bool = False,
                        theories_not_include: list[str] = [],
@@ -272,6 +304,8 @@ _KIND_TO_FUNC = {
     EntityKind.TYPE: types,
     EntityKind.CLASS: classes,
     EntityKind.LOCALE: locales,
+    EntityKind.NAMED_THEOREMS: named_theorems,
+    EntityKind.METHOD: methods,
     EntityKind.INTRODUCTION_RULE: introduction_rules,
     EntityKind.ELIMINATION_RULE: elimination_rules,
     EntityKind.INDUCTION_RULE: induction_rules,
@@ -315,7 +349,8 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
             continue
         _t_kind = _time.perf_counter()
         # Pass only the parameters each function accepts
-        if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE):
+        if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE,
+                    EntityKind.NAMED_THEOREMS, EntityKind.METHOD):
             entries, warnings = await func(connection, theory, the_theory_only,
                                   theories_not_include,
                                   theories_include=theories_include,
