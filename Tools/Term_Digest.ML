@@ -219,19 +219,23 @@ fun typ128 t = (Hasher_Lo.typ t, Hasher_Hi.typ t)
 fun term128 t = (Hasher_Lo.term t, Hasher_Hi.term t)
 fun goal128 g = (Hasher_Lo.goal g, Hasher_Hi.goal g)
 
-val thm128_cache : digest128 Strhashtab.table Synchronized.var =
-  Synchronized.var "Hasher.thm128_cache" (Strhashtab.empty 1024)
+(* Thm_Name.T = string * int, so a product of the string and int hash keys
+   gives a hash table keyed directly on theorem names. *)
+structure ThmName_Hash =
+  Hash_Table(Hash_Product(structure A = Strhashtab.Key structure B = Inthashtab.Key))
+val thm128_cache : digest128 ThmName_Hash.table Synchronized.var =
+  Synchronized.var "Hasher.thm128_cache" (ThmName_Hash.empty 1024)
 
 fun thm128 thm =
   if not (Thm.has_name_hint thm) then term128 (Thm.prop_of thm)
   else
     let val name = Thm.get_name_hint thm
     in Synchronized.change_result thm128_cache (fn tab =>
-        case Strhashtab.lookup tab name of
+        case ThmName_Hash.lookup tab name of
           SOME h => (h, tab)
         | NONE =>
             let val h = term128 (Thm.prop_of thm)
-            in (h, (Strhashtab.update tab (name, h); tab)) end)
+            in (h, (ThmName_Hash.update tab (name, h); tab)) end)
     end
 
 end

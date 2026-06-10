@@ -389,11 +389,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
       let val ctxt = ctxt
                 |> Config.put_generic Printer.show_types false
                 |> Config.put_generic Printer.show_sorts false
-                |> Config.put_generic Printer.show_types_nv false
+             (* |> Config.put_generic Printer.show_types_nv false *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end)
@@ -402,11 +402,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
       let val ctxt = ctxt
                 |> Config.put_generic Printer.show_types true
                 |> Config.put_generic Printer.show_sorts false
-                |> Config.put_generic Printer.show_types_nv false
+             (*|> Config.put_generic Printer.show_types_nv false *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end)
@@ -415,11 +415,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
       let val ctxt = ctxt
                 |> Config.put_generic Printer.show_types true
                 |> Config.put_generic Printer.show_sorts false
-                |> Config.put_generic Printer.show_types_nv false
+             (* |> Config.put_generic Printer.show_types_nv false *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end)
@@ -427,11 +427,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
       let val ctxt = ctxt
                 |> Config.put_generic Printer.show_types true
                 |> Config.put_generic Printer.show_sorts false
-                |> Config.put_generic Printer.show_types_nv true
+             (* |> Config.put_generic Printer.show_types_nv true *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end)
@@ -444,11 +444,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
           val ctxt = ctxt
                 |> Config.put_generic Printer.show_types show_type
                 |> Config.put_generic Printer.show_sorts show_sort
-                |> Config.put_generic Printer.show_types_nv false
+             (* |> Config.put_generic Printer.show_types_nv false *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end
@@ -461,11 +461,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
           val ctxt = ctxt
                 |> Config.put_generic Printer.show_types show_type
                 |> Config.put_generic Printer.show_sorts show_sort
-                |> Config.put_generic Printer.show_types_nv show_type
+             (* |> Config.put_generic Printer.show_types_nv show_type *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end
@@ -478,11 +478,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
           val ctxt = ctxt
                 |> Config.put_generic Printer.show_types show_type
                 |> Config.put_generic Printer.show_sorts show_sort
-                |> Config.put_generic Printer.show_types_nv false
+             (* |> Config.put_generic Printer.show_types_nv false *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end
@@ -495,11 +495,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
           val ctxt = ctxt
                 |> Config.put_generic Printer.show_types show_type
                 |> Config.put_generic Printer.show_sorts show_sort
-                |> Config.put_generic Printer.show_types_nv show_type
+             (* |> Config.put_generic Printer.show_types_nv show_type *)
                 |> Config.put_generic Printer.show_markup false
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
-                |> Config.put_generic Printer.show_brackets false
+             (* |> Config.put_generic Printer.show_brackets false *)
        in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
        #> trim_markup
       end
@@ -511,11 +511,11 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
 
 fun term_packer "sexpr" _ = s_expression_packer
   | term_packer "pretty" ctxt = term_string ctxt
-  | term_packer "typed-nv_pretty" ctxt =
+(*  | term_packer "typed-nv_pretty" ctxt =
       let val ctxt = Config.put_generic Printer.show_types true ctxt
                   |> Config.put_generic Printer.show_types_nv true
        in term_string ctxt
-      end
+      end *)
   | term_packer "typed_pretty" ctxt =
       let val ctxt = Config.put_generic Printer.show_types true ctxt
        in term_string ctxt
