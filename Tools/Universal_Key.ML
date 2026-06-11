@@ -18,6 +18,10 @@
 
   - theory_hash: 16-byte hash from Theory_Hash.hash_of, identifying the
     theory that defines the entity.  Works for both heap and non-heap theories.
+    Exception: theorem/rule entities WITHOUT a name hint (anonymous facts, e.g.
+    collection-only members of a named_theorems) have no recoverable defining
+    theory, so their theory_hash is an all-zero 16-byte sentinel — their key is
+    purely content-addressed (see `anon_thy_hash`).
   - tag: 1-byte entity kind discriminator:
       0x01 = Constant, 0x02 = Theorem,
       0x03 = Type, 0x04 = Class, 0x05 = Locale,
@@ -308,6 +312,19 @@ fun build_key (thy_hash : Theory_Hash.hash) (tag : Word8.word)
 fun default_thy_long_name context "" = Context.theory_long_name (Context.theory_of context)
   | default_thy_long_name _ name = name
 
+(* Sentinel theory hash for theorems/rules WITHOUT a name hint.  Such facts
+   (e.g. anonymous members of a named_theorems collection, `lemma [XX]: ...`)
+   have no recoverable defining theory: the name hint is empty, the certificate
+   theory is overwritten to whatever theory retrieves the thm, the derivation id
+   is <none>, and the tags carry no provenance (empirically verified).  Rather
+   than attribute such a fact to the (arbitrary) current theory, we key it with
+   an all-zero 16-byte theory hash, making its universal key purely
+   content-addressed and stable across whatever theory it is reached from.
+   NB: byte 0 LSB = 0, so these keys read as "persistent" / non-WIP — correct,
+   since a content-addressed key is version-independent and must never be
+   cleaned as WIP. *)
+val anon_thy_hash : Theory_Hash.hash = Word8Vector.tabulate (16, fn _ => 0w0)
+
 (* --- Namespace-based entities (constant, type, class, locale) --- *)
 
 fun key_of_ns_entity tag make_ck space context xname =
@@ -424,12 +441,12 @@ fun key_of_theorem cache context =
                    full_name ^ "(1)")
         | ([], _) => error ("No theorems in fact " ^ full_name)
       val thm = Thm.transfer thy thm
-      fun compute () =
-        build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                  0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
       val uk = if Thm.has_name_hint thm
-        then cached_key (Named_Theorem (Thm_Name.print (Thm.get_name_hint thm)), thy_long_name) compute
-        else cached_thm_key cache thm compute
+        then cached_key (Named_Theorem (Thm_Name.print (Thm.get_name_hint thm)), thy_long_name)
+               (fn () => build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
+                                   0wx02 (ent_digest128_15 (Term_Digest.thm128 thm)))
+        else cached_thm_key cache thm
+               (fn () => build_key anon_thy_hash 0wx02 (ent_digest128_15 (Term_Digest.thm128 thm)))
       val is_global = Facts.defined global_facts full_name
     in (uk, thm, is_global, full_name) end
   end
@@ -454,10 +471,8 @@ fun key_of_theorem' cache context thm =
     in cached_key (Named_Theorem (Thm_Name.print deriv_name), thy_long_name) compute end
   else
     let
-      val thy_long_name = default_thy_long_name context ""
       fun compute () =
-        build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                  0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
+        build_key anon_thy_hash 0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
     in cached_thm_key cache thm compute end
 
 (* --- Introduction / Elimination rules --- *)
@@ -482,10 +497,8 @@ fun key_of_rule tag make_named cache context thm =
     in cached_key (make_named (Thm_Name.print deriv_name), thy_long_name ()) compute end
   else
     let
-      val thy_long_name = default_thy_long_name context ""
       fun compute () =
-        build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                  tag (ent_digest128_15 (Term_Digest.thm128 thm))
+        build_key anon_thy_hash tag (ent_digest128_15 (Term_Digest.thm128 thm))
     in cached_thm_key cache thm compute end
 in
 val key_of_introduction_rule' = key_of_rule 0wx12 Named_Introduction_Rule

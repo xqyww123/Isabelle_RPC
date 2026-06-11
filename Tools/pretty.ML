@@ -113,9 +113,18 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
                   | CLASS of {name: string, full_name: string}
                   | TYPE  of {name: string, full_name: string}
 
-      fun one_str (Elem (("block", _), [x])) = one_str x
-        | one_str (Elem (("delimiter", _), [x])) = one_str x
-        | one_str (Elem (("literal", _), [x])) = one_str x
+      (* Isabelle2025-2 nests inner-syntax markup (Markup.tconst/const/...)
+         inside entity/tfree/... wrappers, e.g.
+         <entity kind="type_name" ...><tconst>nat</tconst></entity>.
+         Unwrap the whole Markup family (tclass tconst tfree tvar const
+         free skolem bound var improper numeral) transparently. *)
+      val transparent_wrappers =
+        ["block", "delimiter", "literal", "tclass", "tconst", "tfree",
+         "tvar", "const", "free", "skolem", "bound", "var", "improper",
+         "numeral"]
+      fun one_str (x as Elem ((name, _), [y])) =
+            if member (op =) transparent_wrappers name then one_str y
+            else raise XML_DUMP_FAIL x
         | one_str (Text s) = s
         | one_str x = raise XML_DUMP_FAIL x
 
@@ -140,6 +149,10 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
                       | _ => CONSTANT {name = name, full_name = lookup' attrs "name"}
                     end
                | SOME "type_name" => TYPE {name = one_str x, full_name = lookup' attrs "name"}
+               (* Isabelle2025-2 wraps fixed variables in entity markup
+                  (<entity kind="fixed"><free>x</free></entity>); 2024 emitted
+                  the bare <free> element. *)
+               | SOME "fixed" => FREE (one_str x)
                | _ => raise XML_DUMP_FAIL origin
            ) :: ret
         | dump_xml (Elem (("xml_elem", [("xml_name", "typing")]), [typ, term])) ret =
