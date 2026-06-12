@@ -113,6 +113,17 @@ val key_of          : thm_uk_cache option -> Context.generic -> entity -> univer
    Use when computing keys for many entities from the same context. *)
 val key_of''        : thm_uk_cache option -> Context.generic -> entity -> universal_key
 
+(* The 15-byte entity payload of theorem keys (tag 0x02), as a standalone
+   content fingerprint: thm_digest15 computes it for an arbitrary thm (no name
+   hint or theory resolution involved), theorem_key_digest extracts it back
+   from a theorem universal key (NONE for any other key shape).  Two keys'
+   payloads agree iff the underlying propositions have equal thm128 prefixes —
+   this is the only part of a theorem key comparable across theories and for
+   freshly built (anonymous) theorems.  Single source of truth for the key
+   layout; keep in sync with build_key/ent_digest128_15 below. *)
+val thm_digest15        : thm -> Word8Vector.vector
+val theorem_key_digest  : universal_key -> Word8Vector.vector option
+
 val make_universal_key_callback  : context_unpacker -> Remote_Procedure_Calling.callback'
 val make_universal_key_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
 
@@ -306,6 +317,18 @@ fun build_key (thy_hash : Theory_Hash.hash) (tag : Word8.word)
     write_ent buf 17;
     Word8Array.vector buf
   end
+
+(* Standalone theorem-key payload (see signature comment).  Mirrors the
+   theorem-key layout above: 16-byte theory hash, tag 0x02 at offset 16,
+   15-byte thm128 prefix at offsets 17..31. *)
+fun thm_digest15 thm : Word8Vector.vector =
+  let val arr = Term_Digest.digest128_to_array (Term_Digest.thm128 thm)
+  in Word8Vector.tabulate (15, fn i => Word8Array.sub (arr, i)) end
+
+fun theorem_key_digest (uk : universal_key) : Word8Vector.vector option =
+  if Word8Vector.length uk = 32 andalso Word8Vector.sub (uk, 16) = 0wx02
+  then SOME (Word8Vector.tabulate (15, fn i => Word8Vector.sub (uk, 17 + i)))
+  else NONE
 
 (* Proof-local facts have theory_long_name = "" in their name space entry.
    Fall back to the context's theory in that case. *)
