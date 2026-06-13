@@ -45,15 +45,30 @@ signature CONTEXT_CALLBACKS = sig
      symbol_offset is the Isabelle symbol offset from file start (0 if unknown). *)
   type def_pos = string * int * int
 
+  (* Name of a cached theorem entry. `Fixed`: a static fact's name+index
+     (stable). `Member_of_Dynamic`: a member of a dynamic collection, carrying
+     the collection's full name; its display name is computed live at query time
+     as "coll(i)", where i is the member's position in the collection's CURRENT
+     content (a stored index would go stale on collection mutation). *)
+  datatype entry_name =
+      Fixed             of Thm_Name.T
+    | Member_of_Dynamic of string
+
   (* Cached theorem entry: pre-computed at theory-load time, used to skip
-     entry_lookup / infra_filter / key_compute at query time. *)
+     entry_lookup / infra_filter / key_compute at query time.  `theories` are
+     the constituent theory long-names of the proposition (post-XOR-refactor
+     notion of theory membership), used for theory-scope query filtering. *)
   type cached_thm_entry = {
     uk: Universal_Key.universal_key,
-    name: string,
-    thy_name: string,
+    name: entry_name,
     pos: def_pos,
-    thm: thm
+    thm: thm,
+    theories: string list
   }
+
+  (* The DB-storable name of an entry (no live index): `Fixed` -> its stable
+     "name(i)" form; `Member_of_Dynamic` -> the bare collection name. *)
+  val bare_name : entry_name -> string
 
   (* A msgpack unpacker that produces a Context.generic from the argument stream.
      Static callers read nil; agent callers read a state-id string. *)
@@ -117,13 +132,47 @@ val static_context_unpacker = Universal_Key.static_context_unpacker
 
 type def_pos = string * int * int
 
+datatype entry_name =
+    Fixed             of Thm_Name.T
+  | Member_of_Dynamic of string
+
 type cached_thm_entry = {
   uk: Universal_Key.universal_key,
-  name: string,
-  thy_name: string,
+  name: entry_name,
   pos: def_pos,
-  thm: thm
+  thm: thm,
+  theories: string list
 }
+
+(* DB-storable name (no live index). *)
+fun bare_name (Fixed nm)               = Thm_Name.print nm
+  | bare_name (Member_of_Dynamic coll) = coll
+
+(* Live display name for a query result.  `memo` (allocated per query) caches
+   coll -> current member thms, so a dynamic collection is synthesized at most
+   once per query even when several of its members are returned.  The member's
+   index is its position in the collection's CURRENT content (1-based, like
+   Isabelle fact selection `coll(i)`).  Returns NONE if the member is no longer
+   present (the collection mutated since the prep-phase snapshot): such an entry
+   is stale and the caller drops it from the results, rather than citing it by a
+   bare collection name that would be ambiguous and un-resolvable to this thm. *)
+fun resolve_name _ _ (Fixed nm) _ = SOME (Thm_Name.print nm)
+  | resolve_name memo ctxt (Member_of_Dynamic coll) thm =
+      let
+        val thms =
+          case Strhashtab.lookup memo coll of
+            SOME ts => ts
+          | NONE =>
+              let
+                val facts = Context.cases Global_Theory.facts_of Proof_Context.facts_of ctxt
+                val ts = case Facts.lookup ctxt facts coll of
+                           SOME {thms, ...} => thms | NONE => []
+              in Strhashtab.update memo (coll, ts); ts end
+      in
+        case find_index (fn t => Thm.prop_of t aconv Thm.prop_of thm) thms of
+          ~1 => NONE
+        | i => SOME (coll ^ "(" ^ string_of_int (i + 1) ^ ")")
+      end
 
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry.
@@ -687,6 +736,13 @@ val ret_schema = packPair (
   packList (packTuple3 (Universal_Key.pack_universal_key, packString, pack_pos)),
   packList packString (* warnings *))
 
+(* Theorems carry an extra per-entry `is_local` bool: true when emitted by the
+   query-time uncached path (a fact in the query context but not in the global
+   snapshot — i.e. proof-context-local), false for globally-cached facts. *)
+val ret_schema_thm = packPair (
+  packList (packTuple4 (Universal_Key.pack_universal_key, packString, pack_pos, packBool)),
+  packList packString (* warnings *))
+
 fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
@@ -717,7 +773,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theorems",
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
-    ret_schema = ret_schema,
+    ret_schema = ret_schema_thm,
     function = fn (context, (target_thy_opt, the_theory_only, exclude,
                     term_pat_strs, type_pat_strs, theories_include, name_contains, limit, _)) =>
       let
@@ -734,6 +790,8 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
         val prop_matches = mk_prop_pattern_matcher ctxt term_pats type_pats
         val name_filter = mk_name_filter name_contains
         val seen = Bytehashtab.empty 128
+        (* per-query memo for live display-name resolution: coll -> member thms *)
+        val name_memo : thm list Strhashtab.table = Strhashtab.empty 16
 
         (* --- Uncached path: facts not covered by cache --- *)
         val uncached_facts = case cache_opt of
@@ -751,20 +809,21 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                      orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
                   then (acc, remaining)
                   else
-                  let val thy_name = #theory_long_name e
-                      val dominated = case exclude_set of
-                           NONE => thy_name <> target_name
-                         | SOME es => Strhashtab.defined es thy_name
-                      val included = include_pred thy_name
-                  in if dominated orelse not included then (acc, remaining)
-                     else if not (name_filter name) then (acc, remaining)
-                     else
+                  if not (name_filter name) then (acc, remaining)
+                  else
                        let val epos = entry_def_pos e
                        in fold (fn thm => fn (acc, remaining) =>
                        if remaining = 0 then (acc, 0)
                        else
                        let val thm' = Thm.transfer thy thm
-                       in if not (prop_matches (Thm.full_prop_of thm')) then (acc, remaining)
+                           (* theory-scope filter on constituent theories (per thm) *)
+                           val ct = map #1 (#2 (Universal_Key.thm_constituents ctx thm'))
+                           val dominated = case exclude_set of
+                                NONE => not (null ct) andalso not (member (op =) ct target_name)
+                              | SOME es => not (null ct) andalso forall (fn c => Strhashtab.defined es c) ct
+                           val included = null ct orelse exists include_pred ct
+                       in if dominated orelse not included then (acc, remaining)
+                          else if not (prop_matches (Thm.full_prop_of thm')) then (acc, remaining)
                           else
                             let val pass_filter = case filter_opt of
                                   NONE => true
@@ -774,12 +833,13 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                                  let val k = Universal_Key.key_of_theorem' NONE ctx thm'
                                  in if Bytehashtab.defined seen k then (acc, remaining)
                                     else (Bytehashtab.update seen (k, ());
-                                          ((k, name, epos) :: acc, remaining - 1))
+                                          (* uncached = in query context, not in the
+                                             global snapshot => proof-context-local *)
+                                          ((k, name, epos, true) :: acc, remaining - 1))
                                  end
                             end
                        end) thms (acc, remaining)
                        end
-                  end
            end) uncached_facts ([], limit)
 
         (* --- Cached path: apply only query-specific filters --- *)
@@ -794,17 +854,24 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
               let val (results, _) = fold (fn (entry : cached_thm_entry) => fn (acc, remaining) =>
                     if remaining = 0 then (acc, 0)
                     else
-                    let val ethy = #thy_name entry
+                    let val ct = #theories entry
                         val dominated = case exclude_set of
-                             NONE => ethy <> target_name
-                           | SOME es => Strhashtab.defined es ethy
-                        val included = include_pred ethy
+                             NONE => not (null ct) andalso not (member (op =) ct target_name)
+                           | SOME es => not (null ct) andalso forall (fn c => Strhashtab.defined es c) ct
+                        val included = null ct orelse exists include_pred ct
                     in if dominated orelse not included then (acc, remaining)
-                       else if not (name_filter (#name entry)) then (acc, remaining)
+                       else if not (name_filter (bare_name (#name entry))) then (acc, remaining)
                        else if not (prop_matches (Thm.full_prop_of (#thm entry))) then (acc, remaining)
                        else if Bytehashtab.defined seen (#uk entry) then (acc, remaining)
-                       else (Bytehashtab.update seen (#uk entry, ());
-                             ((#uk entry, #name entry, #pos entry) :: acc, remaining - 1))
+                       else (case resolve_name name_memo ctx (#name entry) (#thm entry) of
+                               (* stale member: gone from its collection since the
+                                  snapshot => drop it, keep `remaining` so the slot
+                                  goes to the next valid candidate. *)
+                               NONE => (acc, remaining)
+                             | SOME nm =>
+                                 (Bytehashtab.update seen (#uk entry, ());
+                                  (* cached = global fact (in the snapshot) => not local *)
+                                  ((#uk entry, nm, #pos entry, false) :: acc, remaining - 1)))
                     end) cached ([], remaining_after_uncached)
               in results end
 
