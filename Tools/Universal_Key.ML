@@ -48,6 +48,40 @@
   Theorem keys (and introduction/elimination rule keys) use the first 15 bytes
   of the 128-bit term digest (Term_Digest.thm128) as entity payload,
   guaranteeing a fixed 32-byte key.
+
+  Theorem/rule theory keys: the XOR scheme
+  -----------------------------------------
+
+  This is the one place where the 16-byte prefix is NOT a real theory hash, so
+  the consequences are spelled out here:
+
+  - Constituent theories.  The prefix is the XOR of the theory hashes of the
+    proposition's constituent theories — the defining theory of every constant
+    and type constructor in Thm.prop_of.  A constant/type's defining theory is
+    taken as the LEADING QUALIFIER of its fully qualified name (HOL.conj -> HOL,
+    Groups.plus_class.plus -> Groups); Pure's primitive types (fun, prop, ...)
+    carry no qualifier and belong to Pure.  No name-space lookup is involved, so
+    the key depends only on the thm, not on the context it is reached from.
+    (See compute_constituents / theory_short_of below.)
+
+  - LSB / WIP.  Hashes are XORed in full; the result's byte-0 LSB is then OR'd
+    with the constituents' LSBs, so a key is WIP iff any constituent theory is
+    WIP.  (Masking byte 0 before XOR would be redundant: the final OR dominates
+    its parity.)  An empty constituent set yields the all-zero prefix.
+
+  - Addressing (load-bearing for the Python store).  A namespace entity's prefix
+    IS its defining theory's hash, so "which theory owns this entry" is read off
+    the prefix.  A theorem/rule prefix is an XOR PSEUDO-theory that matches no
+    real theory, so theory membership — for deletion and for hash-change
+    migration — must instead be decided from the constituent list stored in the
+    record (carried out of ML as build_entries' provenance).  Prefix range scans
+    (e.g. migrating a theory's entries) must therefore SKIP theorem/rule keys and
+    handle them by recomputing the XOR from the constituent list.
+
+  - Degeneration.  A single-constituent thm prefix equals that theory's hash
+    byte-for-byte, so it can collide with that theory's own old name-addressed
+    key for the same proposition.  Records predating this scheme have no
+    constituent list and so must be purged, not reinterpreted, when adopting it.
 *)
 signature UNIVERSAL_KEY = sig
 
@@ -122,10 +156,11 @@ val key_of''        : thm_uk_cache option -> Context.generic -> entity -> univer
    content fingerprint: thm_digest15 computes it for an arbitrary thm (no name
    hint or theory resolution involved), theorem_key_digest extracts it back
    from a theorem universal key (NONE for any other key shape).  Two keys'
-   payloads agree iff the underlying propositions have equal thm128 prefixes —
-   this is the only part of a theorem key comparable across theories and for
-   freshly built (anonymous) theorems.  Single source of truth for the key
-   layout; keep in sync with build_key/ent_digest128_15 below. *)
+   payloads agree iff the underlying propositions have equal thm128 prefixes.
+   The payload compares cleanly across theories; the 16-byte prefix does not
+   (it is an XOR pseudo-theory — use constituents_of for theory membership).
+   Single source of truth for the payload layout; keep in sync with
+   build_key/ent_digest128_15 below. *)
 val thm_digest15        : thm -> Word8Vector.vector
 val theorem_key_digest  : universal_key -> Word8Vector.vector option
 
@@ -135,7 +170,8 @@ val theorem_key_digest  : universal_key -> Word8Vector.vector option
 type constituent = theory_long_name * Theory_Hash.hash
 val thm_constituents : Context.generic -> thm -> Theory_Hash.hash * constituent list
 (* Constituent list of a theorem/rule key built earlier in this session
-   (populated as a side effect of key construction). *)
+   (populated as a side effect of key construction); NONE for any other key
+   shape, or a thm/rule key not yet built in this session. *)
 val constituents_of : universal_key -> constituent list option
 
 val make_universal_key_callback  : context_unpacker -> Remote_Procedure_Calling.callback'
@@ -339,9 +375,8 @@ fun build_key (thy_hash : Theory_Hash.hash) (tag : Word8.word)
     Word8Array.vector buf
   end
 
-(* Standalone theorem-key payload (see signature comment).  Mirrors the
-   theorem-key layout above: 16-byte theory hash, tag 0x02 at offset 16,
-   15-byte thm128 prefix at offsets 17..31. *)
+(* Standalone theorem-key payload (see signature comment): the first 15 bytes
+   of thm128, i.e. bytes 17..31 of a full theorem key, without prefix or tag. *)
 fun thm_digest15 thm : Word8Vector.vector =
   let val arr = Term_Digest.digest128_to_array (Term_Digest.thm128 thm)
   in Word8Vector.tabulate (15, fn i => Word8Array.sub (arr, i)) end
@@ -367,11 +402,16 @@ fun default_thy_long_name context "" = Context.theory_long_name (Context.theory_
    reached, and changes whenever any constituent theory's content changes
    (automatic invalidation of derived records).
 
-   LSB convention: constituent hashes are XORed with byte 0's LSB masked out;
-   the result's LSB is the OR of the constituents' LSBs, so a key is WIP iff
-   any constituent theory is WIP.  A proposition with no constituents yields
-   the all-zero hash (coinciding with the former anonymous-thm sentinel,
-   which is the degenerate case of an empty XOR). *)
+   LSB convention: hashes are XORed in full and the result's byte-0 LSB is then
+   OR'd with the constituents' LSBs, so a key is WIP iff any constituent theory
+   is WIP.  (The final OR dominates the LSB's XOR parity, so masking byte 0
+   before XOR would be redundant — see the fold in compute_constituents.)  A
+   proposition with no constituents yields the all-zero hash (the empty XOR).
+
+   The key prefix is therefore an XOR pseudo-theory, not a real theory hash:
+   theory membership (deletion, hash-change migration) is decided from the
+   constituent list stored in the record, never from the prefix.  See the
+   signature header's "XOR scheme" section. *)
 
 type constituent = theory_long_name * Theory_Hash.hash
 
