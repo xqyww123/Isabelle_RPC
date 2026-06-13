@@ -67,6 +67,12 @@ signature CONTEXT_CALLBACKS = sig
   val mk_name_filter : string list -> string -> bool
   val mk_prop_pattern_matcher : Proof.context -> term list -> typ list -> term -> bool
 
+  (* For a dynamic fact, return its current members in the given context;
+     for a static fact or a missing name, NONE.  Generalizes the previous
+     named_theorems-only handling to any dynamic fact (e.g. the raw
+     add_thms_dynamic collection derivative_eq_intros). *)
+  val dynamic_fact_members : Context.generic -> Facts.T -> string -> thm list option
+
   (* Coercion constants to ignore in transparent pattern matching.
      When a unary Const application (F $ X) has F in this set,
      the matcher treats it as just X.
@@ -83,7 +89,7 @@ signature CONTEXT_CALLBACKS = sig
   val make_types_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_classes_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
-  val make_named_theorems_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_theorem_collection_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
@@ -616,6 +622,15 @@ fun mk_name_filter [] = (fn _ : string => true)
         in List.all (fn pat => String.isSubstring pat name_lower) pats_lower end
       end
 
+(* For a dynamic fact, return its current members; for a static fact or a
+   missing name, NONE.  Facts.lookup evaluates the registered dynamic function,
+   so this works uniformly for named_theorems and raw add_thms_dynamic
+   collections (e.g. derivative_eq_intros). *)
+fun dynamic_fact_members context facts name =
+  case Facts.lookup context facts name of
+    SOME {dynamic = true, thms} => SOME thms
+  | _ => NONE
+
 (* --- ns_filter: shared for constants, types, classes, locales --- *)
 
 fun ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt =
@@ -855,17 +870,17 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
     timeout = NONE
   }
 
-fun make_named_theorems_callback filter_opt (ctxt_unpack : context_unpacker)
+fun make_theorem_collection_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.named_theorems",
+    name = "Context.theorem_collection",
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
-        val key_of = #1 o Universal_Key.key_of_named_theorems ctx
+        val key_of = #1 o Universal_Key.key_of_theorem_collection ctx
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val facts = Proof_Context.facts_of ctxt
         val space = Facts.space_of facts
@@ -873,11 +888,11 @@ fun make_named_theorems_callback filter_opt (ctxt_unpack : context_unpacker)
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
         val name_filter = mk_name_filter name_contains
-        (* Facts.is_dynamic is a cheap (no content forcing) prefilter; named_theorems
-           are dynamic facts, so Named_Theorems.get only runs on dynamic candidates. *)
+        (* Any dynamic fact is a theorem collection (a named_theorems or a raw
+           add_thms_dynamic collection like derivative_eq_intros); Facts.is_dynamic
+           is a cheap, no-content prefilter that identifies all of them. *)
         val extra_filter = fn name =>
           name_filter name andalso Facts.is_dynamic facts name
-          andalso can (Named_Theorems.get ctxt) name
       in (ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt, include_warnings) end,
     timeout = NONE
   }

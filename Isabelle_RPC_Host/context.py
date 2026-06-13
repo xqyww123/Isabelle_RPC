@@ -196,17 +196,18 @@ async def locales(connection: Connection, theory: str | None = None,
                            name_contains, limit, ctxt=ctxt)
 
 
-async def named_theorems(connection: Connection, theory: str | None = None,
+async def theorem_collection(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
             theories_not_include: list[str] = [],
             theories_include: list[str] = [],
             name_contains: list[str] = [],
             limit: int = -1,
             ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all named_theorems collections.
-    Pattern parameters are not applicable to named_theorems.
+    """Return (entries, warnings) for all theorem collections (dynamic facts:
+    named_theorems and raw add_thms_dynamic collections like derivative_eq_intros).
+    Pattern parameters are not applicable to theorem collections.
     """
-    return await _cached_or_call(connection, "_ctx_named_theorems", "Context.named_theorems",
+    return await _cached_or_call(connection, "_ctx_theorem_collection", "Context.theorem_collection",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -304,7 +305,7 @@ _KIND_TO_FUNC = {
     EntityKind.TYPE: types,
     EntityKind.CLASS: classes,
     EntityKind.LOCALE: locales,
-    EntityKind.NAMED_THEOREMS: named_theorems,
+    EntityKind.THEOREM_COLLECTION: theorem_collection,
     EntityKind.METHOD: methods,
     EntityKind.INTRODUCTION_RULE: introduction_rules,
     EntityKind.ELIMINATION_RULE: elimination_rules,
@@ -350,7 +351,7 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
         _t_kind = _time.perf_counter()
         # Pass only the parameters each function accepts
         if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE,
-                    EntityKind.NAMED_THEOREMS, EntityKind.METHOD):
+                    EntityKind.THEOREM_COLLECTION, EntityKind.METHOD):
             entries, warnings = await func(connection, theory, the_theory_only,
                                   theories_not_include,
                                   theories_include=theories_include,

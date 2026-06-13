@@ -13,7 +13,7 @@ class EntityKind(IntEnum):
     TYPE = 3
     CLASS = 4
     LOCALE = 5
-    NAMED_THEOREMS = 6
+    THEOREM_COLLECTION = 6
     METHOD = 7
     INTRODUCTION_RULE = 0x12
     ELIMINATION_RULE = 0x22
@@ -30,7 +30,7 @@ class EntityKind(IntEnum):
 
 EntityKind.ALL = [EntityKind.CONSTANT, EntityKind.THEOREM, EntityKind.TYPE,  # type: ignore
                   EntityKind.CLASS, EntityKind.LOCALE,
-                  EntityKind.NAMED_THEOREMS, EntityKind.METHOD,
+                  EntityKind.THEOREM_COLLECTION, EntityKind.METHOD,
                   EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
                   EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE]
 
@@ -40,7 +40,7 @@ _ENTITY_LABELS = {
     EntityKind.TYPE: "type",
     EntityKind.CLASS: "typeclass",
     EntityKind.LOCALE: "locale",
-    EntityKind.NAMED_THEOREMS: "named theorems",
+    EntityKind.THEOREM_COLLECTION: "named theorem bundles",
     EntityKind.METHOD: "proof method",
     EntityKind.INTRODUCTION_RULE: "introduction rule",
     EntityKind.ELIMINATION_RULE: "elimination rule",
@@ -51,6 +51,9 @@ _ENTITY_LABELS = {
 _LABEL_TO_ENTITY = {v: k for k, v in _ENTITY_LABELS.items()}
 _LABEL_TO_ENTITY["theorem"] = EntityKind.THEOREM
 _LABEL_TO_ENTITY["fact"] = EntityKind.THEOREM
+# Permanent parse alias: the kind was historically labelled "named theorems";
+# accept it so old agent queries / stored kind strings still resolve.
+_LABEL_TO_ENTITY["named theorems"] = EntityKind.THEOREM_COLLECTION
 
 THM_RULE_KINDS = frozenset({
     EntityKind.THEOREM, EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
