@@ -78,10 +78,10 @@
     (e.g. migrating a theory's entries) must therefore SKIP theorem/rule keys and
     handle them by recomputing the XOR from the constituent list.
 
-  - Degeneration.  A single-constituent thm prefix equals that theory's hash
-    byte-for-byte, so it can collide with that theory's own old name-addressed
-    key for the same proposition.  Records predating this scheme have no
-    constituent list and so must be purged, not reinterpreted, when adopting it.
+  - Degeneration.  A thm with a single constituent theory T has a prefix equal
+    to T's hash byte-for-byte, indistinguishable by prefix alone from T's own
+    keys.  Operations that range over a theory's keys by prefix must therefore
+    discriminate theorem/rule keys (by tag/length), never trust the prefix.
 *)
 signature UNIVERSAL_KEY = sig
 
@@ -610,8 +610,7 @@ fun key_of_theorem cache context =
     let
       val (base_name, idx_opt) = parse_thm_xname xname
       val full_name = Name_Space.intern fact_space base_name
-      (* lookup doubles as the existence check; the key no longer depends on
-         the name-space entry's theory_long_name *)
+      (* lookup doubles as the existence check *)
       val {thms, ...} =
         case Facts.lookup context facts full_name of
           SOME r => r
