@@ -223,19 +223,38 @@ fun goal128 g = (Hasher_Lo.goal g, Hasher_Hi.goal g)
    gives a hash table keyed directly on theorem names. *)
 structure ThmName_Hash =
   Hash_Table(Hash_Product(structure A = Strhashtab.Key structure B = Inthashtab.Key))
-val thm128_cache : digest128 ThmName_Hash.table Synchronized.var =
+(* The cache stores the proposition alongside its digest: name hints are NOT
+   unique (e.g. dynamic-collection members can carry a shared "local.*" hint on
+   DIFFERENT propositions), so a hit must be confirmed against the proposition
+   before its digest is trusted.  Confirmation uses (op =) — exact structural
+   equality, NOT aconv: hash_term hashes Abs bound-variable names, so term128 is
+   not alpha-invariant, and (op =) is the precise equality term128 respects. *)
+val thm128_cache : (term * digest128) ThmName_Hash.table Synchronized.var =
   Synchronized.var "Hasher.thm128_cache" (ThmName_Hash.empty 1024)
 
 fun thm128 thm =
   if not (Thm.has_name_hint thm) then term128 (Thm.prop_of thm)
   else
-    let val name = Thm.get_name_hint thm
-    in Synchronized.change_result thm128_cache (fn tab =>
-        case ThmName_Hash.lookup tab name of
-          SOME h => (h, tab)
-        | NONE =>
-            let val h = term128 (Thm.prop_of thm)
-            in (h, (ThmName_Hash.update tab (name, h); tab)) end)
+    let
+      val name = Thm.get_name_hint thm
+      val prop = Thm.prop_of thm
+      (* Look up under the lock; verify with (op =) and (re)compute term128
+         OUTSIDE the lock so the hash never runs while the cache is held. *)
+      val hit = Synchronized.change_result thm128_cache
+                  (fn tab => (ThmName_Hash.lookup tab name, tab))
+    in
+      case hit of
+        SOME (p, h) => if p = prop then h else term128 prop  (* collision: recompute *)
+      | NONE =>
+          let val h = term128 prop
+          in
+            (* first-writer-wins: keep an entry a concurrent caller may have set *)
+            Synchronized.change thm128_cache (fn tab =>
+              (if ThmName_Hash.defined tab name then ()
+               else ThmName_Hash.update tab (name, (prop, h));
+               tab));
+            h
+          end
     end
 
 end
