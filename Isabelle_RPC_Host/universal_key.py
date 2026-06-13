@@ -52,18 +52,56 @@ _LABEL_TO_ENTITY = {v: k for k, v in _ENTITY_LABELS.items()}
 _LABEL_TO_ENTITY["theorem"] = EntityKind.THEOREM
 _LABEL_TO_ENTITY["fact"] = EntityKind.THEOREM
 
+THM_RULE_KINDS = frozenset({
+    EntityKind.THEOREM, EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
+    EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE})
+_THM_RULE_TAG_BYTES = frozenset(int(k) for k in THM_RULE_KINDS)
+
+
 class Entity(NamedTuple):
     theory: theory_hash
     kind: EntityKind
     name: str | theorem_digest | None
-    
+
 
 def is_WIP(key: universal_key) -> bool:
     """Check whether a universal key is from a WIP (non-persistent) theory.
 
-    WIP theory hashes have LSB of byte 0 set to 1.
+    WIP theory hashes have LSB of byte 0 set to 1.  For theorem/rule keys the
+    prefix LSB is the OR of the constituent theories' LSBs, so this is true
+    iff any constituent theory is WIP.
     """
     return key[0] & 1 == 1
+
+
+def is_thm_rule_key(key: universal_key) -> bool:
+    """Whether the key is a theorem/rule key (32 bytes, thm/rule tag).
+
+    Only these keys carry an XOR theory prefix; all other entity keys'
+    16-byte prefix is the actual defining theory's hash.
+    """
+    return len(key) == 32 and key[16] in _THM_RULE_TAG_BYTES
+
+
+def xor_theory_prefix(hashes: 'list[bytes] | Any') -> bytes:
+    """The 16-byte XOR theory prefix of a theorem/rule key.
+
+    XOR of the constituent theory hashes; the result's LSB is then OR'd with
+    the constituents' LSBs (WIP iff any constituent is WIP).  That final OR
+    dominates the LSB's XOR parity (parity = 1 implies some LSB = 1 implies
+    wip = 1), so byte 0's LSB is XORed in unmasked — masking it first would
+    be redundant.  Mirrors Universal_Key.compute_constituents on the ML side
+    — keep the two in sync.
+    """
+    acc = bytearray(16)
+    wip = 0
+    for h in hashes:
+        assert len(h) == 16, f"theory hash must be 16 bytes, got {len(h)}"
+        for i in range(16):
+            acc[i] ^= h[i]
+        wip |= h[0] & 1
+    acc[0] |= wip
+    return bytes(acc)
 
 
 def destruct_key(key: universal_key) -> Entity:
@@ -71,8 +109,12 @@ def destruct_key(key: universal_key) -> Entity:
 
     Theory keys are 16 bytes (just the theory hash).
     Entity keys: <theory_hash (16 bytes)> <tag (1 byte)> <entity (variable)>
-    - Theorem keys: 32 bytes (15-byte digest payload)
+    - Theorem/rule keys: 32 bytes (15-byte digest payload)
     - Other keys: 17 + len(name) bytes (UTF-8 name payload)
+
+    NB: for theorem/rule keys the returned ``theory`` is the XOR of the
+    constituent theories' hashes (see ``xor_theory_prefix``), NOT the hash of
+    any single defining theory — do not look it up as a real theory.
     """
     if len(key) < 16:
         raise ValueError(f"Universal key too short: {len(key)} bytes")

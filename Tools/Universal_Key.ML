@@ -18,10 +18,15 @@
 
   - theory_hash: 16-byte hash from Theory_Hash.hash_of, identifying the
     theory that defines the entity.  Works for both heap and non-heap theories.
-    Exception: theorem/rule entities WITHOUT a name hint (anonymous facts, e.g.
-    collection-only members of a named_theorems) have no recoverable defining
-    theory, so their theory_hash is an all-zero 16-byte sentinel — their key is
-    purely content-addressed (see `anon_thy_hash`).
+    Exception: for theorem/rule entities the defining theory is in general
+    unrecoverable (empirically: the name hint may be absent, the certificate
+    theory is overwritten by whoever retrieves the thm, the derivation id is
+    <none>, the tags carry no provenance).  Their theory_hash is instead the
+    XOR of the theory hashes of the proposition's *constituent* theories —
+    the defining theories of all constants and type constructors occurring in
+    Thm.prop_of (the same term thm128 digests) — making the key computable
+    from the thm alone and stable along whatever path the thm is reached.
+    See "Constituent theories" in the implementation.
   - tag: 1-byte entity kind discriminator:
       0x01 = Constant, 0x02 = Theorem,
       0x03 = Type, 0x04 = Class, 0x05 = Locale,
@@ -123,6 +128,15 @@ val key_of''        : thm_uk_cache option -> Context.generic -> entity -> univer
    layout; keep in sync with build_key/ent_digest128_15 below. *)
 val thm_digest15        : thm -> Word8Vector.vector
 val theorem_key_digest  : universal_key -> Word8Vector.vector option
+
+(* Constituent theories of a thm's proposition: the XOR theory hash (the
+   16-byte theory-key component of theorem/rule keys) together with the
+   sorted (theory long name, theory hash) list it was XORed from. *)
+type constituent = theory_long_name * Theory_Hash.hash
+val thm_constituents : Context.generic -> thm -> Theory_Hash.hash * constituent list
+(* Constituent list of a theorem/rule key built earlier in this session
+   (populated as a side effect of key construction). *)
+val constituents_of : universal_key -> constituent list option
 
 val make_universal_key_callback  : context_unpacker -> Remote_Procedure_Calling.callback'
 val make_universal_key_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
@@ -272,21 +286,28 @@ type thm_uk_cache = (term * universal_key) Net.net Synchronized.var
 fun new_thm_uk_cache () : thm_uk_cache =
   Synchronized.var "thm_uk_cache" Net.empty
 
-fun inet_lookup (cache : thm_uk_cache) (prop : term) : universal_key option =
-  List.find (fn (p, _) => p aconv prop)
+(* Entries are discriminated by the key's tag byte as well as the prop: the
+   same proposition may legitimately be keyed as a theorem (0x02) and as one
+   or more rule kinds (0x12/0x22/0x32/0x42) in the same cache. *)
+fun inet_lookup (cache : thm_uk_cache) (tag : Word8.word) (prop : term) : universal_key option =
+  List.find (fn (p, k) => Word8Vector.sub (k, 16) = tag andalso p aconv prop)
     (Net.match_term (Synchronized.value cache) prop)
   |> Option.map snd
 
 fun inet_store (cache : thm_uk_cache) (prop : term) (k : universal_key) : unit =
   Synchronized.change cache
-    (Net.insert_term_safe (op aconv o apply2 fst) (prop, (prop, k)))
+    (Net.insert_term_safe
+       (fn ((p1, k1), (p2, k2)) =>
+          p1 aconv p2 andalso Word8Vector.sub (k1, 16) = Word8Vector.sub (k2, 16))
+       (prop, (prop, k)))
 
-fun cached_thm_key (cache : thm_uk_cache option) (thm : thm) (compute : unit -> universal_key) =
+fun cached_thm_key (cache : thm_uk_cache option) (tag : Word8.word) (thm : thm)
+                   (compute : unit -> universal_key) =
   case cache of
     NONE => compute ()
   | SOME c =>
       let val prop = Thm.prop_of thm
-      in case inet_lookup c prop of
+      in case inet_lookup c tag prop of
            SOME k => k
          | NONE => let val k = compute ()
                    in inet_store c prop k; k end
@@ -335,18 +356,122 @@ fun theorem_key_digest (uk : universal_key) : Word8Vector.vector option =
 fun default_thy_long_name context "" = Context.theory_long_name (Context.theory_of context)
   | default_thy_long_name _ name = name
 
-(* Sentinel theory hash for theorems/rules WITHOUT a name hint.  Such facts
-   (e.g. anonymous members of a named_theorems collection, `lemma [XX]: ...`)
-   have no recoverable defining theory: the name hint is empty, the certificate
-   theory is overwritten to whatever theory retrieves the thm, the derivation id
-   is <none>, and the tags carry no provenance (empirically verified).  Rather
-   than attribute such a fact to the (arbitrary) current theory, we key it with
-   an all-zero 16-byte theory hash, making its universal key purely
-   content-addressed and stable across whatever theory it is reached from.
-   NB: byte 0 LSB = 0, so these keys read as "persistent" / non-WIP — correct,
-   since a content-addressed key is version-independent and must never be
-   cleaned as WIP. *)
-val anon_thy_hash : Theory_Hash.hash = Word8Vector.tabulate (16, fn _ => 0w0)
+(* --- Constituent theories of a theorem (XOR theory key) ---
+
+   The defining theory of a thm is in general unrecoverable (see the signature
+   header).  Instead, the 16-byte theory-key component of theorem/rule keys is
+   the XOR of the theory hashes of the proposition's constituent theories: the
+   defining theories of all constants and type constructors occurring in
+   Thm.prop_of (the same term Term_Digest.thm128 digests).  The key is thus
+   computable from the thm alone, identical along whatever path the thm is
+   reached, and changes whenever any constituent theory's content changes
+   (automatic invalidation of derived records).
+
+   LSB convention: constituent hashes are XORed with byte 0's LSB masked out;
+   the result's LSB is the OR of the constituents' LSBs, so a key is WIP iff
+   any constituent theory is WIP.  A proposition with no constituents yields
+   the all-zero hash (coinciding with the former anonymous-thm sentinel,
+   which is the degenerate case of an empty XOR). *)
+
+type constituent = theory_long_name * Theory_Hash.hash
+
+val constituents_lock = Synchronized.var "Universal_Key.constituents" ()
+
+structure Digest_Tab = Hash_Table(struct
+  type key = Term_Digest.digest128
+  val hash = Term_Digest.digest128_hasher
+  val eq = op = : Term_Digest.digest128 * Term_Digest.digest128 -> bool
+end)
+
+(* thm128 digest -> (XOR theory hash, sorted constituent list) *)
+val constituents_cache : (Theory_Hash.hash * constituent list) Digest_Tab.table =
+  Digest_Tab.empty 1024
+
+(* theorem/rule universal key -> sorted constituent list, for record writers *)
+val constituents_registry : constituent list UK_Table.table = UK_Table.empty 1024
+
+(* The defining theory of a constant or type constructor is the leading
+   qualifier of its fully qualified name (HOL.conj -> HOL,
+   Groups.plus_class.plus -> Groups).  Pure's primitive types (fun, prop,
+   itself, idt, ...) carry no qualifier; they belong to Pure. *)
+fun theory_short_of name =
+  case Long_Name.explode name of
+    seg :: _ :: _ => seg
+  | _ => "Pure"
+
+fun compute_constituents (context : Context.generic) (prop : term)
+    : Theory_Hash.hash * constituent list =
+  let
+    (* constituent theories, keyed by short name (unique within a runtime);
+       short-name resolution + hashing is memoized inside Theory_Hash. *)
+    val thys : constituent Strhashtab.table = Strhashtab.empty 16
+
+    fun add name =
+      let val short = theory_short_of name
+      in if Strhashtab.defined thys short then ()
+         else Strhashtab.update thys (short, Theory_Hash.hash_of_short context short)
+      end
+
+    (* NB: Term.Type qualified — the bare constructor name is shadowed by
+       this structure's entity datatype. *)
+    fun walk_typ (Term.Type (c, Ts)) = (add c; List.app walk_typ Ts)
+      | walk_typ _ = ()
+    fun walk (Const (c, T)) = (add c; walk_typ T)
+      | walk (Free (_, T)) = walk_typ T
+      | walk (Var (_, T)) = walk_typ T
+      | walk (Abs (_, T, t)) = (walk_typ T; walk t)
+      | walk (t $ u) = (walk t; walk u)
+      | walk (Bound _) = ()
+    val _ = walk prop
+
+    (* XOR all 16 bytes uniformly; the final `acc[0] |= wip` below forces the
+       LSB to the OR of constituents' LSBs, which dominates the LSB's XOR
+       parity (parity = 1 implies some LSB = 1 implies wip = 1), so masking
+       byte 0's LSB before XORing would be redundant. *)
+    val acc = Word8Array.array (16, 0w0)
+    val wip = Strhashtab.fold (fn (_, (_, h)) => fn wip =>
+        let
+          fun loop i = if i >= 16 then ()
+            else (Word8Array.update (acc, i,
+                    Word8.xorb (Word8Array.sub (acc, i), Word8Vector.sub (h, i)));
+                  loop (i + 1))
+        in loop 0; Word8.orb (wip, Word8.andb (Word8Vector.sub (h, 0), 0w1)) end)
+      thys (0w0 : Word8.word)
+    val _ = Word8Array.update (acc, 0, Word8.orb (Word8Array.sub (acc, 0), wip))
+    val provenance =
+      Strhashtab.fold (fn (_, c) => fn cs => c :: cs) thys []
+      |> sort (string_ord o apply2 #1)
+  in (Word8Array.vector acc, provenance) end
+
+fun thm_constituents (context : Context.generic) (thm : thm)
+    : Theory_Hash.hash * constituent list =
+  let val d = Term_Digest.thm128 thm
+  in
+    case Synchronized.change_result constituents_lock
+           (fn () => (Digest_Tab.lookup constituents_cache d, ())) of
+      SOME r => r
+    | NONE =>
+        let
+          val r = compute_constituents context (Thm.prop_of thm)
+          val _ = Synchronized.change_result constituents_lock
+                    (fn () => (Digest_Tab.update constituents_cache (d, r), ()))
+        in r end
+  end
+
+fun constituents_of (uk : universal_key) : constituent list option =
+  Synchronized.change_result constituents_lock
+    (fn () => (UK_Table.lookup constituents_registry uk, ()))
+
+(* Unified key builder for theorem/rule keys: all tags, named or anonymous. *)
+fun build_thm_key (cache : thm_uk_cache option) (context : Context.generic)
+                  (tag : Word8.word) (thm : thm) : universal_key =
+  cached_thm_key cache tag thm (fn () =>
+    let
+      val (thy_hash, prov) = thm_constituents context thm
+      val uk = build_key thy_hash tag (ent_digest128_15 (Term_Digest.thm128 thm))
+      val _ = Synchronized.change_result constituents_lock
+                (fn () => (UK_Table.update constituents_registry (uk, prov), ()))
+    in uk end)
 
 (* --- Namespace-based entities (constant, type, class, locale) --- *)
 
@@ -445,9 +570,12 @@ fun key_of_theorem cache context =
     let
       val (base_name, idx_opt) = parse_thm_xname xname
       val full_name = Name_Space.intern fact_space base_name
-      val ns_entry = Name_Space.the_entry fact_space full_name
-      val thy_long_name = default_thy_long_name context (#theory_long_name ns_entry)
-      val {thms, ...} = the (Facts.lookup context facts full_name)
+      (* lookup doubles as the existence check; the key no longer depends on
+         the name-space entry's theory_long_name *)
+      val {thms, ...} =
+        case Facts.lookup context facts full_name of
+          SOME r => r
+        | NONE => error ("Undefined fact: " ^ quote full_name)
       val thm = case (thms, idx_opt) of
           ([thm], NONE) => thm
         | ([thm], SOME _) => thm
@@ -464,70 +592,25 @@ fun key_of_theorem cache context =
                    full_name ^ "(1)")
         | ([], _) => error ("No theorems in fact " ^ full_name)
       val thm = Thm.transfer thy thm
-      val uk = if Thm.has_name_hint thm
-        then cached_key (Named_Theorem (Thm_Name.print (Thm.get_name_hint thm)), thy_long_name)
-               (fn () => build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                                   0wx02 (ent_digest128_15 (Term_Digest.thm128 thm)))
-        else cached_thm_key cache thm
-               (fn () => build_key anon_thy_hash 0wx02 (ent_digest128_15 (Term_Digest.thm128 thm)))
+      val uk = build_thm_key cache context 0wx02 thm
       val is_global = Facts.defined global_facts full_name
     in (uk, thm, is_global, full_name) end
   end
 
 end (* local parse_thm_xname *)
 
-fun key_of_theorem' cache context thm =
-  if Thm.has_name_hint thm then
-    let
-      val deriv_name = Thm.get_name_hint thm
-      val fact_space = Facts.space_of
-            (Context.cases Global_Theory.facts_of Proof_Context.facts_of context)
-      val thy_long_name = default_thy_long_name context
-        (* the_entry is keyed on the bare fact name; the Thm_Name index
-           selects a theorem within a fact and is not a name-space key. *)
-        (case try (Name_Space.the_entry fact_space) (#1 deriv_name) of
-           SOME e => #theory_long_name e
-         | NONE => "")
-      fun compute () =
-        build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
-                  0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
-    in cached_key (Named_Theorem (Thm_Name.print deriv_name), thy_long_name) compute end
-  else
-    let
-      fun compute () =
-        build_key anon_thy_hash 0wx02 (ent_digest128_15 (Term_Digest.thm128 thm))
-    in cached_thm_key cache thm compute end
+fun key_of_theorem' cache context thm = build_thm_key cache context 0wx02 thm
 
 (* --- Introduction / Elimination rules --- *)
 (* Same key layout as theorems (32 bytes) but with different tags. *)
 
 local
-fun key_of_rule tag make_named cache context thm =
-  if Thm.has_name_hint thm then
-    let
-      val deriv_name = Thm.get_name_hint thm
-      val fact_space = Facts.space_of
-            (Context.cases Global_Theory.facts_of Proof_Context.facts_of context)
-      fun thy_long_name () = default_thy_long_name context
-        (* the_entry is keyed on the bare fact name; the Thm_Name index
-           selects a theorem within a fact and is not a name-space key. *)
-        (case try (Name_Space.the_entry fact_space) (#1 deriv_name) of
-           SOME e => #theory_long_name e
-         | NONE => "")
-      fun compute () =
-        build_key (Theory_Hash.hash_of (resolve_theory context (thy_long_name ())))
-                  tag (ent_digest128_15 (Term_Digest.thm128 thm))
-    in cached_key (make_named (Thm_Name.print deriv_name), thy_long_name ()) compute end
-  else
-    let
-      fun compute () =
-        build_key anon_thy_hash tag (ent_digest128_15 (Term_Digest.thm128 thm))
-    in cached_thm_key cache thm compute end
+fun key_of_rule tag cache context thm = build_thm_key cache context tag thm
 in
-val key_of_introduction_rule' = key_of_rule 0wx12 Named_Introduction_Rule
-val key_of_elimination_rule'  = key_of_rule 0wx22 Named_Elimination_Rule
-val key_of_induction_rule'    = key_of_rule 0wx32 Named_Induction_Rule
-val key_of_case_split_rule'   = key_of_rule 0wx42 Named_Case_Split_Rule
+val key_of_introduction_rule' = key_of_rule 0wx12
+val key_of_elimination_rule'  = key_of_rule 0wx22
+val key_of_induction_rule'    = key_of_rule 0wx32
+val key_of_case_split_rule'   = key_of_rule 0wx42
 end
 
 fun key_of_introduction_rule cache context xname =

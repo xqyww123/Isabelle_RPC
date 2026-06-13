@@ -17,6 +17,9 @@ signature THEORY_HASH = sig
   type hash = Word8Vector.vector  (* 16 bytes, xxhash128 *)
   exception Cannot_Hash of theory
   val hash_of : theory -> hash
+  (* Resolve a theory short name (runtime-unique) to its (long name, hash),
+     memoized session-wide.  Centralizes short-name resolution + hashing. *)
+  val hash_of_short : Context.generic -> string -> string * hash
   val theory_of : hash -> theory option
   val is_persistent : hash -> bool
   val hasher : hash -> word
@@ -159,6 +162,24 @@ fun hash_of thy =
           val _ = Synchronized.change hash_to_thy (fn tab => (Hash_Tab.update tab (h, thy); tab))
         in h end
   end
+
+(* short theory name -> (long name, hash).  Session memo keyed by short name
+   (runtime-unique), so a short name resolves to the same theory and hash
+   regardless of which context first triggered resolution.  Lookup under the
+   lock; on miss resolve + hash outside it (hash_of may RPC) and insert after
+   — a racing duplicate resolution is idempotent. *)
+val by_short_cache : (string * hash) Symtab.table Synchronized.var =
+  Synchronized.var "Theory_Hash.by_short" Symtab.empty
+
+fun hash_of_short context short =
+  case Synchronized.change_result by_short_cache (fn tab => (Symtab.lookup tab short, tab)) of
+    SOME info => info
+  | NONE =>
+      let
+        val thy = resolve_theory context short
+        val info = (Context.theory_long_name thy, hash_of thy)
+        val _ = Synchronized.change by_short_cache (Symtab.update (short, info))
+      in info end
 
 fun store_theory_hash thy =
   let
