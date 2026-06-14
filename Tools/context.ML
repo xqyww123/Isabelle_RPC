@@ -108,19 +108,35 @@ signature CONTEXT_CALLBACKS = sig
   val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
-  (* The thm list extractor is supplied by the caller because Classical requires HOL,
-     which is not available in this Pure-level file. *)
+  (* Rule callbacks share the theorems engine (make_thm_like_callback).  Per-kind
+     wrapper differences collapse to: the live sources + key_of.  Arguments:
+       extract_net : the classical/Induct net (Source-1), a flat thm list.  Supplied
+         by the caller because Classical requires HOL (not available Pure-level).
+       name_pred   : Source-2 fact-name predicate (which static facts to scan by
+         suffix), passed in because Theory_Structure lives in Semantic_Embedding.
+       shape_ok    : Source-2 per-thm gate (has_rule_shape for induct/case, K true
+         for intro/elim per decision 6).
+       cache_opt   : prep-built (Source-2 statics + dynamic members) bucket for this
+         kind, plus the snapshot Facts.T whose complement is the live Source-2 delta. *)
   val make_introduction_rules_callback :
-    (Context.generic -> thm list) -> (string * thm -> bool) option ->
+    (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
+    (string * thm -> bool) option ->
+    (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
   val make_elimination_rules_callback :
-    (Context.generic -> thm list) -> (string * thm -> bool) option ->
+    (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
+    (string * thm -> bool) option ->
+    (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
   val make_induction_rules_callback :
-    (Context.generic -> thm list) -> (string * thm -> bool) option ->
+    (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
+    (string * thm -> bool) option ->
+    (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
   val make_case_split_rules_callback :
-    (Context.generic -> thm list) -> (string * thm -> bool) option ->
+    (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
+    (string * thm -> bool) option ->
+    (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
 end
 
@@ -768,14 +784,26 @@ fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
     timeout = NONE
   }
 
-fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
-    : Remote_Procedure_Calling.callback' =
+(* Shared engine for theorem-like entities (theorems + the four rule kinds).
+   Two passes over a single key_seen / name_memo:
+     (1) LIVE: candidates produced by `mk_live` (a (display, filter_name, thm, pos,
+         is_local) 5-tuple list).  Folded first so a live hit wins the uk on overlap
+         (live-first), seeding key_seen.  filter_opt + constituent scope + prop/type
+         pattern + target_type are applied here per candidate.
+     (2) CACHED: cache_opt's pre-filtered cached_thm_entry list (infra already removed
+         at build time, so filter_opt is NOT re-applied), with the query-specific
+         filters + resolve_name (drops stale dynamic members), is_local = false.
+   key_of computes the (kind-tagged) universal key for LIVE candidates; cached entries
+   carry their own uk.  target_type_str = "" => no target-type filter (theorems case). *)
+fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
+    (ctxt_unpack : context_unpacker) : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.theorems",
+    name = cb_name,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema_thm,
     function = fn (context, (target_thy_opt, the_theory_only, exclude,
-                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit, _)) =>
+                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit,
+                    target_type_str)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val thy = Context.theory_of ctx
@@ -788,97 +816,98 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
         val prop_matches = mk_prop_pattern_matcher ctxt term_pats type_pats
+        val (target_type_opt, target_type_warnings) = parse_target_type ctx target_type_str
+        val target_type_filter = mk_target_type_filter ctx target_type_opt
         val name_filter = mk_name_filter name_contains
-        val seen = Bytehashtab.empty 128
+        val key_seen = Bytehashtab.empty 128
         (* per-query memo for live display-name resolution: coll -> member thms *)
         val name_memo : thm list Strhashtab.table = Strhashtab.empty 16
 
-        (* --- Uncached path: facts not covered by cache --- *)
-        val uncached_facts = case cache_opt of
-            NONE => Facts.dest_static false [] facts
-          | SOME (_, cached_facts) => Facts.dest_static false [cached_facts] facts
+        (* constituent-theory scope filter, shared by both passes *)
+        fun scope_ok ct =
+          let val dominated = case exclude_set of
+                   NONE => not (null ct) andalso not (member (op =) ct target_name)
+                 | SOME es => not (null ct) andalso forall (fn c => Strhashtab.defined es c) ct
+              val included = null ct orelse exists include_pred ct
+          in not dominated andalso included end
 
-        val (uncached_entries, _) = fold (fn (name, thms) => fn (acc, remaining) =>
-           if remaining = 0 then (acc, 0)
-           else
-           let val entry = try (Name_Space.the_entry fact_space) name
-           in case entry of
-                NONE => (acc, remaining)
-              | SOME e =>
-                  if #concealed e
-                     orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
-                  then (acc, remaining)
-                  else
-                  if not (name_filter name) then (acc, remaining)
-                  else
-                       let val epos = entry_def_pos e
-                       in fold (fn thm => fn (acc, remaining) =>
-                       if remaining = 0 then (acc, 0)
-                       else
-                       let val thm' = Thm.transfer thy thm
-                           (* theory-scope filter on constituent theories (per thm) *)
-                           val ct = map #1 (#2 (Universal_Key.thm_constituents ctx thm'))
-                           val dominated = case exclude_set of
-                                NONE => not (null ct) andalso not (member (op =) ct target_name)
-                              | SOME es => not (null ct) andalso forall (fn c => Strhashtab.defined es c) ct
-                           val included = null ct orelse exists include_pred ct
-                       in if dominated orelse not included then (acc, remaining)
-                          else if not (prop_matches (Thm.full_prop_of thm')) then (acc, remaining)
-                          else
-                            let val pass_filter = case filter_opt of
-                                  NONE => true
-                                | SOME f => f (name, thm')
-                            in if not pass_filter then (acc, remaining)
-                               else
-                                 let val k = Universal_Key.key_of_theorem' NONE ctx thm'
-                                 in if Bytehashtab.defined seen k then (acc, remaining)
-                                    else (Bytehashtab.update seen (k, ());
-                                          (* uncached = in query context, not in the
-                                             global snapshot => proof-context-local *)
-                                          ((k, name, epos, true) :: acc, remaining - 1))
-                                 end
-                            end
-                       end) thms (acc, remaining)
-                       end
-           end) uncached_facts ([], limit)
+        (* --- LIVE pass --- *)
+        val snapshot = Option.map #2 cache_opt
+        val live = mk_live {ctx = ctx, thy = thy, facts = facts,
+                            fact_space = fact_space, snapshot = snapshot}
+        val (live_entries, _) =
+          fold (fn (disp, filt_name, thm, pos, is_local) => fn (acc, remaining) =>
+            (* filters ordered cheap-to-expensive: filter_opt (infra: name + blacklist)
+               before prop_matches / target_type_filter which walk the whole prop. *)
+            if remaining = 0 then (acc, 0)
+            else if not (name_filter disp) then (acc, remaining)
+            else if not (scope_ok (map #1 (#2 (Universal_Key.thm_constituents ctx thm))))
+                 then (acc, remaining)
+            else if not (case filter_opt of NONE => true | SOME f => f (filt_name, thm))
+                 then (acc, remaining)
+            else if not (prop_matches (Thm.full_prop_of thm)) then (acc, remaining)
+            else if not (target_type_filter thm) then (acc, remaining)
+            else
+              let val k = key_of ctx thm
+              in if Bytehashtab.defined key_seen k then (acc, remaining)
+                 else (Bytehashtab.update key_seen (k, ());
+                       ((k, disp, pos, is_local) :: acc, remaining - 1))
+              end) live ([], limit)
 
-        (* --- Cached path: apply only query-specific filters --- *)
-        (* limit < 0 means unlimited; otherwise subtract what uncached already consumed *)
-        val remaining_after_uncached =
-          if limit < 0 then ~1 else Int.max (0, limit - length uncached_entries)
+        (* --- CACHED pass: query-specific filters only --- *)
+        val remaining_after_live =
+          if limit < 0 then ~1 else Int.max (0, limit - length live_entries)
         val cached_entries = case cache_opt of
             NONE => []
           | SOME (cached, _) =>
-              if remaining_after_uncached = 0 then []
+              if remaining_after_live = 0 then []
               else
               let val (results, _) = fold (fn (entry : cached_thm_entry) => fn (acc, remaining) =>
                     if remaining = 0 then (acc, 0)
-                    else
-                    let val ct = #theories entry
-                        val dominated = case exclude_set of
-                             NONE => not (null ct) andalso not (member (op =) ct target_name)
-                           | SOME es => not (null ct) andalso forall (fn c => Strhashtab.defined es c) ct
-                        val included = null ct orelse exists include_pred ct
-                    in if dominated orelse not included then (acc, remaining)
-                       else if not (name_filter (bare_name (#name entry))) then (acc, remaining)
-                       else if not (prop_matches (Thm.full_prop_of (#thm entry))) then (acc, remaining)
-                       else if Bytehashtab.defined seen (#uk entry) then (acc, remaining)
-                       else (case resolve_name name_memo ctx (#name entry) (#thm entry) of
-                               (* stale member: gone from its collection since the
-                                  snapshot => drop it, keep `remaining` so the slot
-                                  goes to the next valid candidate. *)
-                               NONE => (acc, remaining)
-                             | SOME nm =>
-                                 (Bytehashtab.update seen (#uk entry, ());
-                                  (* cached = global fact (in the snapshot) => not local *)
-                                  ((#uk entry, nm, #pos entry, false) :: acc, remaining - 1)))
-                    end) cached ([], remaining_after_uncached)
+                    else if not (scope_ok (#theories entry)) then (acc, remaining)
+                    else if not (name_filter (bare_name (#name entry))) then (acc, remaining)
+                    else if not (prop_matches (Thm.full_prop_of (#thm entry))) then (acc, remaining)
+                    else if not (target_type_filter (#thm entry)) then (acc, remaining)
+                    else if Bytehashtab.defined key_seen (#uk entry) then (acc, remaining)
+                    else (case resolve_name name_memo ctx (#name entry) (#thm entry) of
+                            (* stale member: gone from its collection since the
+                               snapshot => drop it, keep `remaining` so the slot
+                               goes to the next valid candidate. *)
+                            NONE => (acc, remaining)
+                          | SOME nm =>
+                              (Bytehashtab.update key_seen (#uk entry, ());
+                               (* cached = snapshot/global fact => not proof-local *)
+                               ((#uk entry, nm, #pos entry, false) :: acc, remaining - 1))))
+                  cached ([], remaining_after_live)
               in results end
 
-        val entries = rev uncached_entries @ rev cached_entries
-      in (entries, include_warnings @ warnings) end,
+        val entries = rev live_entries @ rev cached_entries
+      in (entries, include_warnings @ warnings @ target_type_warnings) end,
     timeout = NONE
   }
+
+(* theorems: live = the uncached delta (facts in the query context not in the prep
+   snapshot, i.e. proof-context-local, is_local = true); display name = filter name =
+   the bare fact name (existing behaviour). *)
+fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  make_thm_like_callback "Context.theorems" (Universal_Key.key_of_theorem' NONE)
+    (fn {ctx = _, thy, facts, fact_space, snapshot} =>
+       let val uncached = case snapshot of
+               NONE => Facts.dest_static false [] facts
+             | SOME cf => Facts.dest_static false [cf] facts
+       in maps (fn (name, thms) =>
+            case try (Name_Space.the_entry fact_space) name of
+              NONE => []
+            | SOME e =>
+                if #concealed e
+                   orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
+                then []
+                else let val epos = entry_def_pos e
+                     in map (fn thm => (name, name, Thm.transfer thy thm, epos, true)) thms end)
+          uncached
+       end)
+    filter_opt cache_opt ctxt_unpack
 
 fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
@@ -1012,101 +1041,87 @@ fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
     timeout = NONE
   }
 
-(* Introduction / elimination rule callbacks.
-   The extract_thms function is provided by the caller (requires Classical from HOL). *)
+(* Introduction / elimination / induction / case-split rule callbacks, sharing the
+   theorems engine (make_thm_like_callback).  The live source has two sub-sources
+   folded in pinned order (Source-1 before Source-2) so a classical-net hit wins the
+   uk and pins is_local=false on overlap:
+     Source-1 = the classical / Induct net (extract_net), bare thms named by their
+       name hint (no-hint thms dropped — ~330 anonymous claset rules), is_local=false
+       unconditionally (the net is a library/global structure).  extract_net is given
+       by the caller because Classical requires HOL (not available Pure-level).
+     Source-2 = the live DELTA of static rule facts not in the prep snapshot (i.e.
+       proof-context-local rule facts), name-suffix matched by name_pred and shape-
+       gated by shape_ok, fact-position named Thm_Name.print(name,i), is_local derived
+       from theory ownership (empty owning theory => proof-local => true).
+   The bulk of static rule facts live in cache_opt (built once at prep), surfaced by
+   make_thm_like_callback's cached pass; the snapshot Facts.T pins Source-2's delta. *)
 local
-fun make_rules_callback cb_name key_of extract_thms filter_opt (ctxt_unpack : context_unpacker)
-    : Remote_Procedure_Calling.callback' =
-  Remote_Procedure_Calling.mk_callback {
-    name = cb_name,
-    arg_schema = unpackPair (ctxt_unpack, arg_schema),
-    ret_schema = ret_schema,
-    function = fn (context, (target_thy_opt, the_theory_only, exclude,
-                    term_pat_strs, type_pat_strs, theories_include, name_contains, limit,
-                    target_type_str)) =>
-      let
-        val ctx = resolve_ctx context target_thy_opt
-        val thy = Context.theory_of ctx
-        val target_base = Context.theory_base_name thy
-        val target_prefix = target_base ^ "."
-        val thms = extract_thms ctx
-        val exclude_set = if the_theory_only then NONE
-                          else SOME (Strhashtab.make_set exclude)
-        val (include_pred, include_warnings) = mk_include_filter context theories_include
-        val fact_space = Facts.space_of
-              (Context.cases Global_Theory.facts_of Proof_Context.facts_of ctx)
-        val seen : unit Strhashtab.table = Strhashtab.empty 128
-        val key_seen = Bytehashtab.empty 128
-        val ctxt = Context.cases Proof_Context.init_global I ctx
-        val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
-        val thm_matches = mk_thm_pattern_matcher ctxt term_pats type_pats
-        val (target_type_opt, target_type_warnings) = parse_target_type ctx target_type_str
-        val target_type_filter = mk_target_type_filter ctx target_type_opt
-        val name_filter = mk_name_filter name_contains
-        val (entries, _) = fold (fn thm => fn (acc, remaining) =>
-          if remaining = 0 then (acc, 0)
-          else
-          let val thm = Thm.transfer thy thm
-          in if not (Thm.has_name_hint thm) then (acc, remaining)
-             else
-          let
-            val name = Thm.get_name_hint thm
-            val name_str = Thm_Name.print name
-          in if Strhashtab.defined seen name_str then (acc, remaining)
-             else
-               let
-                 (* the_entry is keyed on the bare fact name, not the index *)
-                 val entry_opt = try (Name_Space.the_entry fact_space) (#1 name)
-                 val thy_name_of = case entry_opt of
-                     SOME e => (case #theory_long_name e of "" => NONE | tn => SOME tn)
-                   | NONE => NONE
-                 val pass = case exclude_set of
-                     NONE => String.isPrefix target_prefix name_str
-                   | SOME es => (case thy_name_of of
-                         SOME tn => not (Strhashtab.defined es tn)
-                       | NONE => true)
-                 val pass_include = case thy_name_of of
-                     SOME tn => include_pred tn
-                   | NONE => true
-                 (* Filters ordered cheap-to-expensive: target_type_filter walks
-                    the whole prop with bidir typ_instance per schematic Var,
-                    so push it after the infra filter_opt. *)
-                 fun check_filter_opt () = case filter_opt of
-                       NONE => true
-                     | SOME f => f (name_str, thm)
-               in if not pass orelse not pass_include then (acc, remaining)
-                  else if not (name_filter name_str) then (acc, remaining)
-                  else if not (check_filter_opt ()) then (acc, remaining)
-                  else if not (thm_matches thm) then (acc, remaining)
-                  else if not (target_type_filter thm) then (acc, remaining)
-                  else
-                    let val k = key_of ctx thm
-                        val epos = case entry_opt of
-                            SOME e => entry_def_pos e | NONE => ("", 0, 0)
-                    in (Strhashtab.update seen (name_str, ());
-                        if Bytehashtab.defined key_seen k then (acc, remaining)
-                        else (Bytehashtab.update key_seen (k, ());
-                              ((k, name_str, epos) :: acc, remaining - 1)))
-                    end
-               end
-          end
-          end) thms ([], limit)
-      in (rev entries, include_warnings @ warnings @ target_type_warnings) end,
-    timeout = NONE
-  }
+fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
+    filter_opt cache_opt ctxt_unpack =
+  make_thm_like_callback cb_name (key_of NONE)
+    (fn {ctx, thy, facts, fact_space, snapshot} =>
+       let
+         val seen : unit Strhashtab.table = Strhashtab.empty 128
+         (* Source-1: classical / Induct net (full each query) *)
+         val src1 = extract_net ctx
+           |> map_filter (fn thm =>
+               let val thm = Thm.transfer thy thm in
+                 if not (Thm.has_name_hint thm) then NONE
+                 else
+                   let val nm = Thm.get_name_hint thm
+                       val name_str = Thm_Name.print nm
+                   in if Strhashtab.defined seen name_str then NONE
+                      else
+                        (Strhashtab.update seen (name_str, ());
+                         let val epos = case try (Name_Space.the_entry fact_space) (#1 nm) of
+                               SOME e => entry_def_pos e | NONE => ("", 0, 0)
+                         in SOME (name_str, name_str, thm, epos, false) end)
+                   end
+               end)
+         (* Source-2: live delta of static rule facts (proof-local), name+shape gated *)
+         val delta = case snapshot of
+             NONE => Facts.dest_static false [] facts
+           | SOME cf => Facts.dest_static false [cf] facts
+         val src2 = delta
+           |> maps (fn (name, thms) =>
+               if not (name_pred name) then []
+               else case try (Name_Space.the_entry fact_space) name of
+                 NONE => []
+               | SOME e =>
+                   if #concealed e
+                      orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
+                   then []
+                   else
+                     let val epos = entry_def_pos e
+                         (* empty owning theory => genuinely proof-context-local *)
+                         val is_local = (case #theory_long_name e of "" => true | _ => false)
+                         (* index over the FULL thm list (shape drop AFTER indexing),
+                            matching the collect side so coll/query names align. *)
+                         val n = length thms
+                     in map_index (fn (i, thm) =>
+                          let val thm' = Thm.transfer thy thm
+                              val disp = Thm_Name.print (name, if n = 1 then 0 else i + 1)
+                          in if not (shape_ok thm') then NONE
+                             else if Strhashtab.defined seen disp then NONE
+                             else (Strhashtab.update seen (disp, ());
+                                   SOME (disp, name, thm', epos, is_local))
+                          end) thms |> map_filter I
+                     end)
+       in src1 @ src2 end)
+    filter_opt cache_opt ctxt_unpack
 in
-fun make_introduction_rules_callback extract_thms =
+fun make_introduction_rules_callback extract_net name_pred shape_ok =
   make_rules_callback "Context.introduction_rules"
-    (Universal_Key.key_of_introduction_rule' NONE) extract_thms
-fun make_elimination_rules_callback extract_thms =
+    Universal_Key.key_of_introduction_rule' extract_net name_pred shape_ok
+fun make_elimination_rules_callback extract_net name_pred shape_ok =
   make_rules_callback "Context.elimination_rules"
-    (Universal_Key.key_of_elimination_rule' NONE) extract_thms
-fun make_induction_rules_callback extract_thms =
+    Universal_Key.key_of_elimination_rule' extract_net name_pred shape_ok
+fun make_induction_rules_callback extract_net name_pred shape_ok =
   make_rules_callback "Context.induction_rules"
-    (Universal_Key.key_of_induction_rule' NONE) extract_thms
-fun make_case_split_rules_callback extract_thms =
+    Universal_Key.key_of_induction_rule' extract_net name_pred shape_ok
+fun make_case_split_rules_callback extract_net name_pred shape_ok =
   make_rules_callback "Context.case_split_rules"
-    (Universal_Key.key_of_case_split_rule' NONE) extract_thms
+    Universal_Key.key_of_case_split_rule' extract_net name_pred shape_ok
 end
 
 end (*local*)
