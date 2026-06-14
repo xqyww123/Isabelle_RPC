@@ -33,7 +33,8 @@ from typing import Any
 
 from .rpc import Connection
 from .position import IsabellePosition
-from .universal_key import EntityKind, universal_key
+from .universal_key import (EntityKind, universal_key,
+                            RULE_ONLY_KINDS, RULE_ONLY_TAG_BYTES, theorem_sibling_key)
 
 # (universal_key, full_name, definition_position_or_None)
 type entity_entry = tuple[universal_key, str, IsabellePosition | None]
@@ -392,7 +393,8 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     Each entry is (universal_key, IsabellePosition | None).  The position is
     None for entities with unknown positions (e.g. from live PIDE with
     ID-based positions).  is_local maps a uk -> whether it is proof-context-local;
-    only theorems can be local, so other kinds never populate it.
+    theorems AND all four rule kinds populate it (a library/classical-net rule is
+    false; a proof-local theorem or an empty-owning-theory rule fact is true).
 
     Pattern parameters are forwarded only to entity kinds that support them:
     term_patterns → theorems, intro/elim rules only.
@@ -468,13 +470,11 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     # of every rule entry actually present (its rule kind was queried and it passed) by
     # removing the sibling Theorem key (same bytes, tag -> 0x02).  No rule entry present
     # => nothing suppressed; theorems-only or rules-only queries are untouched.
-    if EntityKind.THEOREM in kinds and any(k in kinds for k in (
-            EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
-            EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE)):
+    if EntityKind.THEOREM in kinds and any(k in kinds for k in RULE_ONLY_KINDS):
         suppress: set[universal_key] = set()
         for uk, _name, _pos in result:
-            if len(uk) == 32 and uk[16] in (0x12, 0x22, 0x32, 0x42):
-                suppress.add(uk[:16] + bytes([int(EntityKind.THEOREM)]) + uk[17:])
+            if len(uk) == 32 and uk[16] in RULE_ONLY_TAG_BYTES:
+                suppress.add(theorem_sibling_key(uk))
         if suppress:
             result = [e for e in result if e[0] not in suppress]
             for uk in suppress:

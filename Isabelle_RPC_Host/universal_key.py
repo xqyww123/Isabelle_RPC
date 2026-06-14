@@ -60,6 +60,18 @@ THM_RULE_KINDS = frozenset({
     EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE})
 _THM_RULE_TAG_BYTES = frozenset(int(k) for k in THM_RULE_KINDS)
 
+# Rule kinds only (THM_RULE_KINDS minus THEOREM).  Their tag bytes are 0x12/0x22/
+# 0x32/0x42; a rule key's Theorem sibling is the same 32 bytes with the tag byte set
+# to THEOREM (0x02).  Single source of truth for the query-aware cross-kind dedup
+# (decision 8) and its ContextExtended counterpart — keep callers off hardcoded bytes.
+RULE_ONLY_KINDS = THM_RULE_KINDS - {EntityKind.THEOREM}
+RULE_ONLY_TAG_BYTES = frozenset(int(k) for k in RULE_ONLY_KINDS)
+
+
+def theorem_sibling_key(key: universal_key) -> universal_key:
+    """The Theorem (0x02) sibling of a 32-byte rule key: same bytes, tag -> THEOREM."""
+    return key[:16] + bytes([int(EntityKind.THEOREM)]) + key[17:]
+
 
 class Entity(NamedTuple):
     theory: theory_hash

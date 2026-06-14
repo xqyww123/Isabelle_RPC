@@ -613,12 +613,6 @@ fun mk_prop_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) 
       end
     end
 
-(* Build a thm filter from parsed term/type patterns.
-   Returns (thm -> bool). Always true when both lists are empty. *)
-fun mk_thm_pattern_matcher ctxt term_pats type_pats : thm -> bool =
-  let val prop_matcher = mk_prop_pattern_matcher ctxt term_pats type_pats
-  in fn thm => prop_matcher (Thm.full_prop_of thm) end
-
 (* Permissive: returns types of *all* schematic Vars in the rule's prop, not
    only the inducted-on variable.  A more targeted extraction (e.g. only the
    conclusion's last arg) would miss case-split rules whose conclusion is a
