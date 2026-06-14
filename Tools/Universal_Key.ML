@@ -181,6 +181,7 @@ val make_universal_key_callback' : thm_uk_cache option -> context_unpacker -> Re
 val pack_universal_key : universal_key MessagePackBinIO.Pack.packer
 val unpack_universal_key : universal_key MessagePackBinIO.Unpack.unpacker
 
+val entity_kind_int : entity -> int
 val pack_entity_kind : entity MessagePackBinIO.Pack.packer
 val pack_entity_kind' : entity_kind MessagePackBinIO.Pack.packer
 val unpack_entity_kind : entity_kind MessagePackBinIO.Unpack.unpacker
@@ -764,22 +765,29 @@ local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 (*  1 = Constant, 2 = Theorem/Named_Theorem,
     3 = Type, 4 = Class, 5 = Locale, 6 = Theorem_Collection, 7 = Method,
     0x12 = Introduction_Rule, 0x22 = Elimination_Rule  *)
-fun pack_entity_kind (Constant _)               = packInt 1
-  | pack_entity_kind (Theorem _)                = packInt 2
-  | pack_entity_kind (Named_Theorem _)          = packInt 2
-  | pack_entity_kind (Type _)                   = packInt 3
-  | pack_entity_kind (Class _)                  = packInt 4
-  | pack_entity_kind (Locale _)                 = packInt 5
-  | pack_entity_kind (Theorem_Collection _)         = packInt 6
-  | pack_entity_kind (Method _)                 = packInt 7
-  | pack_entity_kind (Introduction_Rule _)      = packInt 0x12
-  | pack_entity_kind (Named_Introduction_Rule _) = packInt 0x12
-  | pack_entity_kind (Elimination_Rule _)       = packInt 0x22
-  | pack_entity_kind (Named_Elimination_Rule _) = packInt 0x22
-  | pack_entity_kind (Induction_Rule _)        = packInt 0x32
-  | pack_entity_kind (Named_Induction_Rule _)  = packInt 0x32
-  | pack_entity_kind (Case_Split_Rule _)       = packInt 0x42
-  | pack_entity_kind (Named_Case_Split_Rule _) = packInt 0x42
+(* The wire kind-int of an entity (single source of truth; pack_entity_kind
+   derives from it so they cannot drift).  Several constructors collapse to the
+   same int (Theorem/Named_Theorem -> 2; each rule and its Named_ variant share
+   a tag), exactly as the Python side keys its prompt label — so two entries
+   share an agent-facing label iff they share (entity_kind_int, name). *)
+fun entity_kind_int (Constant _)               = 1
+  | entity_kind_int (Theorem _)                = 2
+  | entity_kind_int (Named_Theorem _)          = 2
+  | entity_kind_int (Type _)                   = 3
+  | entity_kind_int (Class _)                  = 4
+  | entity_kind_int (Locale _)                 = 5
+  | entity_kind_int (Theorem_Collection _)     = 6
+  | entity_kind_int (Method _)                 = 7
+  | entity_kind_int (Introduction_Rule _)      = 0x12
+  | entity_kind_int (Named_Introduction_Rule _) = 0x12
+  | entity_kind_int (Elimination_Rule _)       = 0x22
+  | entity_kind_int (Named_Elimination_Rule _) = 0x22
+  | entity_kind_int (Induction_Rule _)         = 0x32
+  | entity_kind_int (Named_Induction_Rule _)   = 0x32
+  | entity_kind_int (Case_Split_Rule _)        = 0x42
+  | entity_kind_int (Named_Case_Split_Rule _)  = 0x42
+
+val pack_entity_kind = packInt o entity_kind_int
 
 fun pack_entity_kind' ConstantK         = packInt 1
   | pack_entity_kind' TheoremK          = packInt 2
