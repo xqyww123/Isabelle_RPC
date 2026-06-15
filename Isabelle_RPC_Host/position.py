@@ -77,13 +77,18 @@ class FileIndex:
     - ``ascii_line_offsets[i]``: char offset in source where line *i+1* starts.
     """
 
-    __slots__ = ('sym_ascii_offsets', 'sym_unicode_offsets', 'ascii_line_offsets')
+    __slots__ = ('source', 'sym_ascii_offsets', 'sym_unicode_offsets', 'ascii_line_offsets')
 
     def __init__(self, source: str):
         from .unicode import get_SYMBOLS, SUBSUP_TRANS_TABLE
 
         SYMBOLS = get_SYMBOLS()
         symbols = symbol_explode(source)
+        # Normalized source (CR-folded by symbol_explode), in the same character
+        # coordinate space as ``ascii_line_offsets`` below — so ``ascii_line``
+        # slicing stays correct even on CRLF files (where the raw on-disk source
+        # would be off by one char per line).
+        self.source = ''.join(symbols)
         n = len(symbols)
 
         sym_ascii = array('I')
@@ -225,6 +230,48 @@ class FileIndex:
         line_start_ascii = self.ascii_line_offsets[line - 1]
         col_a = ascii_off - line_start_ascii + 1
         return (line, col_a)
+
+    # --- symbol lookup on a line (for symbol-based, column-free addressing) ---
+
+    def ascii_line(self, line: int) -> str:
+        """Return the ASCII (symbol-escape) source text of a 1-based line.
+
+        The trailing newline is stripped; interior/trailing spaces are kept (so
+        ``len`` matches a column count). Out-of-range lines return ``""``.
+        """
+        if line < 1 or line > self.num_lines:
+            return ""
+        start = self.ascii_line_offsets[line - 1]
+        end = (self.ascii_line_offsets[line] if line < self.num_lines
+               else len(self.source))
+        text = self.source[start:end]
+        if text.endswith('\n'):
+            text = text[:-1]
+        return text
+
+    def symbol_offsets(self, line: int, symbol: str) -> list[int]:
+        """All occurrences of ``symbol`` on a 1-based line, as Isabelle symbol
+        offsets (1-based, file-global), in source order.
+
+        ``symbol`` may be ASCII or Unicode (e.g. ``"Suc"``, ``"\\<forall>"``,
+        ``"∀"``). Matching is on Isabelle token boundaries. Empty if not
+        found.
+        """
+        from .tokens import find_symbol_token_indices
+        doc = self.ascii_line(line)
+        if not doc:
+            return []
+        first = self.ascii_to_isabelle(line, 1)
+        return [first + k for k in find_symbol_token_indices(doc, symbol)]
+
+    def end_of_line_offset(self, line: int) -> int:
+        """Isabelle symbol offset (1-based) of the end of a 1-based line.
+
+        Equivalent to ``ascii_to_isabelle(line, len(ascii_line(line)))`` with a
+        clamp so an empty line maps to its first symbol — matching the legacy
+        ``_end_of_line_column`` behaviour.
+        """
+        return self.ascii_to_isabelle(line, max(1, len(self.ascii_line(line))))
 
 
 # ---------------------------------------------------------------------------
