@@ -164,6 +164,19 @@ val key_of''        : thm_uk_cache option -> Context.generic -> entity -> univer
    build_key/ent_digest128_15 below. *)
 val thm_digest15        : thm -> Word8Vector.vector
 val theorem_key_digest  : universal_key -> Word8Vector.vector option
+(* O(1) re-tag of a 32-byte thm-shaped key (theorem or any rule kind) to another
+   kind, by overwriting tag byte 16.  Because build_thm_key makes ONLY byte 16
+   tag-dependent (the 16-byte thy_hash and 15-byte thm128 payload depend solely on
+   the thm), retag_thm_key uk tag is byte-identical to key_of_<that kind>' for the
+   same thm — including the anonymous all-zero-thy_hash case.  Tag bytes are the
+   entity_kind_int values (theorem 0x02, intro 0x12, elim 0x22, induct 0x32,
+   case 0x42).  NB: this deliberately does NOT replicate build_thm_key's
+   constituents_registry write — safe ONLY because every consumer of a retag'd
+   rule uk is a thm-carrying entity that recomputes constituents via
+   thm_constituents, never the Named_* registry branch; routing a retag'd uk
+   through a Named_* constructor or calling constituents_of on it would hit a hard
+   error (see registry_constituents in semantic_store.ML). *)
+val retag_thm_key       : universal_key -> Word8.word -> universal_key
 
 (* Constituent theories of a thm's proposition: the XOR theory hash (the
    16-byte theory-key component of theorem/rule keys) together with the
@@ -388,6 +401,11 @@ fun theorem_key_digest (uk : universal_key) : Word8Vector.vector option =
   if Word8Vector.length uk = 32 andalso Word8Vector.sub (uk, 16) = 0wx02
   then SOME (Word8Vector.tabulate (15, fn i => Word8Vector.sub (uk, 17 + i)))
   else NONE
+
+fun retag_thm_key (uk : universal_key) (tag : Word8.word) : universal_key =
+  if Word8Vector.length uk <> 32
+  then raise Fail "retag_thm_key: not a 32-byte thm-shaped key"
+  else Word8Vector.tabulate (32, fn i => if i = 16 then tag else Word8Vector.sub (uk, i))
 
 (* Proof-local facts have theory_long_name = "" in their name space entry.
    Fall back to the context's theory in that case. *)
