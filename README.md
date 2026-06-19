@@ -180,7 +180,7 @@ The built-in `isabelle_heartbeat` callback (RPC.ML:328) provides a working examp
 - `unpackOption schema` - option/Optional
 - `unpackPairList (s1, s2)` - list of pairs (dict items)
 
-**Schema reference:** `Isabelle_RPC/contrib/mlmsgpack/mlmsgpack.sml`
+**Schema reference:** `Performant_Isabelle_ML/contrib/mlmsgpack/mlmsgpack.sml` (relocated from Isabelle_RPC; loaded by the Performant_Isabelle_ML base session)
 
 ## Server Configuration
 

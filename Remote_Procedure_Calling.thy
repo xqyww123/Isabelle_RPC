@@ -2,9 +2,7 @@ theory Remote_Procedure_Calling
   imports Performant_Isabelle_ML.Performant_Isabelle_ML
 begin
 
-ML_file \<open>contrib/mlmsgpack/mlmsgpack-aux.sml\<close>
-ML_file \<open>contrib/mlmsgpack/realprinter-packreal.sml\<close>
-ML_file \<open>contrib/mlmsgpack/mlmsgpack.sml\<close>
+(* mlmsgpack now loaded by the Performant_Isabelle_ML base session (relocated there). *)
 ML_file \<open>Tools/RPC.ML\<close>
 ML_file \<open>Tools/UUID.ML\<close>
 ML_file \<open>Tools/Term_Digest.ML\<close>
