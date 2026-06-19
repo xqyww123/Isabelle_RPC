@@ -514,11 +514,28 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
                   SOME t => Exn.Res t
                 | NONE => Exn.Exn exn
               end)
+        (* On a total parse failure, re-parse the ORIGINAL pattern POSITIONED so the
+           error carries a <position>; mark the failing token with 【 】.  The cascade
+           above stays on plain strings (success detection only).  NONE => no usable
+           position (e.g. unexpected end of input) => caller keeps format_parse_exn. *)
+        fun marker_warn noun parse_fn pat_str =
+          case Exn.capture parse_fn (Inner_Syntax_Error.positioned pat_str) of
+            Exn.Res _ => NONE
+          | Exn.Exn e =>
+              let val msgs =
+                    (case Par_Exn.dest e of
+                      SOME exns => map_filter (fn ERROR m => SOME m | _ => NONE) exns
+                    | NONE => (case e of ERROR m => [m] | _ => []))
+                  fun look id = if id = Inner_Syntax_Error.sentinel_id then SOME pat_str else NONE
+              in get_first (Inner_Syntax_Error.format {ignored = SOME noun} look) msgs end
         val (term_pairs, term_parse_warnings) =
           fold_rev (fn pat_str => fn (pairs, warns) =>
             case try_read_term pat_str of
               Exn.Res pat => ((pat_str, pat) :: pairs, warns)
-            | Exn.Exn exn => (pairs, format_parse_exn exn :: warns))
+            | Exn.Exn exn =>
+                (pairs,
+                 the_default (format_parse_exn exn)
+                   (marker_warn "Term" (Syntax.read_term ctxt_pat) pat_str) :: warns))
           term_pat_strs ([], [])
         val term_pats = map snd term_pairs
         val warnings = term_parse_warnings @
@@ -539,7 +556,9 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
              end) term_pairs)
         val (type_pats, type_parse_warnings) =
           \<^try>\<open>(map (Syntax.read_typ ctxt_pat) type_pat_strs, [])
-          catch exn => ([], [format_parse_exn exn])\<close>
+          catch exn =>
+            ([], [the_default (format_parse_exn exn)
+                    (get_first (marker_warn "Type" (Syntax.read_typ ctxt_pat)) type_pat_strs)])\<close>
     in (term_pats, type_pats, warnings @ type_parse_warnings)
     end
 

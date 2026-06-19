@@ -12,6 +12,7 @@ ML_file \<open>Tools/theory_hash.ML\<close>
 ML_file \<open>Tools/Universal_Key.ML\<close>
 ML_file \<open>Tools/config.ML\<close>
 ML_file \<open>Tools/pretty.ML\<close>
+ML_file \<open>Tools/inner_syntax_error.ML\<close>
 ML_file \<open>Tools/context.ML\<close>
 ML_file \<open>Tools/run_python.ML\<close>
 ML_file \<open>Tools/tracing.ML\<close>
