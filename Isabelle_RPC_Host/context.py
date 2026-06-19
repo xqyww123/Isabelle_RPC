@@ -258,17 +258,21 @@ async def locales(connection: Connection, theory: str | None = None,
 async def theorem_collection(connection: Connection, theory: str | None = None,
             the_theory_only: bool = False,
             theories_not_include: list[str] = [],
+            term_patterns: list[str] = [],
+            type_patterns: list[str] = [],
             theories_include: list[str] = [],
             name_contains: list[str] = [],
             limit: int = -1,
             ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
     """Return (entries, warnings) for all theorem collections (dynamic facts:
     named_theorems and raw add_thms_dynamic collections like derivative_eq_intros).
-    Pattern parameters are not applicable to theorem collections.
+    term_patterns/type_patterns keep a collection only when >= half of its non-infra
+    members have a proposition matching the pattern (ML-side, see
+    make_theorem_collection_callback); empty patterns are a no-op.
     """
     return await _cached_or_call(connection, "_ctx_theorem_collection", "Context.theorem_collection",
                            theory, the_theory_only, theories_not_include,
-                           [], [], theories_include,
+                           term_patterns, type_patterns, theories_include,
                            name_contains, limit, ctxt=ctxt)
 
 
@@ -397,8 +401,8 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     false; a proof-local theorem or an empty-owning-theory rule fact is true).
 
     Pattern parameters are forwarded only to entity kinds that support them:
-    term_patterns → theorems, intro/elim rules only.
-    type_patterns → theorems, intro/elim rules, constants.
+    term_patterns → theorems, intro/elim rules, theorem collections.
+    type_patterns → theorems, intro/elim rules, constants, theorem collections.
     target_type → induction/case-split rules only (silently ignored otherwise).
     theories_include, name_contains, limit → all kinds.
     Warnings include notices about undeclared free variables in term patterns.
@@ -418,9 +422,20 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
         _t_kind = _time.perf_counter()
         # Pass only the parameters each function accepts
         if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE,
-                    EntityKind.THEOREM_COLLECTION, EntityKind.METHOD):
+                    EntityKind.METHOD):
             entries, warnings = await func(connection, theory, the_theory_only,
                                   theories_not_include,
+                                  theories_include=theories_include,
+                                  name_contains=name_contains,
+                                  limit=limit,
+                                  ctxt=ctxt)
+        elif kind == EntityKind.THEOREM_COLLECTION:
+            # Collections take term/type patterns (half-member-match gate) but, unlike
+            # the THEOREM/rule kinds, return a 2-tuple with no is_local map.
+            entries, warnings = await func(connection, theory, the_theory_only,
+                                  theories_not_include,
+                                  term_patterns=term_patterns,
+                                  type_patterns=type_patterns,
                                   theories_include=theories_include,
                                   name_contains=name_contains,
                                   limit=limit,

@@ -80,7 +80,11 @@ signature CONTEXT_CALLBACKS = sig
     suppress: bool list, theory_long_name: string, concealed: bool} -> def_pos
   val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
   val mk_name_filter : string list -> string -> bool
-  val mk_prop_pattern_matcher : Proof.context -> term list -> typ list -> term -> bool
+  (* First arg = the expensive-match budget (caps full-prop subterm matching to bound
+     library-search cost).  Callers over a BOUNDED prep-built list (e.g. the
+     theorem-collection half-match gate) pass a budget >= the list length so it never
+     converts a true match into a measured non-match. *)
+  val mk_prop_pattern_matcher : int -> Proof.context -> term list -> typ list -> term -> bool
 
   (* For a dynamic fact, return its current members in the given context;
      for a static fact or a missing name, NONE.  Generalizes the previous
@@ -104,7 +108,13 @@ signature CONTEXT_CALLBACKS = sig
   val make_types_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_classes_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
-  val make_theorem_collection_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  (* First arg = bundle long-name -> its non-infra member thms (prep-built, see
+     semantic_store.ML).  When term/type patterns are supplied, a bundle is kept only
+     when >= half of its members' props match the pattern; consulted ONLY then, so
+     empty patterns leave behaviour unchanged. *)
+  val make_theorem_collection_callback :
+    thm list Strhashtab.table -> (string -> bool) option -> context_unpacker
+    -> Remote_Procedure_Calling.callback'
   val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
@@ -603,7 +613,7 @@ fun type_matches_in_type typ_inst (type_pat_infos : (typ * string list) list) T 
    Uses coercion-transparent matching: coercion wrappers in coercion_ignores
    are skipped, and type matching is ignored. A budget limits the number of
    transparent matching attempts to avoid excessive work. *)
-fun mk_prop_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) : term -> bool =
+fun mk_prop_pattern_matcher budget0 ctxt (term_pats : term list) (type_pats : typ list) : term -> bool =
   if null term_pats andalso null type_pats then (fn _ => true)
   else
     let val thy = Proof_Context.theory_of ctxt
@@ -618,7 +628,7 @@ fun mk_prop_pattern_matcher ctxt (term_pats : term list) (type_pats : typ list) 
                 else filter (fn n => not (Strhashtab.defined ignores n)) names
           in (pat', names_effective) end) term_pats
         val type_pat_infos = mk_type_pat_infos type_pats
-        val budget = Unsynchronized.ref 200
+        val budget = Unsynchronized.ref budget0
     in fn prop =>
       let val prop_names = get_names prop
       in List.all (fn (pat', names_effective) =>
@@ -828,7 +838,7 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
         val (include_pred, include_warnings) = mk_include_filter context theories_include
         val ctxt = Context.cases Proof_Context.init_global I ctx
         val (term_pats, type_pats, warnings) = parse_patterns ctx (term_pat_strs, type_pat_strs)
-        val prop_matches = mk_prop_pattern_matcher ctxt term_pats type_pats
+        val prop_matches = mk_prop_pattern_matcher 200 ctxt term_pats type_pats
         val (target_type_opt, target_type_warnings) = parse_target_type ctx target_type_str
         val target_type_filter = mk_target_type_filter ctx target_type_opt
         val name_filter = mk_name_filter name_contains
@@ -979,13 +989,16 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
     timeout = NONE
   }
 
-fun make_theorem_collection_callback filter_opt (ctxt_unpack : context_unpacker)
+fun make_theorem_collection_callback collection_member_thms filter_opt
+    (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theorem_collection",
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
-    function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
+    function = fn (context, (target_thy_opt, the_theory_only, exclude,
+                             term_pat_strs, type_pat_strs,
+                             theories_include, name_contains, limit, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
         val target_name = Context.theory_long_name (Context.theory_of ctx)
@@ -997,12 +1010,50 @@ fun make_theorem_collection_callback filter_opt (ctxt_unpack : context_unpacker)
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
         val name_filter = mk_name_filter name_contains
+        (* Pattern gate (applies uniformly to both the augmented and the explicit
+           kinds:[named theorem bundles] paths): when term/type patterns are present,
+           keep a bundle only if >= half of its non-infra members' props match.  Gate on
+           the PARSED patterns, not the raw strings: a total parse failure then degrades
+           to a genuine no-op (matcher = K true) like the theorems engine, instead of a
+           half-gate that would still drop unmapped bundles.  Empty/unparseable patterns
+           never touch the member map. *)
+        val (term_pats, type_pats, pattern_warnings) =
+          parse_patterns ctx (term_pat_strs, type_pat_strs)
+        val has_real_patterns = not (null term_pats andalso null type_pats)
+        fun half_match name =
+          if not has_real_patterns then true
+          else
+            (case Strhashtab.lookup collection_member_thms name of
+               NONE => false  (* no cached members => not shown under patterns *)
+             | SOME thms =>
+                 let val total = length thms
+                     (* Budget bounds the matcher's expensive subterm matches.  Each
+                        examined prop costs up to |term_pats| decrements (the List.all
+                        over term_pat_infos), and we examine at most `total` members, so
+                        |term_pats|*total can never convert a true match into a measured
+                        non-match within this bounded list.  A fresh matcher per bundle
+                        also keeps the budget from bleeding across bundles. *)
+                     val matches = mk_prop_pattern_matcher
+                                     (Int.max (1, length term_pats) * total)
+                                     ctxt term_pats type_pats
+                     (* Dual early-exit: stop once half is reached, or once the unseen
+                        remainder can no longer lift `matched` to half. *)
+                     fun go _ matched [] = matched * 2 >= total
+                       | go remaining matched (t :: ts) =
+                           if matched * 2 >= total then true
+                           else if (matched + remaining) * 2 < total then false
+                           else go (remaining - 1)
+                                  (if matches (Thm.full_prop_of t) then matched + 1 else matched)
+                                  ts
+                 in total > 0 andalso go total 0 thms end)
         (* Any dynamic fact is a theorem collection (a named_theorems or a raw
            add_thms_dynamic collection like derivative_eq_intros); Facts.is_dynamic
-           is a cheap, no-content prefilter that identifies all of them. *)
+           is a cheap, no-content prefilter that identifies all of them.  half_match
+           runs last and consults only the prep-built map (no live collection eval). *)
         val extra_filter = fn name =>
-          name_filter name andalso Facts.is_dynamic facts name
-      in (ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt, include_warnings) end,
+          name_filter name andalso Facts.is_dynamic facts name andalso half_match name
+      in (ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt,
+          include_warnings @ pattern_warnings) end,
     timeout = NONE
   }
 
