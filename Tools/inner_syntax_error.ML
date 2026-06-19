@@ -5,9 +5,11 @@
    so the error renders `at ""` with no offset.  Feeding the SAME string as a
    positioned `Input.source` (via `Syntax.implode_input`) makes the parser emit a
    `<position offset=k end_offset=k' id=ID>` in the error message (symbol-indexed,
-   1-based).  We extract that offset (filtering by element name = "position", since
-   `<token_range>`/`<bad>` carry the same id at offset 1) and splice 【 】 around the
-   failing token in the original string, showing only a unique window around it.
+   1-based).  We extract that offset and splice 【 】 around the failing token in the
+   original string, showing only a unique window around it.  The error body also
+   carries (under the SAME id) a `<token_range>` per token (each spanning that
+   token's real offsets) and a trailing `<bad offset="1">`; filtering by element
+   NAME = "position" — not by id/offset — is what isolates the one wanted element.
 
    IMPORTANT: positioned input perturbs schematic type-variable indices (e.g. a
    type-check error prints ??'a13 instead of ??'a), so it must NEVER be used to
@@ -225,6 +227,12 @@ fun read_positioned_list read ctxt ss =
   guard (fn () => marker_strings (fn ctxt' => fn s => read ctxt' [s]) ctxt ss)
         (fn () => read ctxt ss)
 
+(* The probe drops the real type constraint (uses dummyT) — safe: a type
+   constraint cannot move a grammar-level parse failure, and on any divergence
+   `guard` falls through to the untouched original error.  Invariant for all
+   list/typed probes: each string is probed INDIVIDUALLY, which reproduces only
+   per-string PARSE errors; a joint type-inference (check) error carries no
+   <position>, so `marker_strings` returns NONE and the original error stands. *)
 fun read_positioned_typed read ctxt tss =
   guard (fn () => marker_strings (fn ctxt' => fn s => read ctxt' [(dummyT, s)]) ctxt (map snd tss))
         (fn () => read ctxt tss)
