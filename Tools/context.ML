@@ -108,12 +108,13 @@ signature CONTEXT_CALLBACKS = sig
   val make_types_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_classes_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
-  (* First arg = bundle long-name -> its non-infra member thms (prep-built, see
-     semantic_store.ML).  When term/type patterns are supplied, a bundle is kept only
-     when >= half of its members' props match the pattern; consulted ONLY then, so
-     empty patterns leave behaviour unchanged. *)
+  (* First arg = bundle long-name -> its non-infra member thms (see semantic_store.ML),
+     wrapped in Lazy so the (one-off) build is paid only when a patterned bundle query
+     actually forces it.  When term/type patterns are supplied, a bundle is kept only
+     when >= half of its members' props match the pattern; the map is forced ONLY then,
+     so empty patterns leave behaviour unchanged and cost nothing. *)
   val make_theorem_collection_callback :
-    thm list Strhashtab.table -> (string -> bool) option -> context_unpacker
+    thm list Strhashtab.table Lazy.lazy -> (string -> bool) option -> context_unpacker
     -> Remote_Procedure_Calling.callback'
   val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
@@ -1023,7 +1024,10 @@ fun make_theorem_collection_callback collection_member_thms filter_opt
         fun half_match name =
           if not has_real_patterns then true
           else
-            (case Strhashtab.lookup collection_member_thms name of
+            (* Lazy.force builds the member map on first patterned query and memoizes;
+               the no-pattern path above never reaches here, so unpatterned queries
+               pay nothing. *)
+            (case Strhashtab.lookup (Lazy.force collection_member_thms) name of
                NONE => false  (* no cached members => not shown under patterns *)
              | SOME thms =>
                  let val total = length thms

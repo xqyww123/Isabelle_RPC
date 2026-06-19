@@ -401,8 +401,9 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     false; a proof-local theorem or an empty-owning-theory rule fact is true).
 
     Pattern parameters are forwarded only to entity kinds that support them:
-    term_patterns → theorems, intro/elim rules, theorem collections.
-    type_patterns → theorems, intro/elim rules, constants, theorem collections.
+    term_patterns → theorems, all four rule kinds (intro/elim/induction/case-split),
+      theorem collections.
+    type_patterns → theorems, constants, all four rule kinds, theorem collections.
     target_type → induction/case-split rules only (silently ignored otherwise).
     theories_include, name_contains, limit → all kinds.
     Warnings include notices about undeclared free variables in term patterns.
