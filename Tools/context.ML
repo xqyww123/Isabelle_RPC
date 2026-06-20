@@ -525,11 +525,33 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
                   SOME t => Exn.Res t
                 | NONE => Exn.Exn exn
               end)
+        (* Last-resort fallback: anonymize every named wildcard (?x, ?'a -> _).
+           "_" is a valid dummy in BOTH term and type position, so a pattern that
+           failed only because a schematic var sits where a type/binder is required
+           (e.g. (?x :: (real, ?n) vec)) re-parses after wildcarding.  Tokenize with
+           the context's inner-syntax lexicon and rebuild: Var/Type_Var tokens become
+           "_", every other token (incl. Space) keeps its verbatim source via
+           str_of_token, so spacing is preserved.  SOME only when something changed.
+           tokenize raises ERROR on a lexically bad string (stray ?, unbalanced
+           cartouche); then the fallback cannot help, so return NONE (load-bearing). *)
+        fun deschematize s =
+          let val syn = Proof_Context.syntax_of ctxt
+              val toks =
+                Syntax.tokenize syn {raw = false} (Symbol_Pos.explode (s, Position.none))
+              fun is_wild tok =
+                (case Lexicon.kind_of_token tok of
+                  Lexicon.Var => true | Lexicon.Type_Var => true | _ => false)
+              fun render tok = if is_wild tok then "_" else Lexicon.str_of_token tok
+          in if exists is_wild toks then SOME (implode (map render toks)) else NONE end
+          handle ERROR _ => NONE
         (* On a total parse failure, re-parse the ORIGINAL pattern POSITIONED so the
            error carries a <position>; mark the failing token with 【 】.  The cascade
            above stays on plain strings (success detection only).  NONE => no usable
-           position (e.g. unexpected end of input) => caller keeps format_parse_exn. *)
-        fun marker_warn noun parse_fn pat_str =
+           position (e.g. unexpected end of input) => caller keeps format_parse_exn.
+           `ignored = SOME noun` prepends the "pattern was ignored" banner; the
+           deschematize-fallback branch passes NONE (the pattern is KEPT, not ignored)
+           and appends `approx_suffix` instead. *)
+        fun positioned_warn ignored suffix parse_fn pat_str =
           case Exn.capture parse_fn (Inner_Syntax_Error.positioned pat_str) of
             Exn.Res _ => NONE
           | Exn.Exn e =>
@@ -538,15 +560,29 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
                       SOME exns => map_filter (fn ERROR m => SOME m | _ => NONE) exns
                     | NONE => (case e of ERROR m => [m] | _ => []))
                   fun look id = if id = Inner_Syntax_Error.sentinel_id then SOME pat_str else NONE
-              in get_first (Inner_Syntax_Error.format {ignored = SOME noun} look) msgs end
+              in Option.map (fn body => body ^ suffix)
+                   (get_first (Inner_Syntax_Error.format {ignored = ignored} look) msgs) end
+        fun marker_warn noun = positioned_warn (SOME noun) ""
+        val approx_suffix = "\nFell back to anonymous wildcards, which parsed."
         val (term_pairs, term_parse_warnings) =
           fold_rev (fn pat_str => fn (pairs, warns) =>
             case try_read_term pat_str of
               Exn.Res pat => ((pat_str, pat) :: pairs, warns)
             | Exn.Exn exn =>
-                (pairs,
-                 the_default (format_parse_exn exn)
-                   (marker_warn "Term" (Syntax.read_term ctxt_pat) pat_str) :: warns))
+                let fun dropped () =
+                      (pairs, the_default (format_parse_exn exn)
+                         (marker_warn "Term" (Syntax.read_term ctxt_pat) pat_str) :: warns)
+                in case deschematize pat_str of
+                     NONE => dropped ()
+                   | SOME s' =>
+                       (case try_read s' of
+                          Exn.Res pat =>
+                            ((pat_str, pat) :: pairs,
+                             the_default (format_parse_exn exn ^ approx_suffix)
+                               (positioned_warn NONE approx_suffix
+                                  (Syntax.read_term ctxt_pat) pat_str) :: warns)
+                        | Exn.Exn _ => dropped ())
+                end)
           term_pat_strs ([], [])
         val term_pats = map snd term_pairs
         val warnings = term_parse_warnings @
@@ -565,11 +601,31 @@ fun parse_patterns context (term_pat_strs, type_pat_strs) =
                          else " to express a named wildcard."]]
                      end
              end) term_pairs)
-        val (type_pats, type_parse_warnings) =
-          \<^try>\<open>(map (Syntax.read_typ ctxt_pat) type_pat_strs, [])
-          catch exn =>
-            ([], [the_default (format_parse_exn exn)
-                    (get_first (marker_warn "Type" (Syntax.read_typ ctxt_pat)) type_pat_strs)])\<close>
+        (* Per-pattern (mirrors the term path): one malformed type pattern drops only
+           itself, not all of them; and a type pattern that failed only because of a
+           schematic var (e.g. (real, ?n) vec) is rescued via the same deschematize
+           fallback (?n -> _ = dummyT). *)
+        val (type_pairs, type_parse_warnings) =
+          fold_rev (fn pat_str => fn (pairs, warns) =>
+            case Exn.capture (Syntax.read_typ ctxt_pat) pat_str of
+              Exn.Res T => ((pat_str, T) :: pairs, warns)
+            | Exn.Exn exn =>
+                let fun dropped () =
+                      (pairs, the_default (format_parse_exn exn)
+                         (marker_warn "Type" (Syntax.read_typ ctxt_pat) pat_str) :: warns)
+                in case deschematize pat_str of
+                     NONE => dropped ()
+                   | SOME s' =>
+                       (case Exn.capture (Syntax.read_typ ctxt_pat) s' of
+                          Exn.Res T =>
+                            ((pat_str, T) :: pairs,
+                             the_default (format_parse_exn exn ^ approx_suffix)
+                               (positioned_warn NONE approx_suffix
+                                  (Syntax.read_typ ctxt_pat) pat_str) :: warns)
+                        | Exn.Exn _ => dropped ())
+                end)
+          type_pat_strs ([], [])
+        val type_pats = map snd type_pairs
     in (term_pats, type_pats, warnings @ type_parse_warnings)
     end
 
