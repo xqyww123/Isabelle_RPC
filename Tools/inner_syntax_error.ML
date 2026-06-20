@@ -1,12 +1,14 @@
 (* Inner_Syntax_Error: turn an opaque Isabelle inner-syntax parse error into a
-   precise, agent-facing message that brackets the failing token with 【 】.
+   precise, agent-facing message that marks the failing spot with a
+   【parsing fails here】 marker.
 
    Mechanism: Isabelle's `Syntax.read_*` on a bare string carries Position.none,
    so the error renders `at ""` with no offset.  Feeding the SAME string as a
    positioned `Input.source` (via `Syntax.implode_input`) makes the parser emit a
    `<position offset=k end_offset=k' id=ID>` in the error message (symbol-indexed,
-   1-based).  We extract that offset and splice 【 】 around the failing token in the
-   original string, showing only a unique window around it.  The error body also
+   1-based).  We extract that offset and splice a 【parsing fails here】 marker at
+   the failing token's start in the original string, showing only a unique,
+   word-aligned window around it.  The error body also
    carries (under the SAME id) a `<token_range>` per token (each spanning that
    token's real offsets) and a trailing `<bad offset="1">`; filtering by element
    NAME = "position" — not by id/offset — is what isolates the one wanted element.
@@ -79,8 +81,10 @@ val ellipsis = utf8_of_codepoint 0x2026   (* … *)
 val arrow    = utf8_of_codepoint 0x21B3   (* ↳ *)
 val emdash   = utf8_of_codepoint 0x2014   (* — *)
 
-val pointer =
-  arrow ^ " parse failed; the offending token is wrapped in " ^ lbrack ^ " " ^ rbrack ^ ": "
+(* single self-explanatory marker spliced at the failing token's start *)
+val marker = lbrack ^ "parsing fails here" ^ rbrack
+
+val pointer = arrow ^ " "
 
 fun ignored_prefix noun =
   noun ^ " pattern was ignored " ^ emdash ^ " results are NOT filtered by it."
@@ -153,16 +157,24 @@ fun mark_window text (off, eoff) =
         val full = implode syms
         fun uniq (a, b) = count_substr (implode (sublist (syms, a, b))) full = 1
         fun expand (a, b) =
-          if (b - a >= 16 andalso uniq (a, b)) orelse (a <= 0 andalso b >= n)
+          if (b - a >= 26 andalso uniq (a, b)) orelse (a <= 0 andalso b >= n)
           then (a, b)
           else expand (Int.max (0, a - 1), Int.min (n, b + 1))
-        val (a, b) = expand (lo, hi)
+        (* widen each end to a whitespace boundary so no word is bisected;
+           only grows the window, so uniqueness is preserved *)
+        fun snap_left a =
+          if a > 0 andalso not (Symbol.is_blank (nth syms (a - 1)))
+          then snap_left (a - 1) else a
+        fun snap_right b =
+          if b < n andalso not (Symbol.is_blank (nth syms b))
+          then snap_right (b + 1) else b
+        val (a0, b0) = expand (lo, hi)
+        val a = snap_left a0
+        val b = snap_right b0
         val pre  = if a > 0 then ellipsis else ""
         val post = if b < n then ellipsis else ""
         val mid =
-          implode (sublist (syms, a, lo)) ^ lbrack ^
-          implode (sublist (syms, lo, hi)) ^ rbrack ^
-          implode (sublist (syms, hi, b))
+          implode (sublist (syms, a, lo)) ^ marker ^ implode (sublist (syms, lo, b))
       in SOME (pre ^ mid ^ post) end
   end
 
