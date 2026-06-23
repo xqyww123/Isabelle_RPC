@@ -82,7 +82,7 @@ signature CONTEXT_CALLBACKS = sig
   val mk_name_filter : string list -> string -> bool
   (* First arg = the expensive-match budget (caps full-prop subterm matching to bound
      library-search cost).  Callers over a BOUNDED prep-built list (e.g. the
-     theorem-collection half-match gate) pass a budget >= the list length so it never
+     theorem-collection pattern-match gate) pass a budget >= the list length so it never
      converts a true match into a measured non-match. *)
   val mk_prop_pattern_matcher : int -> Proof.context -> term list -> typ list -> term -> bool
 
@@ -110,8 +110,8 @@ signature CONTEXT_CALLBACKS = sig
   val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   (* First arg = bundle long-name -> its non-infra member thms (see semantic_store.ML),
      wrapped in Lazy so the (one-off) build is paid only when a patterned bundle query
-     actually forces it.  When term/type patterns are supplied, a bundle is kept only
-     when >= half of its members' props match the pattern; the map is forced ONLY then,
+     actually forces it.  When term/type patterns are supplied, a bundle is kept when
+     ANY (>= 1) of its members' props match the pattern; the map is forced ONLY then,
      so empty patterns leave behaviour unchanged and cost nothing. *)
   val make_theorem_collection_callback :
     thm list Strhashtab.table Lazy.lazy -> (string -> bool) option -> context_unpacker
@@ -1069,15 +1069,25 @@ fun make_theorem_collection_callback collection_member_thms filter_opt
         val name_filter = mk_name_filter name_contains
         (* Pattern gate (applies uniformly to both the augmented and the explicit
            kinds:[named theorem bundles] paths): when term/type patterns are present,
-           keep a bundle only if >= half of its non-infra members' props match.  Gate on
+           keep a bundle if ANY of its non-infra members' props match.  Gate on
            the PARSED patterns, not the raw strings: a total parse failure then degrades
            to a genuine no-op (matcher = K true) like the theorems engine, instead of a
-           half-gate that would still drop unmapped bundles.  Empty/unparseable patterns
-           never touch the member map. *)
+           gate that would still drop unmapped bundles.  Empty/unparseable patterns
+           never touch the member map.
+
+           Why ANY (>= 1) rather than a member-fraction: a named_theorems bundle is a
+           single citable entity standing for its whole topic, and its members are
+           heterogeneous (e.g. continuous_intros has 313 members spanning openness/
+           closedness/continuity).  No specific pattern can match a large fraction of
+           such a bundle, so a proportional ">= half" gate structurally hides exactly
+           the big, useful bundles; one relevant member already means the bundle is the
+           right tool to surface.  Noise stays bounded: infra mega-bundles (simp/intro/
+           dest) are excluded upstream, only a handful of topical bundles remain, and
+           semantic ranking still orders whatever passes. *)
         val (term_pats, type_pats, pattern_warnings) =
           parse_patterns ctx (term_pat_strs, type_pat_strs)
         val has_real_patterns = not (null term_pats andalso null type_pats)
-        fun half_match name =
+        fun any_member_matches name =
           if not has_real_patterns then true
           else
             (* Lazy.force builds the member map on first patterned query and memoizes;
@@ -1086,32 +1096,21 @@ fun make_theorem_collection_callback collection_member_thms filter_opt
             (case Strhashtab.lookup (Lazy.force collection_member_thms) name of
                NONE => false  (* no cached members => not shown under patterns *)
              | SOME thms =>
-                 let val total = length thms
-                     (* Budget bounds the matcher's expensive subterm matches.  Each
-                        examined prop costs up to |term_pats| decrements (the List.all
-                        over term_pat_infos), and we examine at most `total` members, so
-                        |term_pats|*total can never convert a true match into a measured
-                        non-match within this bounded list.  A fresh matcher per bundle
-                        also keeps the budget from bleeding across bundles. *)
-                     val matches = mk_prop_pattern_matcher
-                                     (Int.max (1, length term_pats) * total)
+                 (* Budget bounds the matcher's expensive subterm matches; sized by the
+                    member count so a true match is never converted to a measured non-
+                    match.  A fresh matcher per bundle keeps the budget from bleeding
+                    across bundles.  `exists` short-circuits on the first matching
+                    member, so the typical cost is well under the budget. *)
+                 let val matches = mk_prop_pattern_matcher
+                                     (Int.max (1, length term_pats) * length thms)
                                      ctxt term_pats type_pats
-                     (* Dual early-exit: stop once half is reached, or once the unseen
-                        remainder can no longer lift `matched` to half. *)
-                     fun go _ matched [] = matched * 2 >= total
-                       | go remaining matched (t :: ts) =
-                           if matched * 2 >= total then true
-                           else if (matched + remaining) * 2 < total then false
-                           else go (remaining - 1)
-                                  (if matches (Thm.full_prop_of t) then matched + 1 else matched)
-                                  ts
-                 in total > 0 andalso go total 0 thms end)
+                 in exists (matches o Thm.full_prop_of) thms end)
         (* Any dynamic fact is a theorem collection (a named_theorems or a raw
            add_thms_dynamic collection like derivative_eq_intros); Facts.is_dynamic
-           is a cheap, no-content prefilter that identifies all of them.  half_match
+           is a cheap, no-content prefilter that identifies all of them.  any_member_matches
            runs last and consults only the prep-built map (no live collection eval). *)
         val extra_filter = fn name =>
-          name_filter name andalso Facts.is_dynamic facts name andalso half_match name
+          name_filter name andalso Facts.is_dynamic facts name andalso any_member_matches name
       in (ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt,
           include_warnings @ pattern_warnings) end,
     timeout = NONE
