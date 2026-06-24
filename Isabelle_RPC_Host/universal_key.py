@@ -178,3 +178,26 @@ async def universal_key_of(connection: Connection, kind: EntityKind, name: str, 
     """Request the universal key for an Isabelle entity via callback."""
     uk, _ = await universal_key_and_name_of(connection, kind, name, ctxt=ctxt)
     return uk
+
+
+async def key_of_theorems(
+    connection: Connection, name: str, limit: int = 20, ctxt: Any = None
+) -> tuple[int, list[tuple[universal_key, str]]]:
+    """Resolve a fact name to the universal keys of its member theorems.
+
+    A bare multi-theorem fact name expands to up to ``limit`` members (all when
+    ``limit < 0``); an explicitly indexed name ``foo(2)`` resolves to just that
+    member. Returns ``(total, members)`` where ``total`` is the full number of
+    theorems bound to the name and ``members`` holds ``min(total, limit)`` pairs
+    ``(universal_key, ref_name)`` — ``ref_name`` is the interned/qualified name
+    with index. Raises ``UndefinedEntity`` if ``name`` is not a fact; re-raises
+    ``IsabelleError`` for other failures (e.g. an out-of-range index).
+    """
+    try:
+        total, members = await connection.callback("key_of_theorems", (ctxt, (name, limit)))
+    except IsabelleError as e:
+        msg = e.errors[0] if e.errors else str(e)
+        if msg.startswith("Undefined "):
+            raise UndefinedEntity(EntityKind.THEOREM, name, msg)
+        raise
+    return total, [(bytes(uk), nm) for uk, nm in members]

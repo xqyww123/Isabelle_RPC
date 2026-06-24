@@ -190,6 +190,7 @@ val constituents_of : universal_key -> constituent list option
 
 val make_universal_key_callback  : context_unpacker -> Remote_Procedure_Calling.callback'
 val make_universal_key_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
+val make_key_of_theorems_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
 
 val pack_universal_key : universal_key MessagePackBinIO.Pack.packer
 val unpack_universal_key : universal_key MessagePackBinIO.Unpack.unpacker
@@ -657,6 +658,49 @@ fun key_of_theorem cache context =
     in (uk, thm, is_global, full_name) end
   end
 
+(* Resolve a fact name to the universal keys of its member theorems.  A bare
+   multi-theorem fact name (e.g. `foo`, members `foo(1)/foo(2)`) expands to up
+   to `limit` members (all when `limit < 0`); an explicitly indexed name `foo(i)`
+   resolves to just that member.  Returns (total_N, [(uk, ref_name), ...]) where
+   ref_name is the INTERNED/qualified name with index — the agent-facing short
+   display name is produced downstream by the externing in IsaMini.retrieve_entity. *)
+fun key_of_theorems cache context =
+  let
+    val thy = Context.theory_of context
+    val ctxt = Context.cases Proof_Context.init_global I context
+    val facts = Proof_Context.facts_of ctxt
+    val fact_space = Facts.space_of facts
+    fun key_of_one thm = build_thm_key cache context 0wx02 (Thm.transfer thy thm)
+  in fn (xname, limit) =>
+    let
+      val (base_name, idx_opt) = parse_thm_xname xname
+      val full_name = Name_Space.intern fact_space base_name
+      val {thms, ...} =
+        case Facts.lookup context facts full_name of
+          SOME r => r
+        | NONE => error ("Undefined fact: " ^ quote full_name)
+      val n = length thms
+      fun ref_at i = full_name ^ "(" ^ Int.toString i ^ ")"
+    in case idx_opt of
+        SOME i =>
+          if i >= 1 andalso i <= n
+          then (1, [(key_of_one (nth thms (i - 1)), ref_at i)])
+          else error ("Theorem index " ^ Int.toString i ^
+                      " out of range for " ^ full_name ^
+                      " (has " ^ Int.toString n ^ " theorems)")
+      | NONE =>
+          if n = 0 then error ("No theorems in fact " ^ full_name)
+          else
+            let
+              val take_n = if limit < 0 then n else Int.min (n, limit)
+              val members = map_index (fn (j, thm) =>
+                    (key_of_one thm,
+                     if n > 1 then ref_at (j + 1) else full_name))
+                  (List.take (thms, take_n))
+            in (n, members) end
+    end
+  end
+
 end (* local parse_thm_xname *)
 
 fun key_of_theorem' cache context thm = build_thm_key cache context 0wx02 thm
@@ -775,6 +819,27 @@ fun make_universal_key_callback' (cache : thm_uk_cache option)
   }
 
 fun make_universal_key_callback ctxt_unpack = make_universal_key_callback' NONE ctxt_unpack
+
+fun make_key_of_theorems_callback' (cache : thm_uk_cache option)
+    (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "key_of_theorems",
+    arg_schema = MessagePackBinIO.Unpack.unpackPair
+                   (ctxt_unpack,
+                    MessagePackBinIO.Unpack.unpackPair
+                      (MessagePackBinIO.Unpack.unpackString,
+                       MessagePackBinIO.Unpack.unpackInt)),
+    ret_schema = MessagePackBinIO.Pack.packPair
+                   (MessagePackBinIO.Pack.packInt,
+                    MessagePackBinIO.Pack.packList
+                      (MessagePackBinIO.Pack.packPair
+                         (pack_universal_key,
+                          MessagePackBinIO.Pack.packString))),
+    function = fn (context, (name, limit)) =>
+      key_of_theorems cache context (name, limit),
+    timeout = NONE
+  }
 
 (* --- Entity serialization --- *)
 
