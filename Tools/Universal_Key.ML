@@ -664,13 +664,13 @@ fun key_of_theorem cache context =
    resolves to just that member.  Returns (total_N, [(uk, ref_name), ...]) where
    ref_name is the INTERNED/qualified name with index — the agent-facing short
    display name is produced downstream by the externing in IsaMini.retrieve_entity. *)
-fun key_of_theorems cache context =
+fun key_of_theorems_tagged tag cache context =
   let
     val thy = Context.theory_of context
     val ctxt = Context.cases Proof_Context.init_global I context
     val facts = Proof_Context.facts_of ctxt
     val fact_space = Facts.space_of facts
-    fun key_of_one thm = build_thm_key cache context 0wx02 (Thm.transfer thy thm)
+    fun key_of_one thm = build_thm_key cache context tag (Thm.transfer thy thm)
   in fn (xname, limit) =>
     let
       val (base_name, idx_opt) = parse_thm_xname xname
@@ -827,8 +827,9 @@ fun make_key_of_theorems_callback' (cache : thm_uk_cache option)
     name = "key_of_theorems",
     arg_schema = MessagePackBinIO.Unpack.unpackPair
                    (ctxt_unpack,
-                    MessagePackBinIO.Unpack.unpackPair
-                      (MessagePackBinIO.Unpack.unpackString,
+                    MessagePackBinIO.Unpack.unpackTuple3
+                      (MessagePackBinIO.Unpack.unpackInt,
+                       MessagePackBinIO.Unpack.unpackString,
                        MessagePackBinIO.Unpack.unpackInt)),
     ret_schema = MessagePackBinIO.Pack.packPair
                    (MessagePackBinIO.Pack.packInt,
@@ -836,8 +837,16 @@ fun make_key_of_theorems_callback' (cache : thm_uk_cache option)
                       (MessagePackBinIO.Pack.packPair
                          (pack_universal_key,
                           MessagePackBinIO.Pack.packString))),
-    function = fn (context, (name, limit)) =>
-      key_of_theorems cache context (name, limit),
+    (* `kind` is the entity-kind int, which for theorem-shaped facts equals the
+       universal-key tag byte (THEOREM 0x02, intro 0x12, elim 0x22, induction
+       0x32, case-split 0x42). Members are keyed with that tag so a bundle
+       resolved as e.g. introduction rules yields rule-tagged keys. *)
+    function = fn (context, (kind, name, limit)) =>
+      let val tag = case kind of
+              2 => 0wx02 | 18 => 0wx12 | 34 => 0wx22 | 50 => 0wx32 | 66 => 0wx42
+            | _ => error ("key_of_theorems: not a theorem-shaped fact kind: "
+                          ^ Int.toString kind)
+      in key_of_theorems_tagged tag cache context (name, limit) end,
     timeout = NONE
   }
 
