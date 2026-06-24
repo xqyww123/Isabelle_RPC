@@ -83,7 +83,8 @@ fun random () =
   end
 
 
-fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_type_P, show_sort_P} body =
+fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_type_P, show_sort_P}
+              {floating, selected, sort_names} body =
   let val show_type =
             case show_type_P of SOME P => let val rand = random ()
                                            in fn () => rand () <= P
@@ -136,6 +137,7 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
             else TEXT s :: ret
         | dump_xml (Elem (("break", _), _)) ret = TEXT " " :: ret
         | dump_xml (Elem (("tfree", _), [x])) ret = FREE (one_str x) :: ret
+        | dump_xml (Elem (("tvar", _), [x])) ret = FREE (one_str x) :: ret
         | dump_xml (Elem (("free", _), [x])) ret = FREE (one_str x) :: ret
         | dump_xml (Elem (("bound", _), [x])) ret = BOUND (one_str x) :: ret
         | dump_xml (origin as Elem (("entity", attrs), [x])) ret =
@@ -161,6 +163,14 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
             SORTING (typ, dump_xml term []) :: ret
         | dump_xml (Elem (_, children)) ret = fold dump_xml children ret
 
+      (* tfree/tvar names occurring textually inside an XML type tree *)
+      fun xml_tvar_names tree =
+        let fun txt (Text s) = s | txt (Elem (_, [c])) = txt c | txt _ = ""
+            fun go (t as Elem ((nm, _), cs)) acc =
+                  if nm = "tfree" orelse nm = "tvar" then txt t :: acc else fold go cs acc
+              | go (Text _) acc = acc
+        in go tree [] end
+
       fun dump_ir ir =
         let fun pass [] ret = ret
               | pass (TYPING (ty, [NUMBER tm]) :: oth) ret =
@@ -173,8 +183,14 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
                   then "(" :: tm :: " :: " :: dump_ir (dump_xml ty []) @ ")"
                     :: pass oth ret
                   else tm :: pass oth ret
-              | pass (TYPING (ty, [CONSTANT {name, ...}]) :: oth) ret =
-                  if constant_typ andalso show_type ()
+              | pass (TYPING (ty, [CONSTANT {name, full_name}]) :: oth) ret =
+                  (* show a constant's type when constant_typ asks for it OR when
+                     it is a selected carrier of a floating type variable (a tvar
+                     anchored to no term variable -- otherwise invisible). *)
+                  if (constant_typ orelse
+                       (member (op =) selected full_name
+                        andalso exists (member (op =) floating) (xml_tvar_names ty)))
+                     andalso show_type ()
                   then "(" :: name :: " :: " :: dump_ir (dump_xml ty []) @ ")"
                     :: pass oth ret
                   else name :: pass oth ret
@@ -195,7 +211,10 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
                            :: pass oth ret
                   else pass (tm @ oth) ret
               | pass (SORTING (s, tm) :: oth) ret =
-                  if sorting ()
+                  (* keep a sort when sorting asks for it OR when this tvar is a
+                     floating one with a NON-trivial sort (sort_names). *)
+                  if sorting () orelse
+                     (case tm of [FREE nm] => member (op =) sort_names nm | _ => false)
                   then "(" :: pass tm [] @ " :: " :: dump_ir (dump_xml s []) @ ")"
                            :: pass oth ret
                   else pass (tm @ oth) ret
@@ -210,12 +229,82 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
    in String.concat (dump_ir (fold dump_xml body []))
   end
 
+(* A "floating" type variable is one that occurs in NO term variable's type
+   (Free/Var/bound), i.e. it exists only because of a polymorphic CONSTANT and is
+   therefore invisible in the default type-suppressing rendering -- the silent
+   under-constraint that makes e.g. `filterlim harm at_top sequentially` (harm ::
+   nat => 'a, 'a unpinned) look fine yet be unprovable.  We surface it by:
+     - selecting a minimal set of carrier constants (head-excluding greedy cover)
+       whose printed types make every floating tvar appear at least once, and
+     - showing the sort of a floating tvar only when it is non-trivial.
+   No floating tvar  ==>  empty result  ==>  rendering is unchanged (self-gating).
+   TFree names match the markup directly; TVar (schematic, in stored/library
+   lemmas) is rendered to its display form via `string_of_vname` to match. *)
+val no_floating = {floating = [] : string list, selected = [] : string list,
+                   sort_names = [] : string list}
+
+fun floating_info t =
+  let
+    val all_tv =
+      Term.add_tfrees t [] @ map (apfst Term.string_of_vname) (Term.add_tvars t [])
+  in
+    if null all_tv then no_floating   (* fast path: no type variables at all *)
+    else
+    let
+      fun tvs_of_typ T =
+        Term.add_tfreesT T [] @ map (apfst Term.string_of_vname) (Term.add_tvarsT T [])
+      fun names_of_typ T = map fst (tvs_of_typ T)
+      fun anch (Free (_,T)) acc = fold (insert (op =)) (names_of_typ T) acc
+        | anch (Var (_,T)) acc  = fold (insert (op =)) (names_of_typ T) acc
+        | anch (Abs (_,T,b)) acc = anch b (fold (insert (op =)) (names_of_typ T) acc)
+        | anch (f $ x) acc = anch x (anch f acc)
+        | anch _ acc = acc
+      val anchored = anch t []
+      val floating0 = filter (fn (n,_) => not (member (op =) anchored n)) all_tv
+      val floating = map fst floating0
+      (* a sort is trivial iff it is a subset of {type} (the universal HOL sort) *)
+      val sort_names =
+        map fst (filter (fn (_,s) => not (subset (op =) (s, ["HOL.type"]))) floating0)
+      fun inter' xs ys = filter (fn x => member (op =) ys x) xs
+      (* carrier constant occurrences in L-to-R order, tagged with whether THIS
+         occurrence sits in function/head position (applied to >= 1 argument). *)
+      val carriers =
+        let val acc = Unsynchronized.ref []
+            fun go applied (Const (c,T)) =
+                  let val cov = inter' floating (names_of_typ T)
+                  in if null cov then () else acc := (c, cov, applied) :: !acc end
+              | go _ (Abs (_,_,b)) = go false b
+              | go _ (f $ x) = (go true f; go false x)
+              | go _ _ = ()
+        in go false t; rev (!acc) end
+      val carriers_i = map_index I carriers
+      (* greedy set cover; prefer (1) non-head occurrence, (2) wider coverage,
+         (3) leftmost.  Heads remain a last resort, never excluded outright. *)
+      fun select remaining acc =
+        if null remaining then rev acc else
+        let val cands = map_filter (fn (i,(c,cov,ap)) =>
+                  let val g = inter' remaining cov
+                  in if null g then NONE else SOME (i, c, cov, length g, ap) end) carriers_i
+        in if null cands then rev acc
+           else let val (_,c,cov,_,_) =
+                      hd (sort (fn ((i1,_,_,g1,a1),(i2,_,_,g2,a2)) =>
+                            if a1 <> a2 then bool_ord (a1,a2)
+                            else if g1 <> g2 then int_ord (g2,g1)
+                            else int_ord (i1,i2)) cands)
+                in select (filter (fn x => not (member (op =) cov x)) remaining) (c::acc) end
+        end
+      val selected = select floating []
+    in {floating = floating, selected = selected, sort_names = sort_names} end
+  end
+
 fun print_term cfg ctxt =
   let val ctxt = ctxt
         |> Config.put Printer.show_markup true
         |> Config.put Printer.show_types false
         |> Config.put Printer.show_sorts false
-   in fn term => print_xml cfg (YXML.parse_body (Syntax.string_of_term ctxt term))
+   in fn term =>
+        print_xml cfg (floating_info term)
+          (YXML.parse_body (Syntax.string_of_term ctxt term))
   end
 
 fun print_typ cfg ctxt =
@@ -223,7 +312,7 @@ fun print_typ cfg ctxt =
         |> Config.put Printer.show_markup true
         |> Config.put Printer.show_types false
         |> Config.put Printer.show_sorts false
-   in fn typ => print_xml cfg (YXML.parse_body (Syntax.string_of_typ ctxt typ))
+   in fn typ => print_xml cfg no_floating (YXML.parse_body (Syntax.string_of_typ ctxt typ))
   end
 
 
