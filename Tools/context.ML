@@ -119,6 +119,16 @@ signature CONTEXT_CALLBACKS = sig
   val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
+  (* Experience memory: goal_patterns -> minimal-antichain constituent theories
+     [(theory long name, 16-byte theory hash)].  See experience_constituents. *)
+  val make_experience_constituents_callback : context_unpacker -> Remote_Procedure_Calling.callback'
+  (* Experience memory: (query patterns, [(uk, experience patterns)]) ->
+     [(uk, hit_rate)] for experiences with a positive relaxed bidirectional
+     subterm hit rate.  See experience_hit_rates. *)
+  val make_experiences_callback : context_unpacker -> Remote_Procedure_Calling.callback'
+  (* Experience memory: 16-byte hashes of the current theory + all ancestors
+     (loaded theories), for Python-side availability. See loaded_theory_hashes. *)
+  val make_loaded_theory_hashes_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* Rule callbacks share the theorems engine (make_thm_like_callback).  Per-kind
      wrapper differences collapse to: the live sources + key_of.  Arguments:
        extract_net : the classical/Induct net (Source-1), a flat thm list.  Supplied
@@ -265,9 +275,13 @@ fun matches_subterm ctxt (pat, obj) =
   in matches obj ctxt end;
 
 
-(* --- Coercion-transparent pattern matching ---
-   Copied from PLPR_Pattern (Performant_Isabelle_ML/library/pattern.ML),
-   modified to: (a) ignore types, (b) skip coercion wrappers in coercion_ignores. *)
+(* --- Relaxed pattern matching / unification ---
+   "relaxed" = (a) type-agnostic (ignores types), (b) coercion-transparent
+   (skips the unary coercion wrappers registered in coercion_ignores, e.g.
+   of_nat/of_int/of_real/…).  The matchers here are copied from PLPR_Pattern
+   (Performant_Isabelle_ML/library/pattern.ML) with typ_match removed and the
+   coercion-skip added; unify_relaxed below is the analogous relaxed copy of the
+   Isabelle stdlib higher-order *pattern* unifier (Pure/pattern.ML `unify`). *)
 
 local
   open Pattern (* for MATCH exception, Unif exception *)
@@ -308,7 +322,7 @@ local
 
   (* First-order matching — type-agnostic, coercion-transparent.
      Copied from PLPR_Pattern.first_order_match with typ_match removed. *)
-  fun first_order_match_transparent (ignores : unit Strhashtab.table)
+  fun first_order_match_relaxed (ignores : unit Strhashtab.table)
         fixed_bounds bv_tys (t,u) env =
     let
       val bs = Inttab.make_set (loose_bnos u)
@@ -346,7 +360,7 @@ local
 
   (* Higher-order pattern matching — type-agnostic, coercion-transparent.
      Copied from PLPR_Pattern.match with typ_match removed. *)
-  fun match_transparent (ignores : unit Strhashtab.table)
+  fun match_relaxed (ignores : unit Strhashtab.table)
         (fixed_bounds : int -> bool) bvs (po as (pat,obj)) envir =
   let
     val len_initial = length bvs
@@ -421,27 +435,219 @@ local
     val bvtys = map snd bvs
   in mtch bvs po envir
      handle Pattern =>
-       first_order_match_transparent ignores (K true) bvtys po envir
+       first_order_match_relaxed ignores (K true) bvtys po envir
   end;
+
+  (* Higher-order *pattern* unification — type-agnostic, coercion-transparent.
+     A relaxed copy of the Isabelle stdlib unifier (Pure/pattern.ML `unify`):
+     - type unification stripped (no unify_types call) -> type-agnostic;
+     - failure-tracing dropped (clash/proj_fail/ocheck -> plain `raise Unif`);
+     - on a rigid clash, a unary coercion wrapper (a Const in `ignores` applied
+       to one argument) is peeled from either side and unification retried;
+     - the `context` argument is dropped (only unify_types used it).
+     The helpers below (ints_of'/split_type/type_of_G/mk_hnf/mk_new_hnf/
+     mk_proj_list/proj/mk_ff_list/flexflex1/flexflex2/occurs) are verbatim
+     copies of the stdlib internals, reusing the local *_t helpers (mkabs_t/
+     app_t/idx_t/incr_t/downto0_t/ints_of_t) that are byte-identical to their
+     stdlib counterparts.  Inherits the stdlib Miller restriction: a non-pattern
+     (applied/repeated schematic) raises `Pattern`, which unifies_relaxed catches
+     to fall back to a bidirectional first-order match (mirroring match_relaxed's
+     own HO->FO fallback). *)
+
+  fun ints_of' env ts = ints_of_t (map (Envir.head_norm env) ts);
+
+  fun split_type (T,0,Ts)                    = (Ts,T)
+    | split_type (Type ("fun",[T1,T2]),n,Ts) = split_type (T2,n-1,T1::Ts)
+    | split_type _                           = raise Fail "split_type";
+
+  fun type_of_G env (T, n, is) =
+    let val tyenv = Envir.type_env env;
+        val (Ts, U) = split_type (Envir.norm_type tyenv T, n, []);
+    in map (nth Ts) is ---> U end;
+
+  fun mk_hnf (binders,is,G,js) = mkabs_t (binders, is, app_t(G,js));
+
+  fun mk_new_hnf(env,binders,is,F as (a,_),T,js) =
+    let val (env',G) = Envir.genvar a (env,type_of_G env (T,length is,js))
+    in Envir.update ((F, T), mk_hnf (binders, is, G, js)) env' end;
+
+  fun mk_proj_list is =
+      let fun mk(i::is,j) = if is_some i then j :: mk(is,j-1) else mk(is,j-1)
+            | mk([],_)    = []
+      in mk(is,length is - 1) end;
+
+  fun proj(s,env,binders,is) =
+      let fun trans d i = if i<d then i else (idx_t is (i-d))+d;
+          fun pr(s,env,d,binders) = (case Envir.head_norm env s of
+                Abs(a,T,t) => let val (t',env') = pr(t,env,d+1,((a,T)::binders))
+                              in (Abs(a,T,t'),env') end
+              | t => (case strip_comb t of
+                  (c as Const _,ts) =>
+                           let val (ts',env') = prs(ts,env,d,binders)
+                           in (list_comb(c,ts'),env') end
+                   | (f as Free _,ts) =>
+                           let val (ts',env') = prs(ts,env,d,binders)
+                           in (list_comb(f,ts'),env') end
+                   | (Bound(i),ts) =>
+                           let val j = trans d i
+                               val (ts',env') = prs(ts,env,d,binders)
+                           in (list_comb(Bound j,ts'),env') end
+                   | (Var(F as (a,_),Fty),ts) =>
+                        let val js = ints_of' env ts;
+                            val js' = map (try (trans d)) js;
+                            val ks = mk_proj_list js';
+                            val ls = map_filter I js'
+                            val Hty = type_of_G env (Fty,length js,ks)
+                            val (env',H) = Envir.genvar a (env,Hty)
+                            val env'' =
+                              Envir.update ((F, Fty), mk_hnf (binders, js, H, ks)) env'
+                        in (app_t(H,ls),env'') end
+                   | _  => raise Pattern))
+          and prs(s::ss,env,d,binders) =
+                let val (s',env1) = pr(s,env,d,binders)
+                    val (ss',env2) = prs(ss,env1,d,binders)
+                in (s'::ss',env2) end
+            | prs([],env,_,_) = ([],env)
+     in if downto0_t(is,length binders - 1) then (s,env)
+        else pr(s,env,0,binders)
+     end;
+
+  fun mk_ff_list(is,js) =
+      let fun mk([],[],_)        = []
+            | mk(i::is,j::js, k) = if (i:int) = j then k :: mk(is,js,k-1)
+                                          else mk(is,js,k-1)
+            | mk _               = raise Fail "mk_ff_list"
+      in mk(is,js,length is-1) end;
+
+  fun flexflex1(env,binders,F,Fty,is,js) =
+    if is=js then env
+    else let val ks = mk_ff_list(is,js)
+         in mk_new_hnf(env,binders,is,F,Fty,ks) end;
+
+  fun flexflex2(env,binders,F,Fty,is,G,Gty,js) =
+    let fun ff(F,Fty,is,G as (a,_),Gty,js) =
+              if subset (op =) (js, is)
+              then let val t= mkabs_t(binders,is,app_t(Var(G,Gty),map (idx_t is) js))
+                   in Envir.update ((F, Fty), t) env end
+              else let val ks = inter (op =) js is
+                       val Hty = type_of_G env (Fty,length is,map (idx_t is) ks)
+                       val (env',H) = Envir.genvar a (env,Hty)
+                       fun lam(is) = mkabs_t(binders,is,app_t(H,map (idx_t is) ks));
+                   in Envir.update ((G, Gty), lam js) (Envir.update ((F, Fty), lam is) env')
+                   end;
+    in if Term_Ord.indexname_ord (G,F) = LESS then ff(F,Fty,is,G,Gty,js) else ff(G,Gty,js,F,Fty,is) end;
+
+  fun occurs(F,t,env) =
+      let fun occ(Var (G, T))   = (case Envir.lookup env (G, T) of
+                                   SOME(t) => occ t
+                                 | NONE    => F=G)
+            | occ(t1$t2)      = occ t1 orelse occ t2
+            | occ(Abs(_,_,t)) = occ t
+            | occ _           = false
+      in occ t end;
+
+  (* mutually recursive core; `ignores` = coercion constants to peel. *)
+  fun unif_relaxed ignores binders (s,t) env =
+    case (Envir.head_norm env s, Envir.head_norm env t) of
+        (Abs(ns,Ts,ts),Abs(nt,_,tt)) =>
+           let val name = if ns = "" then nt else ns
+           in unif_relaxed ignores ((name,Ts)::binders) (ts,tt) env end
+      | (Abs(ns,Ts,ts),t) => unif_relaxed ignores ((ns,Ts)::binders) (ts,(incr_t t)$Bound(0)) env
+      | (t,Abs(nt,Tt,tt)) => unif_relaxed ignores ((nt,Tt)::binders) ((incr_t t)$Bound(0),tt) env
+      | p => cases_relaxed ignores (binders,env,p)
+
+  and cases_relaxed ignores (binders,env,(s,t)) =
+    let
+      fun rigid () = (case (strip_comb s,strip_comb t) of
+             ((Var(F,Fty),ss),(Var(G,Gty),ts)) =>
+               if F = G then flexflex1(env,binders,F,Fty,ints_of' env ss,ints_of' env ts)
+                        else flexflex2(env,binders,F,Fty,ints_of' env ss,G,Gty,ints_of' env ts)
+           | ((Var(F,Fty),ss),_)           => flexrigid ignores (env,binders,F,Fty,ints_of' env ss,t)
+           | (_,(Var(F,Fty),ts))           => flexrigid ignores (env,binders,F,Fty,ints_of' env ts,s)
+           | ((Const c,ss),(Const d,ts))   => rigidrigid ignores (env,binders,c,d,ss,ts)
+           | ((Free f,ss),(Free g,ts))     => rigidrigid ignores (env,binders,f,g,ss,ts)
+           | ((Bound i,ss),(Bound j,ts))   => rigidrigidB ignores (env,binders,i,j,ss,ts)
+           | ((Abs _,_),_)                 => raise Pattern
+           | (_,(Abs _,_))                 => raise Pattern
+           | _                             => raise Unif)
+    in
+      rigid ()
+      handle Unif =>          (* peel a coercion wrapper off the RHS and retry *)
+        (case strip_comb t of
+           (Const(n,_),[inner]) =>
+             if Strhashtab.defined ignores n
+             then unif_relaxed ignores binders (s, inner) env else raise Unif
+         | _ => raise Unif)
+      handle Unif =>          (* else peel one off the LHS and retry *)
+        (case strip_comb s of
+           (Const(n,_),[inner]) =>
+             if Strhashtab.defined ignores n
+             then unif_relaxed ignores binders (inner, t) env else raise Unif
+         | _ => raise Unif)
+    end
+
+  and rigidrigid ignores (env,binders,(a,_),(b,_),ss,ts) =
+        if a<>b then raise Unif
+        else fold (unif_relaxed ignores binders) (ss~~ts) env
+             handle ListPair.UnequalLengths => raise Unif
+
+  and rigidrigidB ignores (env,binders,i,j,ss,ts) =
+       if i <> j then raise Unif
+       else fold (unif_relaxed ignores binders) (ss~~ts) env
+            handle ListPair.UnequalLengths => raise Unif
+
+  and flexrigid ignores (env,binders,F,Fty,is,t) =
+        if occurs(F,t,env) then raise Unif
+        else let val (u,env') = proj(t,env,binders,is)
+             in Envir.update ((F, Fty), mkabs_t (binders, is, u)) env' end;
 
 in
 
-fun matches_transparent ignores fixed_bounds bvs po =
-  (match_transparent ignores fixed_bounds bvs po (Vartab.empty, Vartab.empty); true)
+fun matches_relaxed ignores fixed_bounds bvs po =
+  (match_relaxed ignores fixed_bounds bvs po (Vartab.empty, Vartab.empty); true)
   handle MATCH => false
        | TYPE _ => false
 
-fun matches_subterm_transparent ctxt ignores (pat, obj) =
+(* Relaxed unifiability (whole term), type-agnostic + coercion-transparent.
+   On a non-pattern (Miller) problem the stdlib core raises `Pattern`; we then
+   fall back to a BIDIRECTIONAL relaxed first-order match (t ⊑ u or u ⊑ t),
+   mirroring match_relaxed's own HO->FO fallback. *)
+fun unifies_relaxed ignores (t, u) =
   let
-    fun try_match obj ctxt' =
-      matches_transparent ignores (K true) [] (pat, obj) orelse
-      (case obj of
-        Abs _ =>
-          let val ((_, t'), ctxt'') = Variable.dest_abs obj ctxt'
-          in try_match t' ctxt'' end
-      | t $ u => try_match t ctxt' orelse try_match u ctxt'
-      | _ => false);
-  in try_match obj ctxt end
+    val maxidx = Int.max (Term.maxidx_of_term t, Term.maxidx_of_term u)
+    fun fo (a, b) =
+      (first_order_match_relaxed ignores (K true) [] (a, b) (Vartab.empty, Vartab.empty); true)
+      handle MATCH => false | TYPE _ => false
+  in
+    (unif_relaxed ignores [] (t, u) (Envir.empty maxidx); true)
+    handle Unif => false
+         | TYPE _ => false
+         | ListPair.UnequalLengths => false
+         | Pattern => fo (t, u) orelse fo (u, t)
+  end
+
+(* Two-flag relaxed subterm hit (§4.2 of EXPERIENCE_MEMORY.md):
+   `unify`   true  => relaxed unifiability (unifies_relaxed, bidirectional-capable);
+             false => one-directional relaxed match (pat ⊑ obj);
+   `subterm` true  => also try every subterm of obj; false => whole obj only. *)
+fun hit_relaxed {unify, subterm} ctxt ignores (pat, obj) =
+  let
+    fun hit1 ob = if unify then unifies_relaxed ignores (pat, ob)
+                           else matches_relaxed ignores (K true) [] (pat, ob)
+    fun walk ob ctxt' =
+      hit1 ob orelse
+      (subterm andalso
+        (case ob of
+          Abs _ =>
+            let val ((_, t'), ctxt'') = Variable.dest_abs ob ctxt'
+            in walk t' ctxt'' end
+        | t $ u => walk t ctxt' orelse walk u ctxt'
+        | _ => false));
+  in walk obj ctxt end
+
+(* Back-compat alias: match-mode subterm hit used by mk_prop_pattern_matcher. *)
+fun matches_subterm_relaxed ctxt ignores po =
+  hit_relaxed {unify = false, subterm = true} ctxt ignores po
 
 end (* local *)
 
@@ -693,7 +899,7 @@ fun mk_prop_pattern_matcher budget0 ctxt (term_pats : term list) (type_pats : ty
            andalso not (null names_effective)
            andalso !budget > 0
            andalso (budget := !budget - 1;
-                    matches_subterm_transparent ctxt ignores (pat', prop))
+                    matches_subterm_relaxed ctxt ignores (pat', prop))
          ) term_pat_infos
          andalso type_matches_in_term typ_inst type_pat_infos prop
       end
@@ -838,6 +1044,108 @@ val ret_schema = packPair (
 val ret_schema_thm = packPair (
   packList (packTuple4 (Universal_Key.pack_universal_key, packString, pack_pos, packBool)),
   packList packString (* warnings *))
+
+(* --- Experience memory: minimal-antichain constituent theories of patterns ---
+   Only the goal_patterns reach ML (name/description/experience stay Python-side).
+   Parse each pattern, union the defining theories of their constants+types, then
+   reduce to the maximal theories under the import order (Context.subthy): an
+   ancestor theory is dropped when a descendant that imports it is also present
+   (sound because the loaded set is import-closed).  Python XORs the returned
+   hashes into the 16-byte key prefix and stores the list as the record's
+   theory_constituents (which drives experience availability). *)
+fun experience_constituents context (pattern_strs : string list)
+    : (string * Theory_Hash.hash) list =
+  let
+    val (term_pats, _, _) = parse_patterns context (pattern_strs, [])
+    val tab : Theory_Hash.hash Symtab.table =
+      fold (fn t => fold (fn (n, h) => Symtab.update (n, h))
+                         (#2 (Universal_Key.compute_constituents context t)))
+           term_pats Symtab.empty
+    val consts = Symtab.dest tab
+    (* resolve each theory (unresolvable -> keep, can't compare); keep maximal *)
+    val items = map (fn (n, h) => (n, h, try Thy_Info.get_theory n)) consts
+    fun is_max (ni, _, SOME ti) =
+          not (exists (fn (nj, _, tj_opt) =>
+                 nj <> ni andalso
+                 (case tj_opt of SOME tj => Context.subthy (ti, tj) | NONE => false))
+               items)
+      | is_max (_, _, NONE) = true
+  in map (fn (n, h, _) => (n, h)) (filter is_max items) end
+
+fun make_experience_constituents_callback (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Experience.constituents",
+    arg_schema = unpackPair (ctxt_unpack, unpackList unpackString),
+    ret_schema = packList (packPair (packString, packBytes)),
+    function = fn (context, pattern_strs) => experience_constituents context pattern_strs,
+    timeout = NONE
+  }
+
+(* --- Experience memory: retrieval-time hit rates ---
+   For each available experience (uk + its stored goal_patterns), compute the
+   hit rate against the query's term patterns: the fraction of QUERY patterns q
+   for which some experience pattern e matches, where a match is the relaxed,
+   BIDIRECTIONAL subterm test (q unifies a subterm of e, OR e unifies a subterm
+   of q).  Only experiences with a positive rate are returned (the availability
+   gate is applied Python-side; the hit_rate>0 gate lives here).  With no query
+   patterns the caller disables the boost entirely, so we return [] (no gate,
+   pure semantic ranking).  Availability + candidate selection is Python-driven;
+   here ML only parses + scores the (uk, patterns) it is handed. *)
+fun experience_hit_rates context (query_pat_strs : string list)
+      (experiences : (Universal_Key.universal_key * string list) list)
+      : (Universal_Key.universal_key * real) list =
+  let
+    val ctxt = Context.cases Proof_Context.init_global I context
+    val (query_pats, _, _) = parse_patterns context (query_pat_strs, [])
+    val nq = length query_pats
+    fun hit (q, e) =
+      hit_relaxed {unify = true, subterm = true} ctxt coercion_ignores (q, e) orelse
+      hit_relaxed {unify = true, subterm = true} ctxt coercion_ignores (e, q)
+    fun rate exp_pat_strs =
+      let val (exp_pats, _, _) = parse_patterns context (exp_pat_strs, [])
+          val hits = length (filter (fn q => exists (fn e => hit (q, e)) exp_pats) query_pats)
+      in Real.fromInt hits / Real.fromInt nq end
+  in
+    if nq = 0 then []
+    else map_filter (fn (uk, exp_pat_strs) =>
+           let val r = rate exp_pat_strs
+           in if r > 0.0 then SOME (uk, r) else NONE end)
+         experiences
+  end
+
+fun make_experiences_callback (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.experiences",
+    arg_schema = unpackPair (ctxt_unpack,
+                   unpackPair (unpackList unpackString,
+                     unpackList (unpackPair (Universal_Key.unpack_universal_key,
+                                             unpackList unpackString)))),
+    ret_schema = packList (packPair (Universal_Key.pack_universal_key, packReal)),
+    function = fn (context, (query_pats, experiences)) =>
+                 experience_hit_rates context query_pats experiences,
+    timeout = NONE
+  }
+
+(* Experience memory: the 16-byte theory hashes of every loaded theory (the
+   current context's theory plus all its ancestors).  Python intersects these
+   with the experience inverted index to find available experiences (those whose
+   full constituent set is loaded).  Hashes are Theory_Hash-memoized, so this is
+   cheap; Python caches the result per run. *)
+fun loaded_theory_hashes context : Theory_Hash.hash list =
+  let val thy = Context.theory_of context
+  in map Theory_Hash.hash_of (thy :: Theory.ancestors_of thy) end
+
+fun make_loaded_theory_hashes_callback (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.loaded_theory_hashes",
+    arg_schema = ctxt_unpack,
+    ret_schema = packList packBytes,
+    function = fn context => loaded_theory_hashes context,
+    timeout = NONE
+  }
 
 fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =

@@ -183,6 +183,11 @@ val retag_thm_key       : universal_key -> Word8.word -> universal_key
    sorted (theory long name, theory hash) list it was XORed from. *)
 type constituent = theory_long_name * Theory_Hash.hash
 val thm_constituents : Context.generic -> thm -> Theory_Hash.hash * constituent list
+(* Constituent theories of an arbitrary term (the defining theories of its
+   constants and type constructors), same XOR-hash + sorted (long name, hash)
+   list as thm_constituents.  Exposed for experience-memory keys, whose patterns
+   are bare terms, not thms. *)
+val compute_constituents : Context.generic -> term -> Theory_Hash.hash * constituent list
 (* Constituent list of a theorem/rule key built earlier in this session
    (populated as a side effect of key construction); NONE for any other key
    shape, or a thm/rule key not yet built in this session. *)

@@ -15,6 +15,7 @@ class EntityKind(IntEnum):
     LOCALE = 5
     THEOREM_COLLECTION = 6
     METHOD = 7
+    EXPERIENCE = 8
     INTRODUCTION_RULE = 0x12
     ELIMINATION_RULE = 0x22
     INDUCTION_RULE = 0x32
@@ -42,6 +43,7 @@ _ENTITY_LABELS = {
     EntityKind.LOCALE: "locale",
     EntityKind.THEOREM_COLLECTION: "named theorem bundles",
     EntityKind.METHOD: "proof method",
+    EntityKind.EXPERIENCE: "experience",
     EntityKind.INTRODUCTION_RULE: "introduction rule",
     EntityKind.ELIMINATION_RULE: "elimination rule",
     EntityKind.INDUCTION_RULE: "induction rule",
@@ -59,6 +61,11 @@ THM_RULE_KINDS = frozenset({
     EntityKind.THEOREM, EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
     EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE})
 _THM_RULE_TAG_BYTES = frozenset(int(k) for k in THM_RULE_KINDS)
+
+# Tags whose 32-byte key carries an XOR pseudo-theory prefix + an explicit
+# constituent-theory list: the thm/rule kinds PLUS experiences (tag 8).  Strictly
+# broader than _THM_RULE_TAG_BYTES.  See is_xor_prefixed_key.
+_XOR_PREFIXED_TAG_BYTES = _THM_RULE_TAG_BYTES | frozenset({int(EntityKind.EXPERIENCE)})
 
 # Rule kinds only (THM_RULE_KINDS minus THEOREM).  Their tag bytes are 0x12/0x22/
 # 0x32/0x42; a rule key's Theorem sibling is the same 32 bytes with the tag byte set
@@ -96,6 +103,23 @@ def is_thm_rule_key(key: universal_key) -> bool:
     16-byte prefix is the actual defining theory's hash.
     """
     return len(key) == 32 and key[16] in _THM_RULE_TAG_BYTES
+
+
+def is_xor_prefixed_key(key: universal_key) -> bool:
+    """Whether the key carries an XOR pseudo-theory prefix + a constituent list.
+
+    True for theorem/rule keys AND experience keys (tag 8): every 32-byte key
+    whose 16-byte prefix is the XOR of its constituent theories' hashes (see
+    ``xor_theory_prefix``) rather than a single defining theory's hash, and which
+    stores an explicit constituent list.  Strictly broader than
+    ``is_thm_rule_key``.
+
+    Use THIS for XOR-migration / theory-membership / locability (anything keyed
+    on "has an XOR prefix to recompute / carries constituents").  Use the narrow
+    ``is_thm_rule_key`` only for genuinely thm/rule-specific logic (sibling keys,
+    cross-kind dedup, the legacy pre-XOR purge).
+    """
+    return len(key) == 32 and key[16] in _XOR_PREFIXED_TAG_BYTES
 
 
 def xor_theory_prefix(hashes: 'list[bytes] | Any') -> bytes:
@@ -139,8 +163,8 @@ def destruct_key(key: universal_key) -> Entity:
     kind = EntityKind(key[16])
     payload = key[17:]
     if kind in (EntityKind.THEOREM, EntityKind.INTRODUCTION_RULE, EntityKind.ELIMINATION_RULE,
-                EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE):
-        name = bytes(payload)  # raw 15-byte digest
+                EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE, EntityKind.EXPERIENCE):
+        name = bytes(payload)  # raw 15-byte digest (thm/rule digest, or experience hash)
     else:
         name = payload.decode("utf-8")
     return Entity(theory=theory, kind=kind, name=name)
