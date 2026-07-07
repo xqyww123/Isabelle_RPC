@@ -1056,7 +1056,36 @@ val ret_schema_thm = packPair (
 fun experience_constituents context (pattern_strs : string list)
     : (string * Theory_Hash.hash) list =
   let
-    val (term_pats, _, _) = parse_patterns context (pattern_strs, [])
+    (* Fail-fast: reject if any goal_pattern is unparseable EVEN AFTER
+       parse_patterns' fallbacks (bracket-completion, deschematize wildcarding) —
+       a pattern rescued by approximation counts as parsed. parse_patterns drops a
+       genuine failure (its term list is []) WITHOUT raising, so `null` flags it;
+       reuse its parsed terms. For the message, build the positioned diagnostic here
+       with Inner_Syntax_Error (the failing token marked with 【 】) using
+       `ignored = NONE`: parse_patterns' own warnings say "was ignored" (its query
+       semantics), but here we REJECT the write, not ignore the pattern. *)
+    val ctxt_pat = Proof_Context.set_mode Proof_Context.mode_pattern
+                     (Context.cases Proof_Context.init_global I context)
+    fun parse_error pat_str =
+      let val header = "Could not parse pattern " ^ quote pat_str
+      in case Exn.capture (Syntax.read_term ctxt_pat) (Inner_Syntax_Error.positioned pat_str) of
+           Exn.Res _ => header ^ "."
+         | Exn.Exn e =>
+             let val msgs = case Par_Exn.dest e of
+                              SOME exns => map_filter (fn ERROR m => SOME m | _ => NONE) exns
+                            | NONE => (case e of ERROR m => [m] | _ => [])
+                 fun look id = if id = Inner_Syntax_Error.sentinel_id then SOME pat_str else NONE
+             (* positioned diagnostic when the failure has a locatable token; else
+                just name the pattern (e.g. an error at end of input). *)
+             in case get_first (Inner_Syntax_Error.format {ignored = NONE} look) msgs of
+                  SOME diag => header ^ ":\n" ^ diag
+                | NONE => header ^ "."
+             end
+      end
+    val parsed = map (fn pat => (pat, #1 (parse_patterns context ([pat], [])))) pattern_strs
+    val failed = map_filter (fn (pat, ts) => if null ts then SOME pat else NONE) parsed
+    val _ = if null failed then () else error (String.concatWith "\n\n" (map parse_error failed))
+    val term_pats = maps snd parsed
     val tab : Theory_Hash.hash Symtab.table =
       fold (fn t => fold (fn (n, h) => Symtab.update (n, h))
                          (#2 (Universal_Key.compute_constituents context t)))
