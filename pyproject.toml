@@ -4,12 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "isabelle-rpc"
-version = "0.3.0"
+version = "0.3.1"
 description = "Isabelle RPC Host: call Python functions from Isabelle/ML"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "LGPL-2.1-or-later"
-license-files = ["LICENSE"]
+# The GNU convention for a library under the LGPL 2.1, as glibc and the other GNU
+# libraries use it: COPYING carries the ordinary GPL v2, COPYING.LIB the Lesser one.
+# Both ship, because LGPL-2.1 section 3 lets any recipient convert a copy to the
+# plain GPL, and they cannot exercise that right without its text.
+license-files = ["COPYING", "COPYING.LIB"]
 authors = [
     { name="Qiyuan Xu", email="xqyww123@gmail.com" },
 ]
