@@ -1,13 +1,15 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "Isabelle_RPC_Host"
-version = "0.2.0"
-description = "Isabelle RPC Host"
+name = "isabelle-rpc"
+version = "0.3.0"
+description = "Isabelle RPC Host: call Python functions from Isabelle/ML"
 readme = "README.md"
+requires-python = ">=3.10"
 license = "LGPL-2.1-or-later"
+license-files = ["LICENSE"]
 authors = [
     { name="Qiyuan Xu", email="xqyww123@gmail.com" },
 ]
@@ -15,10 +17,19 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-dependencies = ["msgpack"]
+dependencies = [
+    "lmdb",
+    "msgpack",
+    "platformdirs",
+    "watchdog",
+    "xxhash",
+]
 
 [project.urls]
-"Homepage" = "https://github.com/xqyww123/Premise_Embedding"
+"Homepage" = "https://github.com/xqyww123/Isabelle_RPC"
+
+[project.scripts]
+isabelle-rpc-host = "Isabelle_RPC_Host.launcher:main"
 
 [tool.setuptools.packages.find]
 include = ["Isabelle_RPC_Host", "Isabelle_RPC_Host.*"]

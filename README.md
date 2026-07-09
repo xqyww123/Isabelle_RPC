@@ -1,8 +1,3 @@
----
-name: isabelle-rpc
-description: How to use Isabelle_RPC to call Python functions from Isabelle/ML
----
-
 # Isabelle_RPC: Call Python from Isabelle/ML
 
 Isabelle_RPC lets Isabelle/ML call Python functions via RPC. Communication flows Isabelle → Python (with callbacks). For Python → Isabelle, use Isa-REPL instead.
