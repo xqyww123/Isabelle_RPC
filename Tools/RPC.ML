@@ -178,8 +178,14 @@ fun launch_RPC_host (host,port) =
          in if File.exists path then mk_log_file () else path
         end
       val log_path = mk_log_file ()
+      (* Export the Isabelle home directories so the Python host (and its
+         unicode symbol-table loader) can read them straight from the
+         environment, instead of shelling out to `isabelle getenv` — which is
+         slow and silently yields "" if Isabelle failed to start. *)
       val script = String.concat
-        [ python_cmd
+        [ "export ISABELLE_HOME=", Bash.string (getenv "ISABELLE_HOME"), "\n"
+        , "export ISABELLE_HOME_USER=", Bash.string (getenv "ISABELLE_HOME_USER"), "\n"
+        , python_cmd
         , " -c \"import Isabelle_RPC_Host\nIsabelle_RPC_Host.fork_and_launch__()\" "
         , Bash.string (host ^ ":" ^ port), " "
         , Bash.string (File.platform_path log_path) ]

@@ -59,17 +59,51 @@ def _load_symbols(path, symbols={}, reverse_symbols={}, groups={}):
 
 SYMBOLS_CACHE = None
 
+def _resolve_isabelle_var(name):
+    """Resolve an Isabelle settings variable.
+
+    Prefer the process environment (which the ML launcher exports when it starts
+    the RPC host), and only fall back to querying the `isabelle` executable —
+    which is slow and, more importantly, silently yields "" when Isabelle failed
+    to start or is not on PATH. Returns "" if neither source has a value.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        return os.popen(f"isabelle getenv -b {name}").read().strip()
+    except OSError:
+        return ""
+
 def get_SYMBOLS_AND_REVERSED():
     global SYMBOLS_CACHE
     if SYMBOLS_CACHE is not None:
         return SYMBOLS_CACHE
-    isabelle_home = os.popen("isabelle getenv -b ISABELLE_HOME").read().strip()
-    isabelle_home_user = os.popen("isabelle getenv -b ISABELLE_HOME_USER").read().strip()
+    isabelle_home = _resolve_isabelle_var("ISABELLE_HOME")
+    isabelle_home_user = _resolve_isabelle_var("ISABELLE_HOME_USER")
+    if not isabelle_home:
+        raise RuntimeError(
+            "Cannot locate Isabelle: ISABELLE_HOME is not set in the environment "
+            "and the `isabelle` executable is unavailable (not on PATH, or it "
+            "failed to start). The Isabelle symbol table is required for unicode "
+            "conversion, so refusing to silently fall back to identity.")
     SYMBOLS, REVERSE_SYMBOLS, GROUPS = {}, {}, {}
     for file in [f"{isabelle_home}/etc/symbols", f"{isabelle_home_user}/etc/symbols"]:
         # System file first, user file second: the user file layers on top, so
         # a symbol (or its group) redefined in the user file overrides the system.
         SYMBOLS, REVERSE_SYMBOLS, GROUPS = _load_symbols(file, SYMBOLS, REVERSE_SYMBOLS, GROUPS)
+    if not SYMBOLS:
+        # ISABELLE_HOME resolved to a path, but its etc/symbols was missing,
+        # unreadable, or empty (e.g. a relocated/partial install or a stale
+        # exported value). Loading yielded an empty table, which would make
+        # pretty_unicode silently degrade to identity — the exact regression we
+        # refuse. Note: only the system table (ISABELLE_HOME) is required; a
+        # missing user overlay (ISABELLE_HOME_USER) is fine and does not trip
+        # this, since the system file alone already populates SYMBOLS.
+        raise RuntimeError(
+            f"Isabelle symbol table is empty: no symbols loaded from "
+            f"{isabelle_home}/etc/symbols (file missing, unreadable, or empty). "
+            "Refusing to silently fall back to identity conversion.")
     # Isabelle's identifier "letter" class (Symbol.is_letter_symbol, a hardcoded
     # list in Pure/General/symbol.ML) is a SUBSET of the symbols whose file group
     # is `letter` or `greek` — verified: every ML letter-symbol falls in one of
