@@ -2,41 +2,46 @@ import os
 import re
 
 
-def _load_symbols(path, symbols={}, reverse_symbols={}):
+def _load_symbols(path, symbols={}, reverse_symbols={}, groups={}):
     """
     Load Isabelle symbol file
-    Return: (A dictionary from ASCII symbol to unicode symbol, and the reverse dictionary)
+    Return: (ASCII-symbol -> unicode-symbol dict, the reverse dict, and an
+             ASCII-symbol -> group dict from the `group:` field).
     """
     if not isinstance(path, str):
         raise ValueError("the argument path must be a string")
     if not os.path.exists(path):
-        return symbols, reverse_symbols
+        return symbols, reverse_symbols, groups
     with open(path, 'r', encoding='utf-8') as file:
         for line in file:
             # Every line has a form like `\<odiv>            code: 0x002A38   font: PhiSymbols   group: operator   abbrev: (-:)`
-            # Here we extract the `\<odiv>` part as a string and the `0x002A38` part as a character
-            # Skip comments and empty lines
+            # We extract the `\<odiv>` name, the `0x002A38` code point, and the
+            # `operator` group. Skip comments and empty lines.
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
 
-            # Parse the line to extract symbol and code point
+            # Parse the line to extract symbol, code point, and group
             parts = line.split()
 
             # Extract the symbol name (like \<odiv>)
             symbol = parts[0]
 
-            # Find the code point (format can be either "code: 0x002A38" or "code:0x002A38")
+            # Find the code point and group. Each field can be either
+            # "key: value" (space) or "key:value" (no space).
             code_point = None
+            group = None
             for i, part in enumerate(parts[1:], 1):  # Start index at 1 since we're iterating from parts[1:]
-                if part.startswith('code:'):
-                    # Handle the case where there's no space after "code:"
-                    if ':' in part and len(part) > 5:  # "code:" is 5 chars
+                if code_point is None and part.startswith('code:'):
+                    if len(part) > 5:  # "code:" is 5 chars -> value glued on
                         code_point = part.split(':', 1)[1].strip()
-                    # Otherwise, the hex value should be in the next part
-                    elif i < len(parts) - 1:  # Check if there's a next element
+                    elif i < len(parts) - 1:  # value is the next token
                         code_point = parts[i + 1].strip()
-                    break
+                elif group is None and part.startswith('group:'):
+                    if len(part) > 6:  # "group:" is 6 chars -> value glued on
+                        group = part.split(':', 1)[1].strip()
+                    elif i < len(parts) - 1:  # value is the next token
+                        group = parts[i + 1].strip()
 
             if symbol and code_point:
                 try:
@@ -46,9 +51,11 @@ def _load_symbols(path, symbols={}, reverse_symbols={}):
                     symbols[symbol] = unicode_char
                     reverse_symbols[unicode_char] = symbol
                 except ValueError:
-                    # Skip if code point is invalid
-                    continue
-    return symbols, reverse_symbols
+                    # Skip an invalid code point, but still record the group below
+                    pass
+            if symbol and group:
+                groups[symbol] = group
+    return symbols, reverse_symbols, groups
 
 SYMBOLS_CACHE = None
 
@@ -58,10 +65,20 @@ def get_SYMBOLS_AND_REVERSED():
         return SYMBOLS_CACHE
     isabelle_home = os.popen("isabelle getenv -b ISABELLE_HOME").read().strip()
     isabelle_home_user = os.popen("isabelle getenv -b ISABELLE_HOME_USER").read().strip()
-    SYMBOLS, REVERSE_SYMBOLS = {}, {}
+    SYMBOLS, REVERSE_SYMBOLS, GROUPS = {}, {}, {}
     for file in [f"{isabelle_home}/etc/symbols", f"{isabelle_home_user}/etc/symbols"]:
-        SYMBOLS, REVERSE_SYMBOLS = _load_symbols(file, SYMBOLS, REVERSE_SYMBOLS)
-    SYMBOLS_CACHE = (SYMBOLS, REVERSE_SYMBOLS, str.maketrans(REVERSE_SYMBOLS))
+        # System file first, user file second: the user file layers on top, so
+        # a symbol (or its group) redefined in the user file overrides the system.
+        SYMBOLS, REVERSE_SYMBOLS, GROUPS = _load_symbols(file, SYMBOLS, REVERSE_SYMBOLS, GROUPS)
+    # Isabelle's identifier "letter" class (Symbol.is_letter_symbol, a hardcoded
+    # list in Pure/General/symbol.ML) is a SUBSET of the symbols whose file group
+    # is `letter` or `greek` — verified: every ML letter-symbol falls in one of
+    # these two groups. Using the union is therefore a safe OVER-approximation:
+    # it never rejects a legal identifier symbol (no harmful false positive), and
+    # its only extras (blackboard-bold letters, \<lambda>) merely fail to flag a
+    # would-be proposition, which the ML fact parser catches anyway.
+    LETTER_SYMBOLS = frozenset(s for s, g in GROUPS.items() if g in ('letter', 'greek'))
+    SYMBOLS_CACHE = (SYMBOLS, REVERSE_SYMBOLS, str.maketrans(REVERSE_SYMBOLS), LETTER_SYMBOLS)
     return SYMBOLS_CACHE
 
 def get_SYMBOLS():
@@ -69,6 +86,12 @@ def get_SYMBOLS():
 
 def get_REVERSE_SYMBOLS():
     return get_SYMBOLS_AND_REVERSED()[1]
+
+def get_LETTER_SYMBOLS():
+    """The set of Isabelle symbols (as ASCII `\\<name>` strings) that may occur
+    as a *letter* inside an identifier / fact name — a safe over-approximation
+    of Symbol.is_letter_symbol (the file's `letter` and `greek` groups)."""
+    return get_SYMBOLS_AND_REVERSED()[3]
 
 SUBSUP_TRANS_TABLE = {
     "⇩0": "₀", "⇩1": "₁", "⇩2": "₂", "⇩3": "₃", "⇩4": "₄",
