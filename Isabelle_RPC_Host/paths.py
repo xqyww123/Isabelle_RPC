@@ -88,6 +88,13 @@ def resolve_isabelle_var(name: str) -> str:
     if value:
         return platform_path(value)
     try:
-        return platform_path(os.popen(f"isabelle getenv -b {name}").read().strip())
-    except OSError:
+        # Read the output as bytes and decode it ourselves. `os.popen` would hand back
+        # a text-mode pipe decoded with the locale encoding — the ANSI code page on
+        # Windows — while `isabelle` emits UTF-8, so a non-ASCII user name would come
+        # back as mojibake. That branch is unreachable today only because `isabelle` is
+        # not on the native PATH there; shipping an isabelle.bat would make it live.
+        # `shell=True` stays: on Windows only cmd resolves a .bat.
+        completed = subprocess.run(f"isabelle getenv -b {name}", shell=True, capture_output=True)
+        return platform_path(os.fsdecode(completed.stdout).strip())
+    except (OSError, ValueError):
         return ""

@@ -52,13 +52,18 @@ NON_POSIX_CASES = [
 
 
 def main():
-    print("== non-Windows: platform_path is a no-op ==")
-    assert os.name != "nt", "this section assumes the test host is not Windows"
-    for label, value, _ in CYGDRIVE_CASES:
-        check(f"no-op {label}", platform_path(value), value)
-    for label, value in NON_POSIX_CASES:
-        check(f"no-op {label}", platform_path(value), value)
-        check_idempotent(label, value)
+    # The no-op section only means anything on a POSIX host; skip it on Windows rather
+    # than fail there — Windows is the platform this module exists for, so its own test
+    # had better run there.
+    if os.name != "nt":
+        print("== non-Windows: platform_path is a no-op ==")
+        for label, value, _ in CYGDRIVE_CASES:
+            check(f"no-op {label}", platform_path(value), value)
+        for label, value in NON_POSIX_CASES:
+            check(f"no-op {label}", platform_path(value), value)
+            check_idempotent(label, value)
+    else:
+        print("== non-Windows no-op section: skipped (host is Windows) ==")
 
     print("== simulated Windows: /cygdrive string rule ==")
     real_name = os.name
