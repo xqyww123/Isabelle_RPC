@@ -13,6 +13,8 @@ from typing import Callable, TypeAlias, Any, Awaitable
 import importlib
 import uuid
 
+from .paths import resolve_isabelle_var
+
 _connection_var: contextvars.ContextVar['Connection | None'] = contextvars.ContextVar('_connection_var', default=None)
 
 
@@ -433,20 +435,36 @@ async def _generate_uuids_(arg, connection: Connection):
 
 
 def isabelle_home() -> str:
-    isabelle_home = os.environ.get("ISABELLE_HOME_USER")
-    if not isabelle_home:
-        isabelle_home = os.popen("isabelle getenv -b ISABELLE_HOME_USER").read().strip()
-    if not isabelle_home:
-        sys.stderr.write("Environment variable ISABELLE_HOME_USER is not set. Cannot determine Isabelle home directory.")
+    home = resolve_isabelle_var("ISABELLE_HOME_USER")
+    if not home:
+        sys.stderr.write(
+            "Cannot determine ISABELLE_HOME_USER: it is absent from the environment and "
+            "`isabelle getenv` yielded nothing. (On Windows that fallback can never work: "
+            "`isabelle` is a Cygwin shell script, which cmd cannot execute.)\n")
         sys.exit(1)
-    return isabelle_home
+    return home
 
 def _load_remote_procedures(logger: logging.Logger) -> None:
     home = isabelle_home()
-    rpc_components_path = os.path.join(home, 'etc', 'rpc_components')
-    logger.info(f"Loading RPC components from {rpc_components_path}")
-    if not os.path.exists(rpc_components_path):
+    if not os.path.isdir(home):
+        # The resolved home is not a directory at all — the settings value is broken
+        # (on Windows this is what an unconverted POSIX path looks like). Loading no
+        # components is a real failure here, not a normal state, and staying silent
+        # would defer it to some later "unknown remote procedure" at call time.
+        logger.error(
+            f"ISABELLE_HOME_USER resolved to {home!r}, which is not a directory. "
+            f"No RPC components can be loaded.")
         return
+    rpc_components_path = os.path.join(home, 'etc', 'rpc_components')
+    if not os.path.exists(rpc_components_path):
+        # This file is an *optional* list of out-of-tree components. Its absence is
+        # the normal case: the built-in procedures register themselves via the
+        # @isabelle_remote_procedure decorator at import time, independently of it.
+        logger.debug(
+            f"No optional RPC component list at {rpc_components_path}; "
+            f"{len(Remote_Procedures)} procedures are registered.")
+        return
+    logger.info(f"Loading RPC components from {rpc_components_path}")
     with open(rpc_components_path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
