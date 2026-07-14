@@ -542,9 +542,22 @@ fun build_thm_key (cache : thm_uk_cache option) (context : Context.generic)
 
 (* --- Namespace-based entities (constant, type, class, locale) --- *)
 
+(* Resolve xname to its full internal name.  A name coming from
+   Name_Space.get_names (the enumeration path in Theory_Structure) is ALREADY a
+   full internal name and must be used verbatim: a datatype constructor whose
+   short accesses are all shadowed (e.g. Amortized_Framework.rose_tree.T, whose
+   bare `T` is taken over by a later declaration) is genuinely declared and has a
+   the_entry, yet Name_Space.intern maps it to the hidden marker
+   "??.<name>" — which is NOT declared and has NO the_entry.  So prefer the raw
+   name when it is already a declared full internal name; otherwise intern the
+   (external, possibly short) xname the way an agent-supplied name needs. *)
+fun intern_declared space xname =
+  if Name_Space.declared space xname then xname
+  else Name_Space.intern space xname
+
 fun key_of_ns_entity tag make_ck space context xname =
   let
-    val fq_name = Name_Space.intern space xname
+    val fq_name = intern_declared space xname
     val ns_entry = Name_Space.the_entry space fq_name
     val thy_long_name = default_thy_long_name context (#theory_long_name ns_entry)
     val ck = (make_ck fq_name, thy_long_name)
@@ -563,7 +576,7 @@ fun key_of_theory context xname =
 fun key_of_constant context xname =
   let val space = Consts.space_of (Context.cases Sign.consts_of Proof_Context.consts_of context)
   in
-    if Name_Space.declared space (Name_Space.intern space xname) then
+    if Name_Space.declared space (intern_declared space xname) then
       key_of_ns_entity 0wx01 Constant space context xname
     else
       Context.cases
