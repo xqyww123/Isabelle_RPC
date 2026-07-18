@@ -1,0 +1,167 @@
+schema_version: 1
+
+# isabelle-rpc: ONE package carrying both halves of this repo -- the Isabelle session
+# (Remote_Procedure_Calling + Tools/) and the Python host package (Isabelle_RPC_Host).
+# They are one project: Tools/run_python.ML launches the Python host, so the ML session is
+# useless without it, and splitting them would force the two halves into version lockstep
+# for no gain.
+#
+# `noarch: python`, NOT `noarch: generic` -- and that distinction is load-bearing here.
+# For generic, conda installs every file at its literal path in the artifact
+# (conda/core/path_actions.py: target_short_path = source_path_data.path), so the build
+# machine's `lib/python3.12/site-packages/...` would be baked in and, installed into a
+# python 3.11 environment, would create a `lib/python3.12/` that no interpreter ever looks
+# at: install succeeds, `conda list` shows it, `import Isabelle_RPC_Host` fails.
+# `run: python >=3.10` does not save it, because it PERMITS 3.11.  `noarch: python`
+# relocates site-packages paths at link time, which is exactly the missing piece.
+# Measured, not reasoned: both behaviours were reproduced in throwaway environments.
+#
+# Non-site-packages paths pass through unchanged under `noarch: python`, so the session
+# under share/ and the link hooks in bin/ + Scripts/ work exactly as in the
+# isabelle-performant-ml recipe -- an Isabelle component and a Python distribution do
+# combine cleanly in one package.
+#
+# `pip install` is what generates the .dist-info.  Without it, pip cannot see this package
+# at all and will happily install PyPI's copy over conda's files (and conda will later
+# delete pip's).  With it, `pip install -U isabelle-rpc` reports "Requirement already
+# satisfied" and touches nothing.
+#
+# RELEASE DISCIPLINE, mandatory: the conda version must never fall BEHIND PyPI's.  If PyPI
+# gets ahead, `pip install -U` takes over, its uninstall removes conda's dist-info, and the
+# Isabelle half -- the session under share/, the pre-unlink hook, the etc/components
+# registration -- is orphaned beyond conda's reach (`conda remove` then reports
+# PackagesNotFoundError).  PyPI is at 0.3.0 and this starts at 0.3.1.
+
+context:
+  version: ${{ env.get("ISA_COMPONENT_VERSION", default="0.0.0") }}
+
+source:
+  - path: ../
+
+package:
+  name: isabelle-rpc
+  version: ${{ version }}
+
+build:
+  number: 0
+  noarch: python
+  python:
+    entry_points:
+      # Declared here rather than left to pip: conda generates the wrapper itself for a
+      # noarch: python package, so it lands in bin/ or Scripts/ as the platform requires.
+      - isabelle-rpc-host = Isabelle_RPC_Host.launcher:main
+  script:
+    interpreter: bash
+    content: |
+      set -euo pipefail
+
+      name=isabelle-rpc
+
+      # --- the Python half -------------------------------------------------------
+      # --no-deps: conda resolves the dependencies, pip must not.
+      # --no-build-isolation: the build env already has what pyproject needs, and the
+      # builder has no network.
+      $PYTHON -m pip install . --no-deps --no-build-isolation -vv
+
+      # --- the Isabelle half -----------------------------------------------------
+      dest="$PREFIX/share/$name"
+      mkdir -p "$dest"
+      cp -a "$SRC_DIR/ROOT"                        "$dest/"
+      cp -a "$SRC_DIR/Remote_Procedure_Calling.thy" "$dest/"
+      # Tools/ wholesale rather than the 12 ML_file lines: enumerating them is how an
+      # indirectly-referenced file gets silently dropped.  The one extra file this pulls
+      # in, list_theory_hash_app.ML, belongs to List_Theory_Hash_App.thy which we do not
+      # ship; nothing loads it, so carrying it is harmless and cheaper than being clever.
+      cp -a "$SRC_DIR/Tools"                        "$dest/"
+      find "$dest" -name '*~' -delete            # editor backups must not ship
+
+      # contrib/ exists in the repo but is EMPTY -- deliberately not copied.
+      test -f "$dest/ROOT"
+      test -f "$dest/Tools/run_python.ML"         # the ML->Python bridge; without it the
+                                                  # session cannot launch the host at all
+
+      # --- link hooks ------------------------------------------------------------
+      # Same idiom as isabelle-performant-ml; see that recipe for the full reasoning.
+      # Under noarch: python these still land correctly: rattler-build rewrites $PREFIX/bin
+      # to python-scripts/, and conda maps that to Scripts on Windows and bin elsewhere.
+      #
+      # BOTH sets are written unconditionally.  conda picks by the RUNNING platform and
+      # returns success in silence when the file is absent, so shipping only .sh means the
+      # component installs cleanly on Windows and is never registered.  Do NOT guard with
+      # `case "$target_platform" in win-*)`: for noarch that is `noarch` and never matches.
+      mkdir -p "$PREFIX/bin" "$PREFIX/Scripts"
+
+      for spec in post-link:-u pre-unlink:-x; do
+        action=${spec%%:*}
+        verb=${spec##*:}
+
+        printf '%s\n' \
+          '#!/bin/bash' \
+          "\"\$PREFIX/isa/bin/isabelle\" components $verb \"\$PREFIX/share/$name\" 2>/dev/null \\" \
+          "  || echo \"warning: 'isabelle components $verb $name' failed; the session may be unavailable\"" \
+          'exit 0' \
+          > "$PREFIX/bin/.$name-$action.sh"
+        chmod +x "$PREFIX/bin/.$name-$action.sh"
+
+        # Windows.  CRLF, `exit /b 0` on every path, the path converted to /cygdrive/ form
+        # (Path.check_elem rejects `:` and `\`), and the throwaway `getenv` warm-up without
+        # which the hook silently does nothing -- Cygwin heals on the first isabelle call
+        # but that call's Java classpath is computed before the heal, so the first
+        # invocation is the one that cannot run a Scala tool, and `components` is one.
+        # Verified on windows-latest: isabelle-packaging-ci run 29637825807.
+        printf '%s\r\n' \
+          '@echo off' \
+          "set \"COMP=%PREFIX%\\share\\$name\"" \
+          'set "DL=%COMP:~0,1%"' \
+          'set "REST=%COMP:~2%"' \
+          'set "REST=%REST:\=/%"' \
+          'set "CYG=/cygdrive/%DL%%REST%"' \
+          'call "%PREFIX%\isa\bin\isabelle.bat" getenv -b ISABELLE_HOME >nul 2>&1' \
+          "call \"%PREFIX%\\isa\\bin\\isabelle.bat\" components $verb \"%CYG%\" >nul 2>&1" \
+          'exit /b 0' \
+          > "$PREFIX/Scripts/.$name-$action.bat"
+      done
+
+      grep -qF "share/$name" "$PREFIX/bin/.$name-post-link.sh"
+      test "$dest" = "$PREFIX/share/$name"
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools
+  run:
+    - python >=3.10                      # pyproject: requires-python
+    # Bounded to the Isabelle SERIES this session is written against -- the base package
+    # keeps a constant name at a per-release version, so unbounded would let conda pair
+    # this with a future Isabelle it was never built for.
+    - isabelle >=2025.2,<2025.3
+    # ROOT:1 `session Isabelle_RPC = Performant_Isabelle_ML +`.
+    - isabelle-performant-ml >=0.1.0,<0.2.0
+    # The five pyproject dependencies, under their CONDA names, which differ from PyPI's:
+    #   msgpack      -> msgpack-python   (`msgpack` is not the conda name)
+    #   xxhash       -> python-xxhash    (`xxhash` is the C library, not the binding)
+    # Copying the PyPI list verbatim yields an unsolvable package.
+    - lmdb
+    - msgpack-python
+    - platformdirs
+    - watchdog
+    - python-xxhash
+
+tests:
+  - python:
+      imports:
+        - Isabelle_RPC_Host
+      pip_check: true
+
+about:
+  homepage: https://github.com/xqyww123/Isabelle_RPC
+  summary: "Bidirectional RPC between Isabelle/ML and Python over MessagePack, with callbacks"
+  description: |
+    Isabelle_RPC lets Isabelle/ML call Python over MessagePack and receive callbacks.
+    This package ships both halves of the project: the Isabelle session, registered as an
+    Isabelle component, and the Python host package `Isabelle_RPC_Host` with its
+    `isabelle-rpc-host` entry point.  The ML side launches the Python host, so neither half
+    is useful alone.
+  license: BSD-3-Clause
+  repository: https://github.com/xqyww123/Isabelle_RPC

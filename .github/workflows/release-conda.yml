@@ -1,0 +1,334 @@
+# Release this repo as the conda package `isabelle-rpc` on
+# https://conda.qiyuan.me.
+#
+# This repo owns its own release: bump ./VERSION, push a `v*` tag, done.  The only thing
+# it does not own is the R2 publish step, which is shared with every other Isabelle conda
+# package via a reusable workflow in xqyww123/isabelle-packaging-ci -- so the
+# channel-indexing rules exist in exactly one place.
+#
+# The R2 CREDENTIALS cannot be centralised the same way: a reusable workflow receives the
+# CALLING repo's secrets, and a personal account has no org-level secrets.  They must be
+# set on THIS repo (see the `publish` job below) and are passed explicitly, never with
+# `secrets: inherit`.
+name: release-conda
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and verify only -- do NOT publish to the channel"
+        type: boolean
+        default: false
+      build_number:
+        description: "conda build number - BUMP if republishing the same VERSION with changed content"
+        type: string
+        default: "0"
+  push:
+    tags: ['v*']
+
+# Two releases of THIS package must never overlap.  (Overlap with a DIFFERENT package's
+# release is handled in publish-conda.yml, which can only ever add to the channel.)
+concurrency:
+  group: release-conda
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "Build isabelle-rpc (noarch)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Read the version from ./VERSION"
+        id: ver
+        run: |
+          set -euo pipefail
+          v="$(tr -d '[:space:]' < VERSION)"
+          # conda versions may not contain '-'; catch a bad VERSION here rather than in a
+          # confusing rattler-build error.
+          case "$v" in
+            ''|*-*) echo "::error::VERSION is '$v' -- must be non-empty and contain no '-'"; exit 1 ;;
+          esac
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "building isabelle-rpc $v"
+
+      - name: "The tag must agree with ./VERSION"
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          [ "$tag" = "${{ steps.ver.outputs.version }}" ] || {
+            echo "::error::tag $GITHUB_REF_NAME does not match VERSION=${{ steps.ver.outputs.version }}"
+            exit 1; }
+
+          # `concurrency: release-conda` above holds at most ONE pending run: pushing
+          # several accumulated tags at once (git push --tags) makes each new pending run
+          # supersede the previous one, so every tag but the first and the last is
+          # dropped -- and a superseded run renders grey, not red, so nothing notifies.
+          # Refuse to pass quietly in that state.  Do NOT "fix" it by keying the
+          # concurrency group on github.ref: that would let two releases of this package
+          # publish concurrently, which is exactly what the group exists to prevent.
+          git fetch --tags --force --quiet
+          newest="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          [ "$newest" = "$GITHUB_REF_NAME" ] || {
+            echo "::error::$GITHUB_REF_NAME is not the newest v* tag (newest is $newest)."
+            echo "          Releases are serialised, so pushing several tags at once drops"
+            echo "          the middle ones.  Release one tag at a time, then re-run this."
+            exit 1; }
+
+      - name: Install rattler-build
+        run: |
+          set -euo pipefail
+          # Downloaded directly: installing it through conda goes via a proxy that
+          # intercepts conda-forge and fails TLS.
+          curl -fsSL -o /tmp/rattler-build \
+            https://github.com/prefix-dev/rattler-build/releases/download/v0.69.1/rattler-build-x86_64-unknown-linux-musl
+          chmod +x /tmp/rattler-build
+          /tmp/rattler-build --version
+
+      - name: Build the package
+        env:
+          ISA_COMPONENT_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          /tmp/rattler-build build \
+            --recipe conda/recipe.yaml \
+            --output-dir "$GITHUB_WORKSPACE/out" \
+            --build-num "${{ inputs.build_number || '0' }}" \
+            --no-test
+          echo "===== built ====="
+          find "$GITHUB_WORKSPACE/out" -name '*.conda' -printf '  %10s  %p\n'
+
+      - name: "Sanity: the package really contains the session and BOTH hook sets"
+        run: |
+          set -euo pipefail
+          pkg=$(find "$GITHUB_WORKSPACE/out" -name 'isabelle-rpc-*.conda' | head -1)
+          [ -n "$pkg" ] || { echo "::error::no package was produced"; exit 1; }
+
+          # A .conda is a zip of two zstd tarballs, so listing the zip alone only shows
+          # ['metadata.json', 'pkg-*.tar.zst', 'info-*.tar.zst'] and proves nothing.
+          # Extract the payload and assert the files that actually matter -- above all the
+          # Windows .bat hooks, which no linux smoke test can ever exercise.
+          pip install --quiet zstandard
+          work=$(mktemp -d)
+          # One line on purpose: a heredoc body would have to sit at column 0 to keep
+          # its terminator recognisable, and column 0 ends this YAML block scalar.
+          python3 -c "import sys,zipfile,tarfile,io,zstandard; z=zipfile.ZipFile(sys.argv[1]); b=next(n for n in z.namelist() if n.startswith('pkg-') and n.endswith('.tar.zst')); r=zstandard.ZstdDecompressor().stream_reader(io.BytesIO(z.read(b))); tarfile.open(fileobj=io.BytesIO(r.read())).extractall(sys.argv[2])" "$pkg" "$work"
+          echo "===== payload ====="
+          find "$work" -maxdepth 3 | sort
+
+          # NOTE the layout differs from the noarch:generic component packages.  For
+          # noarch: python, rattler-build emits `site-packages/` with NO lib/pythonX.Y
+          # segment (conda relocates it at link time -- that relocation is the whole
+          # reason this package is not `generic`) and rewrites $PREFIX/bin into
+          # `python-scripts/`, which conda maps to bin/ or Scripts/ per platform.
+          # Asserting bin/ here would fail on a perfectly good package.
+          for want in \
+            share/isabelle-rpc/ROOT \
+            share/isabelle-rpc/Remote_Procedure_Calling.thy \
+            share/isabelle-rpc/Tools/run_python.ML \
+            python-scripts/.isabelle-rpc-post-link.sh \
+            python-scripts/.isabelle-rpc-pre-unlink.sh \
+            python-scripts/.isabelle-rpc-post-link.bat \
+            python-scripts/.isabelle-rpc-pre-unlink.bat \
+            site-packages/Isabelle_RPC_Host/__init__.py ; do
+            [ -e "$work/$want" ] || { echo "::error::missing from the package: $want"; exit 1; }
+            echo "  OK  $want"
+          done
+
+          # The .dist-info is what makes pip stand down.  Without it pip cannot see this
+          # package and will install PyPI's copy over conda's files (and a later
+          # `conda remove` then deletes pip's).  Assert it exists and carries our version.
+          di=$(find "$work/site-packages" -maxdepth 1 -name 'isabelle_rpc-*.dist-info' | head -1)
+          [ -n "$di" ] || { echo "::error::no .dist-info -- pip would not respect this package"; exit 1; }
+          grep -qx "Version: ${{ steps.ver.outputs.version }}" "$di/METADATA" \
+            || { echo "::error::dist-info METADATA version != ${{ steps.ver.outputs.version }}"; exit 1; }
+          echo "  OK  $(basename "$di") (pip will report 'already satisfied')"
+
+          # A baked-in lib/pythonX.Y path is the generic-vs-python defect: it installs
+          # green and then fails to import under any other interpreter.
+          ! find "$work" -path '*lib/python3*' -print -quit | grep -q . \
+            || { echo "::error::payload contains a hardcoded lib/pythonX.Y path"; exit 1; }
+          echo "  OK  no hardcoded python-version path in the payload"
+
+          grep -qF 'share/isabelle-rpc' "$work/python-scripts/.isabelle-rpc-post-link.sh" \
+            || { echo "::error::post-link.sh does not point at the shipped directory"; exit 1; }
+          grep -qU $'\r' "$work/python-scripts/.isabelle-rpc-post-link.bat" \
+            || { echo "::error::post-link.bat is not CRLF"; exit 1; }
+          echo "  OK  hook path literal agrees with the install location; .bat is CRLF"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conda-packages
+          path: out/**/*.conda
+          if-no-files-found: error
+
+  # Install and USE the package BEFORE it is published.  Publishing is the point of no
+  # return: publish-conda.yml uploads first and the channel never deletes, so a package
+  # with a broken post-link would become the newest resolvable version and stay broken
+  # until someone hand-deletes the object from R2.  The base repo already gates its
+  # release this way (build.yml Job F installs from a file:// channel); this is the
+  # component-repo equivalent.
+  verify:
+    name: "Verify before publishing: install + build the session"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: conda-packages
+          path: ${{ runner.temp }}/pkgs
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+
+      - name: Index the freshly built package into a local channel
+        run: |
+          set -euo pipefail
+          conda install -y -n base -c conda-forge conda-index -q
+          CH="$RUNNER_TEMP/local-channel"
+          mkdir -p "$CH/noarch"
+          find "$RUNNER_TEMP/pkgs" -name '*.conda' -exec cp {} "$CH/noarch/" \;
+          # $CONDA/bin/python, not bare `python`: setup-miniconda leaves /usr/bin/python
+          # first on PATH, and conda-index was just installed into the BASE env.
+          # publish-conda.yml already spells it this way; these two must agree.
+          "$CONDA/bin/python" -m conda_index "$CH" --no-zst --no-bz2 --channeldata --channel-name local
+          echo "CH=$CH" >> "$GITHUB_ENV"
+          ls -l "$CH/noarch/"
+
+      - name: "Install it -- local channel for US, conda.qiyuan.me for the base isabelle"
+        run: |
+          set -euo pipefail
+          # Unlike the base repo we have no local `isabelle` artifact to solve against, so
+          # the run dependency comes from the published channel while the package under
+          # test comes from the local one.  --override-channels pins the channel list
+          # exactly; conda-forge IS in it for this package (see below), unlike the
+          # pure-session components which need nothing from it.
+          # conda-forge is REQUIRED here, unlike the pure-session component packages:
+          # this one run-depends on python and five python libraries, none of which live
+          # on conda.qiyuan.me.  Dropping it makes the solve fail outright.
+          conda create -y -n v \
+            -c "file://$CH" -c https://conda.qiyuan.me -c conda-forge --override-channels \
+            isabelle-rpc
+          conda activate v
+          conda list isabelle
+
+      - name: "The post-link registered it"
+        run: |
+          set -euo pipefail
+          conda activate v
+          comp="$(isabelle getenv -b ISABELLE_HOME_USER)/etc/components"
+          cat "$comp"
+          grep -q 'isabelle-rpc' "$comp" \
+            || { echo "::error::post-link did not register the component"; exit 1; }
+
+      - name: "...and the session builds"
+        run: |
+          set -euo pipefail
+          conda activate v
+          isabelle build -v Isabelle_RPC
+
+      - name: "...and the PYTHON half works -- the whole reason this is noarch: python"
+        run: |
+          set -euo pipefail
+          conda activate v
+
+          # The import is the proof that site-packages was RELOCATED into this env's
+          # lib/pythonX.Y.  A noarch: generic build of the same files installs green and
+          # fails exactly here, under any interpreter but the builder's.
+          python -c "import Isabelle_RPC_Host, sys; print('imported from', Isabelle_RPC_Host.__file__); print('python', sys.version.split()[0])"
+
+          # The console script must exist and be on PATH; conda generates it from the
+          # entry_points declared in the recipe, not pip.
+          command -v isabelle-rpc-host
+          echo "  OK  isabelle-rpc-host wrapper present"
+
+          # dist-info landed, so importlib.metadata and pip can both see the package.
+          v=$(python -c "import importlib.metadata as m; print(m.version('isabelle-rpc'))")
+          [ "$v" = "${{ steps.ver.outputs.version }}" ] \
+            || { echo "::error::importlib.metadata reports $v, expected ${{ steps.ver.outputs.version }}"; exit 1; }
+          echo "  OK  importlib.metadata.version('isabelle-rpc') = $v"
+
+          # THE interop property: pip must consider the conda-installed package to satisfy
+          # the requirement and touch nothing.  Without the dist-info, pip would instead
+          # fetch PyPI's copy and overwrite conda-owned files.  PyPI is at 0.3.0 and conda
+          # is ahead, which is the direction the release discipline requires.
+          out=$(pip install isabelle-rpc 2>&1) || { echo "$out"; echo "::error::pip install failed"; exit 1; }
+          echo "$out" | tail -3
+          echo "$out" | grep -qi 'already satisfied' \
+            || { echo "::error::pip did NOT consider the conda package satisfying -- it would"
+                 echo "::error::overwrite conda-owned files.  Check the .dist-info."; exit 1; }
+          echo "  OK  pip reports 'already satisfied' and left the install alone"
+
+  publish:
+    needs: verify
+    # A dry run stops here: build and verify have already proved the package is
+    # sound, and publishing is the irreversible step (bytes go up before the index
+    # is rebuilt, and a published name may never be reused).  `smoke` needs this
+    # job, and a skipped `needs` skips the dependant too, so both drop out.
+    #
+    # Empty on a tag push -- `!''` is true -- so a real release is unaffected.
+    if: ${{ !inputs.dry_run }}
+    uses: xqyww123/isabelle-packaging-ci/.github/workflows/publish-conda.yml@main
+    with:
+      artifact: conda-packages
+      package_name: isabelle-rpc
+    # Passed explicitly, NOT `inherit`.  A reusable workflow receives the CALLING repo's
+    # secrets, and `inherit` silently forwards empty strings when this repo has none --
+    # while also disabling publish-conda.yml's `required: true` checks.  Naming them makes
+    # an unseeded repo fail at workflow-resolution time with the secret's name in the
+    # error.  Seed them with:
+    #   gh secret set CONDA_R2_ACCESS_KEY_ID     -R xqyww123/Isabelle_RPC
+    #   gh secret set CONDA_R2_SECRET_ACCESS_KEY -R xqyww123/Isabelle_RPC
+    secrets:
+      CONDA_R2_ACCESS_KEY_ID:     ${{ secrets.CONDA_R2_ACCESS_KEY_ID }}
+      CONDA_R2_SECRET_ACCESS_KEY: ${{ secrets.CONDA_R2_SECRET_ACCESS_KEY }}
+
+  # The only test that means anything: install it the way a user does, and BUILD the
+  # session against the base `isabelle` package.  That exercises the post-link
+  # registration (`isabelle components -u`) end to end -- if registration silently did
+  # nothing, the session is unknown and this reddens.
+  smoke:
+    name: "Smoke: conda install + isabelle build"
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+
+      - name: "conda install -c https://conda.qiyuan.me isabelle-rpc"
+        run: |
+          set -euo pipefail
+          # --override-channels: the runner's default channels go through a proxy that
+          # breaks TLS for conda-forge; this package needs nothing from there anyway.
+          # conda-forge for the python deps; see the same note in `verify`.
+          conda create -y -n t \
+            -c https://conda.qiyuan.me -c conda-forge --override-channels \
+            isabelle-rpc
+
+      - name: "It registered itself as an Isabelle component"
+        run: |
+          set -euo pipefail
+          conda activate t
+          echo "--- \$ISABELLE_HOME_USER/etc/components ---"
+          comp="$(isabelle getenv -b ISABELLE_HOME_USER)/etc/components"
+          cat "$comp"
+          grep -q 'isabelle-rpc' "$comp" || {
+            echo "::error::post-link did not register the component"; exit 1; }
+
+      - name: "...and the session actually builds"
+        run: |
+          set -euo pipefail
+          conda activate t
+          isabelle build -v Isabelle_RPC
