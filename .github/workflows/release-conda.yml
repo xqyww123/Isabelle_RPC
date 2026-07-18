@@ -37,6 +37,10 @@ jobs:
     name: "Build isabelle-rpc (noarch)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Step outputs do NOT cross jobs: `steps.ver.outputs.version` is empty anywhere but
+    # here, so `verify` must read it through the job output below.
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -251,8 +255,8 @@ jobs:
 
           # dist-info landed, so importlib.metadata and pip can both see the package.
           v=$(python -c "import importlib.metadata as m; print(m.version('isabelle-rpc'))")
-          [ "$v" = "${{ steps.ver.outputs.version }}" ] \
-            || { echo "::error::importlib.metadata reports $v, expected ${{ steps.ver.outputs.version }}"; exit 1; }
+          [ "$v" = "${{ needs.build.outputs.version }}" ] \
+            || { echo "::error::importlib.metadata reports $v, expected ${{ needs.build.outputs.version }}"; exit 1; }
           echo "  OK  importlib.metadata.version('isabelle-rpc') = $v"
 
           # THE interop property: pip must consider the conda-installed package to satisfy
