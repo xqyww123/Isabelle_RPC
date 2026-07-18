@@ -138,11 +138,21 @@ requirements:
     - isabelle >=2025.2,<2025.3
     # ROOT:1 `session Isabelle_RPC = Performant_Isabelle_ML +`.
     - isabelle-performant-ml >=0.1.0,<0.2.0
-    # The five pyproject dependencies, under their CONDA names, which differ from PyPI's:
-    #   msgpack      -> msgpack-python   (`msgpack` is not the conda name)
-    #   xxhash       -> python-xxhash    (`xxhash` is the C library, not the binding)
-    # Copying the PyPI list verbatim yields an unsolvable package.
-    - lmdb
+    # The five pyproject dependencies under their CONDA names, which differ from PyPI's:
+    #   lmdb    -> python-lmdb     (conda `lmdb` is the C library)
+    #   msgpack -> msgpack-python
+    #   xxhash  -> python-xxhash   (conda `xxhash` is the C library)
+    #
+    # Note the failure mode is NOT an unsolvable package -- it is worse.  Naming the C
+    # library resolves fine, installs green, and dies at `import lmdb` at run time.  A
+    # measured instance: the first dry run of this recipe listed `lmdb`, conda installed
+    # LMDB 0.9.35 (the C library), the package installed cleanly, the Isabelle session
+    # built, and only the Python import failed.
+    #
+    # So checking that a name EXISTS on conda-forge is not enough; check what it IS.  The
+    # version is the tell: PyPI lmdb is 1.x while conda `lmdb` is 0.9.x, because they are
+    # different software.  The summary says it outright ("binding" vs "database").
+    - python-lmdb
     - msgpack-python
     - platformdirs
     - watchdog
