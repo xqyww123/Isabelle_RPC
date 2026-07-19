@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "isabelle-rpc"
-version = "0.3.1"
+# Read from ./VERSION rather than written here.  There are two consumers -- the wheel
+# and conda/recipe.yaml, fed by release-conda.yml -- and two literals for one number
+# is how they drift.  It drifted immediately: bumping VERSION to 0.3.2 left this at
+# 0.3.1 and the release job caught it as "dist-info METADATA version != 0.3.2".
+dynamic = ["version"]
 description = "Isabelle RPC Host: call Python functions from Isabelle/ML"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +38,9 @@ dependencies = [
 
 [project.scripts]
 isabelle-rpc-host = "Isabelle_RPC_Host.launcher:main"
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
 
 [tool.setuptools.packages.find]
 include = ["Isabelle_RPC_Host", "Isabelle_RPC_Host.*"]
