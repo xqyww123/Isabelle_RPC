@@ -333,6 +333,30 @@ jobs:
           conda activate t
           conda list isabelle-rpc
 
+      - name: "ISABELLE_RPC_PYTHON points at an interpreter that HAS the host"
+        run: |
+          set -euo pipefail
+          conda activate t
+          # This is the check that belongs at THIS layer.  Without it, the only thing
+          # exercising the interpreter choice is a downstream package's build, which is
+          # how the Windows failure was found in the first place -- by
+          # isabelle-semantic-embedding's win-64 verify, two packages away.
+          #
+          # `command -v python3` runs under Isabelle's BUNDLED CYGWIN bash, so on Windows
+          # it finds a Cygwin interpreter that cannot have our host installed at all
+          # (Cygwin CPython reports cygwin_*_x86_64 tags and cannot install a win_amd64
+          # wheel).  The component's etc/settings is what redirects it.
+          if [ "$RUNNER_OS" = Windows ]; then ISA="$CONDA_PREFIX/Scripts/isabelle.bat"
+          else ISA="$CONDA_PREFIX/bin/isabelle"; fi
+          py=$("$ISA" getenv -b ISABELLE_RPC_PYTHON)
+          echo "ISABELLE_RPC_PYTHON=$py"
+          [ -n "$py" ] || { echo "::error::etc/settings did not set ISABELLE_RPC_PYTHON"; exit 1; }
+          # Ask Isabelle to run it the same way RPC.ML does -- through its own bash, with
+          # the same quoting -- rather than resolving the path in this shell, which is a
+          # different environment and would prove less.
+          "$ISA" env bash -c '"$ISABELLE_RPC_PYTHON" -c "import Isabelle_RPC_Host; print(\"host importable by\", __import__(\"sys\").executable)"' \
+            || { echo "::error::ISABELLE_RPC_PYTHON cannot import Isabelle_RPC_Host"; exit 1; }
+
       - name: "the post-link REGISTERED the component"
         run: |
           set -euo pipefail
