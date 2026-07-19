@@ -100,16 +100,26 @@ end
 fun is_persistent (h : hash) : bool =
   Word8.andb (Word8Vector.sub (h, 0), 0w1) = 0w0
 
-fun get_theory_file_path thy =
+(* Everything internal stays a Path.T.  The conversion to a platform string happens ONLY
+   where a platform string is actually wanted -- the argument of a native call, or the
+   value handed to Python, which does its own file I/O and on Windows needs C:\... .
+
+   This split is the fix for a Windows-only failure: the old version returned
+   File.platform_path and a caller immediately fed that back to Path.explode, which
+   rejects `:` and `\` (Path.check_elem).  On Linux and macOS ML_System.platform_path is
+   the identity, so the round trip was invisible and every platform but one was correct.
+   See auto_sledgehammer/library/cache_file.ML:243 for the same rule stated positively:
+   keep Path.T internally, convert in the argument position, never store the result. *)
+fun get_theory_path thy =
   let
     val thy_name = Context.theory_long_name thy
     val master_dir = Resources.master_directory thy
     val thy_base = Long_Name.base_name thy_name
     val thy_file = Path.ext "thy" (master_dir + Path.basic thy_base)
-    val expanded_path = File.full_path master_dir thy_file
   in
-    File.platform_path expanded_path
+    File.full_path master_dir thy_file
   end
+
 
 fun hash_of thy =
   let
@@ -127,12 +137,30 @@ fun hash_of thy =
           val h =
             if Resources.loaded_theory name then
               let
-                (* Get file path; check existence *)
-                val file_path = \<^try>\<open>get_theory_file_path thy
+                (* Path construction, the existence check and the platform conversion all
+                   sit INSIDE one \<^try>, because on Windows every one of them can raise
+                   and the intended behaviour for all three is the same: degrade to
+                   Cannot_Hash.
+
+                   Do not be tempted to move the conversion out.  File.platform_path ends
+                   in ML_System.platform_path, which raises Fail "Unknown environment
+                   variable CYGWIN_ROOT" for an absolute path not under /cygdrive when
+                   that variable is unset (ml_system.ML:50-52).  File.is_file can raise
+                   the same way, and NOT because the syscall is unguarded -- File.exists
+                   is `can OS.FileSys.fileId o platform_path` (file.ML:92), so `can`
+                   protects the syscall while platform_path runs outside it.
+
+                   The Windows fix proper is that no Path.explode remains: the old code
+                   built a platform string and immediately exploded it back, which
+                   Path.check_elem rejects on `:` and `\`.  File.is_file takes the Path.T
+                   directly.  On Linux and macOS both conversions are the identity, which
+                   is why the round trip was invisible on three platforms out of four. *)
+                val file_path = \<^try>\<open>
+                    let val p = get_theory_path thy in
+                      if File.is_file p then File.platform_path p
+                      else raise Cannot_Hash thy
+                    end
                   catch _ => raise Cannot_Hash thy\<close>
-                val _ =
-                  if File.is_file (Path.explode file_path) then ()
-                  else raise Cannot_Hash thy
 
                 (* Recursively hash parent theories *)
                 val parent_hashes = map hash_of (Theory.parents_of thy)
