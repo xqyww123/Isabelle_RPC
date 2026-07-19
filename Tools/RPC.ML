@@ -156,12 +156,45 @@ fun make_streams_timeout socket =
 
   in (in_stream, out_stream) end
 
-val python_cmd =
-  let val check_python = Isabelle_System.bash_process (Bash.script "command -v python3 || command -v python")
-      val py_path = Process_Result.out check_python |> Library.trim_line
-   in if py_path = "" then "python3"  (* fallback *)
-      else py_path
-  end
+(* Which Python runs the RPC host.
+
+   ISABELLE_RPC_PYTHON wins outright when set.  Isabelle ships no Python and defines no
+   ISABELLE_PYTHON convention -- searched in etc/settings and lib/scripts/getsettings --
+   so this does not shadow anything of its own.  It is the same shape as
+   ISABELLE_VECTOR_SO in Semantic_Embedding: an explicit override first, discovery second.
+
+   The probe below is WRONG BY CONSTRUCTION on Windows and is kept only as the non-conda
+   fallback.  Isabelle_System.bash_process runs under Isabelle's BUNDLED CYGWIN bash, so
+   `command -v python3` resolves against the Cygwin PATH and finds a Cygwin interpreter --
+   which cannot even have our host installed, because Cygwin CPython reports platform tags
+   like cygwin_3_x_x_x86_64 and cannot install a win_amd64 wheel.  The symptom is
+   `ModuleNotFoundError: No module named 'Isabelle_RPC_Host'` at launch.
+
+   LAZY, and that is the load-bearing part.  As a top-level `val` this was evaluated when
+   RPC.ML loaded -- i.e. during `isabelle build Isabelle_RPC` -- and the result was frozen
+   into the session heap.  Isabelle's session digest is content-based, so changing an
+   environment variable does not invalidate that heap: a user who read the error below,
+   set ISABELLE_RPC_PYTHON and re-ran would get the identical failure, from the value
+   baked in at build time.  simd_vector.ML:47 wraps the same getenv-then-discover shape in
+   Lazy.lazy for exactly this reason; an earlier draft of this fix copied its ordering and
+   not its deferral, which is the half that matters.
+
+   Deliberately NOT verified here.  Checking that the candidate can `import
+   Isabelle_RPC_Host` would cost a subprocess on every first use, and it could not repair
+   anything -- there is no second candidate to fall back to.  The check earns its keep
+   only once a launch has already failed, so it lives in launch_RPC_host's error path,
+   where it turns an opaque traceback into an actionable message. *)
+val python_cmd = Lazy.lazy (fn () =>
+  let val configured = getenv "ISABELLE_RPC_PYTHON"
+   in if configured <> "" then configured
+      else
+        let val check_python =
+              Isabelle_System.bash_process (Bash.script "command -v python3 || command -v python")
+            val py_path = Process_Result.out check_python |> Library.trim_line
+         in if py_path = "" then "python3"  (* fallback *)
+            else py_path
+        end
+  end)
 
 val log_dir = (Path.variable "ISABELLE_HOME_USER" + Path.basic "log")
            |> Isabelle_System.make_directory
@@ -185,7 +218,12 @@ fun launch_RPC_host (host,port) =
       val script = String.concat
         [ "export ISABELLE_HOME=", Bash.string (getenv "ISABELLE_HOME"), "\n"
         , "export ISABELLE_HOME_USER=", Bash.string (getenv "ISABELLE_HOME_USER"), "\n"
-        , python_cmd
+        (* Bash.string, like every other interpolated value in this script.  It used to
+           be raw, which was survivable while the value came from `command -v python3`;
+           it is not now that it can be a conda prefix, and those routinely contain a
+           space (C:\Users\John Smith\...).  Unquoted, bash word-splits it and the
+           failure masquerades as a missing module. *)
+        , Bash.string (Lazy.force python_cmd)
         , " -c \"import Isabelle_RPC_Host\nIsabelle_RPC_Host.fork_and_launch__()\" "
         , Bash.string (host ^ ":" ^ port), " "
         , Bash.string (File.platform_path log_path) ]
@@ -195,8 +233,40 @@ fun launch_RPC_host (host,port) =
       val result = Isabelle_System.bash_process (Bash.script script)
    in if Process_Result.ok result
       then ()
-      else error ( "Fail to launch the RPC Host on " ^ host ^ ":" ^ port ^ "\n\n"
-                 ^ Process_Result.err result)
+      else
+        (* Diagnose before reporting.  The bare traceback names a missing module but not
+           WHICH interpreter is missing it, and on Windows the answer is almost always
+           "a Cygwin python that could never have had it" -- see python_cmd above.  One
+           subprocess on a path that has already failed is cheap, and it turns the
+           report into something the reader can act on. *)
+        let
+          val py = Lazy.force python_cmd
+          val probe =
+            Isabelle_System.bash_process (Bash.script
+              (Bash.string py ^ " -c 'import Isabelle_RPC_Host'"))
+          val hint =
+            if Process_Result.ok probe then ""
+            else
+              (* Report what the probe actually SAID.  A non-zero exit means only "that
+                 command failed" -- the interpreter may be missing, not executable, or its
+                 prefix deleted -- and asserting "cannot import" for all of them would be
+                 a confident wrong diagnosis, sending the reader after a wheel that is
+                 installed fine. *)
+              "\n\nThe interpreter used was:\n    " ^ py ^
+              "\nand `import Isabelle_RPC_Host` under it failed with:\n" ^
+              Process_Result.err probe ^
+              (if getenv "ISABELLE_RPC_PYTHON" <> "" then
+                 "\nThat interpreter came from ISABELLE_RPC_PYTHON; point it at one that\
+                 \ has the host installed."
+               else
+                 "\nIt was discovered with `command -v python3`, which Isabelle runs under\
+                 \ its bundled Cygwin bash on Windows -- so it finds a Cygwin interpreter\
+                 \ rather than the native one your wheels are installed into.\
+                 \\nSet ISABELLE_RPC_PYTHON to the right interpreter.")
+        in
+          error ( "Fail to launch the RPC Host on " ^ host ^ ":" ^ port ^ "\n\n"
+                ^ Process_Result.err result ^ hint)
+        end
   end
 
 fun kill_RPC_host (host, port) =

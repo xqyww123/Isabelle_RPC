@@ -80,6 +80,60 @@ build:
       test -f "$dest/Tools/run_python.ML"         # the ML->Python bridge; without it the
                                                   # session cannot launch the host at all
 
+      # --- etc/settings: tell Isabelle WHICH python runs the RPC host ---------------
+      #
+      # Written HERE rather than kept in the source tree, because "$COMPONENT/../.." is
+      # only meaningful for the conda layout ($PREFIX/share/isabelle-rpc); in a developer
+      # checkout the component is the repo itself and that path is nonsense.
+      #
+      # Without this, RPC.ML discovers the interpreter with `command -v python3`, which
+      # Isabelle runs under its BUNDLED CYGWIN bash.  On Windows that finds a Cygwin
+      # python, which cannot even have our host installed -- Cygwin CPython reports
+      # platform tags like cygwin_3_x_x_x86_64 and cannot install a win_amd64 wheel -- so
+      # every RPC call dies with `ModuleNotFoundError: No module named
+      # 'Isabelle_RPC_Host'`.  Measured on Isabelle_Semantic_Embedding release-conda run
+      # 29683400446, win-64, where `isabelle build Semantic_Embedding` failed on it.
+      #
+      # The interpreter is derived from $COMPONENT rather than hardcoded, so the setting
+      # follows the environment the package was linked into -- including a renamed or
+      # relocated env, which a baked-in absolute path would not survive.
+      #
+      # Isabelle's getsettings sources this under `set -o allexport`, so a plain
+      # assignment is exported; no `export` keyword needed (and the surrounding settings
+      # files do not use one).
+      #
+      # LF line endings, written explicitly.  bash SOURCES this file, and a trailing CR
+      # would become part of the value -- exactly the defect that made
+      # isabelle-semantic-embedding 0.1.1 unusable on Windows.
+      # GUARDED on the variable being unset.  A component's etc/settings is sourced AFTER
+      # the user's own $ISABELLE_HOME_USER/etc/settings (getsettings sources
+      # ISABELLE_HOME_USER's component first, and getfunctions reads a component's
+      # settings before its etc/components), and `set -o allexport` also means a value
+      # inherited from the caller's shell is visible here.  Assigning unconditionally
+      # would silently override both -- closing the very escape hatch that RPC.ML's error
+      # message tells the user to reach for, and breaking anyone whose host lives in a
+      # different interpreter from the env's own (a mixed pip/conda install).
+      mkdir -p "$dest/etc"
+      printf '%s\n' \
+        '# -*- shell-script -*- :mode=shellscript:' \
+        '# Which interpreter runs the Isabelle_RPC Python host.  See conda/recipe.yaml.' \
+        '# Only a DEFAULT: an explicit ISABELLE_RPC_PYTHON always wins.' \
+        'if [ -z "$ISABELLE_RPC_PYTHON" ]; then' \
+        '  ISABELLE_RPC_CONDA_PREFIX="$(cd "$COMPONENT/../.." >/dev/null 2>&1 && pwd)"' \
+        '  if [ -x "$ISABELLE_RPC_CONDA_PREFIX/python.exe" ]; then' \
+        '    ISABELLE_RPC_PYTHON="$ISABELLE_RPC_CONDA_PREFIX/python.exe"' \
+        '  elif [ -x "$ISABELLE_RPC_CONDA_PREFIX/bin/python" ]; then' \
+        '    ISABELLE_RPC_PYTHON="$ISABELLE_RPC_CONDA_PREFIX/bin/python"' \
+        '  fi' \
+        '  unset ISABELLE_RPC_CONDA_PREFIX' \
+        'fi' \
+        > "$dest/etc/settings"
+
+      test -f "$dest/etc/settings"
+      # The file bash will source must not carry a CR, on any build host.
+      ! grep -q $'\r' "$dest/etc/settings" \
+        || { echo "::error::etc/settings contains a carriage return"; exit 1; }
+
       # --- link hooks ------------------------------------------------------------
       # Same idiom as isabelle-performant-ml; see that recipe for the full reasoning.
       # Under noarch: python these still land correctly: rattler-build rewrites $PREFIX/bin
