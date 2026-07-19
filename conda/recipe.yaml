@@ -30,7 +30,7 @@ schema_version: 1
 # gets ahead, `pip install -U` takes over, its uninstall removes conda's dist-info, and the
 # Isabelle half -- the session under share/, the pre-unlink hook, the etc/components
 # registration -- is orphaned beyond conda's reach (`conda remove` then reports
-# PackagesNotFoundError).  PyPI is at 0.3.0 and this starts at 0.3.1.
+# PackagesNotFoundError).  PyPI stopped at 0.3.0; the conda line continued from 0.3.1.
 
 context:
   version: ${{ env.get("ISA_COMPONENT_VERSION", default="0.0.0") }}

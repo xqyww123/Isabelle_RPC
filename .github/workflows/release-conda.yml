@@ -261,8 +261,8 @@ jobs:
 
           # THE interop property: pip must consider the conda-installed package to satisfy
           # the requirement and touch nothing.  Without the dist-info, pip would instead
-          # fetch PyPI's copy and overwrite conda-owned files.  PyPI is at 0.3.0 and conda
-          # is ahead, which is the direction the release discipline requires.
+          # fetch PyPI's copy and overwrite conda-owned files.  PyPI stopped at 0.3.0 and
+          # conda is ahead, which is the direction the release discipline requires.
           out=$(pip install isabelle-rpc 2>&1) || { echo "$out"; echo "::error::pip install failed"; exit 1; }
           echo "$out" | tail -3
           echo "$out" | grep -qi 'already satisfied' \

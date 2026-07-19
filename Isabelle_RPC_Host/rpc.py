@@ -501,6 +501,213 @@ def launch_server_(addr: str, logger: logging.Logger, debugging: bool = False) -
     with Server(addr, logger, debugging) as server:
         asyncio.run(server.run_server())
 
+def _daemon_body__(addr: str, log_file: str) -> None:
+    """The daemon proper: record the PID, build the logger, serve forever.
+
+    Runs in the ALREADY-DETACHED process, on every platform.  Extracted from
+    fork_and_launch__ -- unchanged apart from the PID line, which gained its namespace
+    tag in the same move -- so the POSIX grandchild and the Windows spawned child run the
+    same code, and in particular so the recorded PID is the server's own on both, never
+    the launcher's.
+    """
+    try:
+        # Write PID file (fixed name per address, so each launch overwrites the previous)
+        host_part, port_part = addr.rsplit(":", 1)
+        pid_file = os.path.join(os.path.dirname(log_file), f"RPC_{host_part}_{port_part}.pid")
+        # "<namespace> <pid>", not a bare pid.  The reader (RPC.ML kill_RPC_host) has to
+        # pick between `kill` and `taskkill`, and that choice is decided by WHICH PYTHON
+        # wrote this line, not by which platform Isabelle runs on.  A Cygwin python under
+        # Windows takes the POSIX branch below and records a CYGWIN pid -- a small integer
+        # from Cygwin's own allocator that names no Win32 process; `taskkill /F` on it
+        # would force-terminate whatever unrelated native process happens to hold that
+        # number.  os.name is exactly the discriminator, because it is also what selected
+        # the branch.  Written by the daemon itself, so the two can never disagree.
+        #
+        # KNOWN, NOT FIXED HERE: in that same Cygwin-python-under-Windows configuration
+        # the file also lands in the wrong DIRECTORY.  log_file is a native path (RPC.ML
+        # passes File.platform_path), and posixpath.dirname("C:\\...\\RPC_x") is "", so
+        # the join above writes into the cwd and RPC.ML's pid_file_path never finds it.
+        # Pre-existing, and that configuration is already out of contract
+        # (ISABELLE_RPC_PYTHON is meant to name a NATIVE interpreter); the only
+        # consequence is that kill_RPC_host becomes a no-op, and an orphaned host is an
+        # accepted outcome here.
+        with open(pid_file, "w") as f:
+            f.write(f"{os.name} {os.getpid()}")
+
+        logger = mk_logger_(addr, log_file)
+        debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
+        launch_server_(addr, logger, debugging)
+    except Exception:
+        import traceback
+        msg = traceback.format_exc()
+        try:
+            logger.critical("RPC server failed to start", exc_info=True)  # type: ignore[possibly-undefined]
+        except Exception:
+            with open(log_file, "a") as f:
+                f.write(f"CRITICAL: RPC server failed to start\n{msg}")
+        os._exit(1)
+
+
+def _spawn_detached_nt__(addr: str, log_file: str) -> None:
+    """Windows counterpart of the double fork: re-spawn self detached, then return.
+
+    Windows has no fork().  DETACHED_PROCESS is what setsid() buys: the child gets no
+    console, so it belongs to no console process group and outlives the launcher.
+    Windows has no parent-death propagation either, so it also outlives bash, the
+    Isabelle build and the JVM.
+
+    THE DEVNULL HANDLES ARE NOT COSMETIC -- they are why this cannot be a plain Popen.
+    The caller is Isabelle's bundled Cygwin bash, and Isabelle/Scala reads bash's
+    stdout/stderr pipes TO EOF *after* waitFor() returns (Pure/System/bash.scala,
+    `out_lines.join`).  A child holding those write ends means EOF never arrives and
+    Isabelle_System.bash_process blocks forever: bash has exited, the build hangs, and
+    nothing anywhere reports an error.  close_fds=True (the default since 3.7, spelled
+    out for the reader) keeps every other handle from leaking for the same reason.
+    """
+    import subprocess
+
+    if not sys.executable:
+        # `python -c` always has this; an embedded interpreter might not, and spawning
+        # the wrong binary would be worse than saying so.
+        sys.stderr.write(
+            "Cannot launch the RPC host: sys.executable is empty, so this process "
+            "cannot re-spawn itself as a detached daemon.\n")
+        sys.exit(1)
+
+    # argv again, so the child sees the same shape fork_and_launch__ is handed: one
+    # convention, not two.
+    #
+    # Drop the cwd entry BEFORE the import.  Under -c the interpreter puts the cwd at the
+    # front of sys.path, and cwd= below makes that the LOG directory -- an entry the
+    # parent never had, ranked above everything, in a process that does lazy imports for
+    # hours (the crash handler's `import traceback` among them).  A stray .py there would
+    # shadow a stdlib module for the daemon only.  Dropping it leaves the legitimate
+    # resolution to the PYTHONPATH set below, which reproduces the parent's own order.
+    # (Python 3.11's -P flag does exactly this, but pyproject.toml floors at 3.10.)
+    #
+    # GUARDED, not a bare pop(0).  PYTHONSAFEPATH is inherited through env= below, and
+    # when it is set the interpreter never prepends the cwd entry at all -- sys.path[0]
+    # is then the FIRST PYTHONPATH entry, i.e. the launcher cwd this code injects to make
+    # the import work.  An unconditional pop would delete exactly that and reintroduce the
+    # import failure, in its worst shape: the parent still exits 0, so RPC.ML takes its
+    # ok-branch, prints no diagnostic, and the user gets connect_retry's bare timeout.
+    #
+    # The test is `== ""` and nothing else.  "" is the literal signature of the entry -c
+    # injects -- measured on CPython 3.10, 3.12 and 3.13, and unchanged by 3.11's
+    # absolutisation, which covered the script-dir and -m cases but not -c.  Comparing
+    # against os.getcwd() instead would be strictly worse on both platforms: it collapses
+    # when the launcher's cwd IS the log dir (popping the injected entry -- the very
+    # failure this guard exists to prevent), and on Windows the child's os.getcwd() is
+    # canonicalised (drive-letter case, trailing separator, 8.3 vs long form) so the
+    # string comparison is unreliable anyway.
+    bootstrap = (
+        "import sys\n"
+        "if sys.path and sys.path[0] == '': sys.path.pop(0)\n"
+        "from Isabelle_RPC_Host.rpc import _daemon_body__\n"
+        "_daemon_body__(sys.argv[1], sys.argv[2])\n")
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", bootstrap, addr, log_file],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            # stderr to the LOG FILE, not DEVNULL.  If the two-line bootstrap fails before
+            # reaching _daemon_body__ -- a bad interpreter shim, a DLL/venv problem, an
+            # import error -- DEVNULL would leave no trace anywhere: no log, no PID file,
+            # and the parent still returns 0, so RPC.ML takes its ok-branch and never runs
+            # the "which interpreter" diagnostic.  The user would see only connect_retry's
+            # bare timeout 20-40 s later.  POSIX cannot have this blind spot because the
+            # daemon IS the same process and its except handler always has the log file.
+            # A regular file handle is not the bash pipe, so the EOF contract above is
+            # equally satisfied.
+            stderr=open(log_file, "a"),
+            close_fds=True,
+            # DETACHED_PROCESS: no console at all, hence also no window -- which is why
+            # CREATE_NO_WINDOW is absent.  (It would merely be IGNORED alongside
+            # DETACHED_PROCESS, not an error; the flag MSDN documents as conflicting is
+            # CREATE_NEW_CONSOLE.  An earlier draft of this comment claimed an
+            # ERROR_INVALID_PARAMETER that MSDN does not describe.)
+            # CREATE_NEW_PROCESS_GROUP: makes "group root, not a member of the launcher's
+            # group" explicit; a no-op given DETACHED_PROCESS, but free.
+            creationflags=(subprocess.DETACHED_PROCESS |          # type: ignore[attr-defined]
+                           subprocess.CREATE_NEW_PROCESS_GROUP),  # type: ignore[attr-defined]
+            # PYTHONPATH, because cwd= below moves the child.  Under `-c`, sys.path[0] is
+            # "" -- the CWD, re-resolved at EVERY import rather than fixed at startup, so
+            # the hazard is dynamic.  (3.11 absolutised the script-dir and -m cases; `-c`
+            # was not among them.  Measured on CPython 3.12.3.)  The child's cwd is not
+            # the launcher's.
+            # So a layout that resolves this package via the launcher's cwd (an editable
+            # checkout, say) imports fine in the parent and fails in the child.  That
+            # failure is the worst-shaped one available: the parent still exits 0, so
+            # RPC.ML takes its ok-branch and never runs the "which interpreter"
+            # diagnostic, leaving only connect_retry's bare timeout 20-40 s later.  POSIX
+            # does not have this failure -- it chdir("/")s too, but this package was
+            # already imported before the fork, so it is never re-resolved.  (Later
+            # function-level imports there do re-resolve; they hit the stdlib.)
+            #
+            # PREPEND THE CWD ONLY.  Re-injecting all of sys.path would be actively worse:
+            # PYTHONPATH is placed ahead of the interpreter's computed stdlib, so pushing
+            # site-packages through it reorders the child's sys.path relative to the
+            # parent's -- manufacturing the divergence this is meant to prevent -- and
+            # sys.path also holds non-directory entries (PEP 660 __editable__ path-hook
+            # keys) that are meaningless as PYTHONPATH.  Everything else the parent
+            # resolved is reachable from the inherited environment already.
+            #
+            # cwd= does not merely invalidate the launcher's cwd entry, it SUBSTITUTES the
+            # log dir for it -- which is why the bootstrap pops sys.path[0] and this
+            # strips empty entries; between them the log dir reaches sys.path by neither
+            # route.
+            # EVERY INHERITED ENTRY IS ABSOLUTISED AGAINST THE LAUNCHER, and that is not
+            # tidiness.  Python resolves a relative PYTHONPATH entry against the CWD, and
+            # the child's CWD is the log dir.  Two shapes do it:
+            #   ""  -- from a leading/trailing/doubled os.pathsep, which `export
+            #          PYTHONPATH=:$PYTHONPATH` produces and which is common in the wild
+            #   "." / "src" / "../lib" -- ordinary relative entries; PYTHONPATH=. is
+            #          idiomatic
+            # Either would put the log dir back on sys.path and silently undo the guarded
+            # pop above.  abspath() resolves them against the LAUNCHER's cwd, which is
+            # what the parent meant by them, and the `if p` drops the empty ones (abspath
+            # would otherwise turn "" into the cwd rather than removing it).  Note a
+            # truthiness test on the whole variable cannot see either shape -- the empty
+            # entry lives INSIDE the value.
+            #
+            # ABSOLUTE ENTRIES ARE PASSED THROUGH UNTOUCHED, deliberately.  abspath is
+            # normpath(join(cwd, p)), and for an already-absolute entry the join is a
+            # no-op while normpath still collapses ".." LEXICALLY -- which is not how the
+            # OS resolves ".." after a symlink.  `/opt/venvs/current/../shared` with
+            # `current` a symlink into another tree would silently name a different
+            # directory in the child than the parent imported from.  Only relative
+            # entries need rewriting; absolute ones already mean the same thing in both
+            # processes.
+            #
+            # (One shape this cannot express: a cwd containing os.pathsep -- legal in a
+            # Windows filename -- would split into junk entries.  PYTHONPATH has no
+            # escaping, so there is no fix at this layer.)
+            env={**os.environ,
+                 "PYTHONPATH": os.pathsep.join(
+                     [os.getcwd()]
+                     + [p if os.path.isabs(p) else os.path.abspath(p)
+                        for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+                        if p])},
+            # POSIX chdir("/")s so the daemon pins nothing.  On Windows a cwd holds a
+            # directory HANDLE that blocks deletion or rename, so pinning the build tree
+            # would be worse than on POSIX; the log directory is created by RPC.ML with
+            # Isabelle_System.make_directory and is long-lived.  ("/" is not a usable
+            # answer on Windows.)
+            cwd=os.path.dirname(log_file) or None,
+        )
+    except OSError as e:
+        # The parent CAN report this one, and must: it is the same class of failure the
+        # POSIX branch reports from a failed os.fork, and RPC.ML turns a non-zero exit
+        # into its "which interpreter" diagnostic.
+        sys.stderr.write(f"Failed to spawn the detached RPC host: {e}\n")
+        sys.exit(1)
+
+    # Return 0 immediately.  Like the POSIX parent's os._exit(0), this claims only that
+    # the handoff succeeded -- whether the server actually binds is established by
+    # RPC.ML's connect_retry poll, identically on both platforms.
+
+
 def fork_and_launch__():
     """
     Fork a daemon process to launch the server and exit the original process.
@@ -509,6 +716,15 @@ def fork_and_launch__():
         sys.stderr.write("fork_and_launch__ is an internal function and should not be called directly")
     addr = sys.argv[1]
     log_file = sys.argv[2]
+
+    # Windows has no fork().  Branch on os.name -- the convention this package already
+    # uses (paths.py:31,78).  Not `hasattr(os, "fork")`, which names the missing
+    # capability but lies about the replacement: the fallback needs the Win32 process
+    # API, so any other fork-less target would be routed into a branch that cannot serve
+    # it either.
+    if os.name == "nt":
+        _spawn_detached_nt__(addr, log_file)
+        return
 
     # First fork
     try:
@@ -552,22 +768,4 @@ def fork_and_launch__():
     so.close()
     se.close()
 
-    try:
-        # Write PID file (fixed name per address, so each launch overwrites the previous)
-        host_part, port_part = addr.rsplit(":", 1)
-        pid_file = os.path.join(os.path.dirname(log_file), f"RPC_{host_part}_{port_part}.pid")
-        with open(pid_file, "w") as f:
-            f.write(str(os.getpid()))
-
-        logger = mk_logger_(addr, log_file)
-        debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
-        launch_server_(addr, logger, debugging)
-    except Exception:
-        import traceback
-        msg = traceback.format_exc()
-        try:
-            logger.critical("RPC server failed to start", exc_info=True)  # type: ignore[possibly-undefined]
-        except Exception:
-            with open(log_file, "a") as f:
-                f.write(f"CRITICAL: RPC server failed to start\n{msg}")
-        os._exit(1)
+    _daemon_body__(addr, log_file)

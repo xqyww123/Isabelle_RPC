@@ -269,13 +269,82 @@ fun launch_RPC_host (host,port) =
         end
   end
 
+(* Best-effort teardown after a launch that never came up.
+
+   On Windows the PID in that file is a NATIVE Win32 pid, written by a process spawned
+   with DETACHED_PROCESS -- it has no Cygwin pid at all.  Cygwin's `kill` resolves Cygwin
+   pids, so it reports "no such process" and the orphaned host survives, holding the port
+   that the next launch will try to bind.  `taskkill /F /PID` is the native equivalent.
+
+   SINGLE slashes.  `//F` is the MSYS2 (Git-Bash) escape, needed there because MSYS2
+   rewrites an argument shaped like `/F` into a Windows path when exec'ing a native .exe.
+   Isabelle bundles genuine CYGWIN, which passes argv through verbatim (bash_process
+   ultimately exec's plain "bash" off the settings PATH -- bash.scala:140-143 -- and
+   getsettings:26 tests OSTYPE = cygwin), so `//F` would arrive literally and taskkill
+   would reject it -- silently, since the call is wrapped.  An earlier draft of this
+   comment conflated the two runtimes, and that conflation was the bug.  (It also cited
+   bash.scala:74 `local_bash()`, which is the SSH branch, not this one.)
+
+   Absolute path, not a bare name: bash runs NON-login and NON-interactive with Isabelle's
+   settings PATH, so /etc/profile never runs and System32 need not be on it.  `cygpath -S`
+   asks Cygwin for the System32 dir rather than deriving it from an environment
+   variable.  $SYSTEMROOT would also work today, but only via a four-hop accident: Windows
+   sets `SystemRoot`, and it is Cygwin's native->posix env conversion (during
+   Environment.java's `bash -l isabelle getenv -d`) that upper-cases it into the settings
+   map that Bash.process later replays.  Bash is case-sensitive, so if any hop changed,
+   `$SYSTEMROOT` would expand to empty and the command would silently become
+   "/System32/taskkill.exe".  cygpath depends on none of that, and returns a posix path,
+   so the mixed-separator question does not arise either.  Its presence is guaranteed:
+   Isabelle's own startup already relies on cygpath throughout the Cygwin branch that this
+   command likewise only runs in (getsettings:26-42 -- :38-39 derive CYGWIN_ROOT and
+   ISABELLE_ROOT through it, :30 and :41 likewise).  That establishes the BINARY's
+   presence, not `-S`'s behaviour: Isabelle never uses -S, so its output form is not
+   attested anywhere in this tree.  Hence `-u` explicitly -- posix output is what the
+   concatenation below assumes, and every other Isabelle call site spells -u out too
+   (getfunctions:18, getsettings:30).  If -S already defaults to posix, -u is redundant
+   and harmless; if it does not, -u is what makes this correct.  `tr -d '\r'` for the same reason getfunctions:18 does it on
+   cygpath's posix-form output -- `$(...)` strips a trailing newline but not a CR, which
+   would land in the MIDDLE of the word here.
+
+   Every failure mode of this branch degrades safely: if cygpath is missing or errors the
+   word becomes "/taskkill.exe", which kills nothing rather than the wrong thing, the pid
+   file is still removed, and the caller is about to `error` regardless.  An orphaned host
+   is the accepted outcome.
+
+   WHICH killer to use is read from the file, NOT inferred from ML_System.platform_is_windows.
+   The pid's namespace is fixed by the python that wrote it: a CYGWIN python under Windows
+   takes rpc.py's POSIX branch and records a Cygwin pid, which names no Win32 process, so
+   inferring `taskkill` from the Isabelle platform would force-kill an unrelated native
+   process holding that number -- silently, since this is all best-effort.  Since
+   ISABELLE_RPC_PYTHON lets the user choose that interpreter, the inference is not sound.
+
+   A bare pid with no namespace is the pre-0.3.4 format, and it is unambiguously POSIX:
+   the old code wrote the file only after os.fork(), which on Windows raised
+   AttributeError before ever getting there.  So the legacy branch is `kill`, by
+   derivation rather than by default.
+
+   Still best-effort on both platforms: every step is wrapped, because this runs on a path
+   that is about to `error` anyway and must not replace that message with its own. *)
 fun kill_RPC_host (host, port) =
   let val path = pid_file_path (host, port)
    in if File.exists path
       then
-        let val pid = File.read path |> Library.trim_line
+        let val cmd =
+              case File.read path |> String.tokens Char.isSpace of
+                ["nt", pid] =>
+                  SOME ("\"$(cygpath -u -S | tr -d '\\r')/taskkill.exe\" /F /PID " ^ Bash.string pid)
+              | ["posix", pid] => SOME ("kill " ^ Bash.string pid)
+              | [pid] => SOME ("kill " ^ Bash.string pid)  (* legacy: see above *)
+              | _ => NONE  (* unrecognised shape: kill nothing rather than guess.
+                              This is NOT a truncation guard.  A file cut to "nt" matches
+                              [pid] and runs `kill nt`, which bash rejects -- harmless.
+                              But "nt 12" matches the nt branch cleanly and would taskkill
+                              PID 12, an unrelated native process: NOT bounded by the
+                              accepted orphaned-host outcome.  Vanishingly unlikely (one
+                              buffered ~10-byte write), and not worth a checksum, but it
+                              is a real hole rather than a benign one. *)
             val _ = try (fn () =>
-              Isabelle_System.bash_process (Bash.script ("kill " ^ Bash.string pid))) ()
+              Option.map (Isabelle_System.bash_process o Bash.script) cmd) ()
             val _ = try File.rm path
          in () end
       else ()
