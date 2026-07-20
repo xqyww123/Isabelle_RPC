@@ -50,6 +50,25 @@ class Connection:
         """Return the Connection for the current task, or None if not in an RPC handler."""
         return _connection_var.get()
 
+    @staticmethod
+    def set_current(connection: 'Connection | None') -> None:
+        """Bind *connection* as the ambient Connection for the current context.
+
+        `handle_client` already does this once per socket, which is enough while
+        everything runs as descendants of that task. It is NOT enough across an
+        ASGI boundary: uvicorn starts each request in a fresh, empty
+        contextvars.Context (unconditionally in 0.39-0.4x; opt-in via
+        `reset_contextvars` from 0.51, default off), as a workaround for
+        cpython#140947 -- so `current()` returns None inside a request handler
+        however the outer binding was made. A server embedding one must re-bind
+        at its request entry point; AoA does exactly this alongside its own
+        `_session_var` (IsaMini/AoA/model.py bind_session_context).
+
+        No token is returned and nothing is reset: the context this writes into
+        is per-request and dies with it.
+        """
+        _connection_var.set(connection)
+
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                  client_addr: tuple[str, int], server: 'Server'):
         self.reader = reader
@@ -434,7 +453,7 @@ async def _generate_uuids_(arg, connection: Connection):
     return [uuid.uuid4().bytes for _ in range(count)]
 
 
-def isabelle_home() -> str:
+def isabelle_home_user() -> str:
     home = resolve_isabelle_var("ISABELLE_HOME_USER")
     if not home:
         sys.stderr.write(
@@ -445,7 +464,7 @@ def isabelle_home() -> str:
     return home
 
 def _load_remote_procedures(logger: logging.Logger) -> None:
-    home = isabelle_home()
+    home = isabelle_home_user()
     if not os.path.isdir(home):
         # The resolved home is not a directory at all — the settings value is broken
         # (on Windows this is what an unconverted POSIX path looks like). Loading no
