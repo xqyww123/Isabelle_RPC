@@ -14,7 +14,6 @@ ML_file \<open>Tools/inner_syntax_error.ML\<close>
 ML_file \<open>Tools/context.ML\<close>
 ML_file \<open>Tools/run_python.ML\<close>
 ML_file \<open>Tools/tracing.ML\<close>
-ML_file \<open>Tools/getenv.ML\<close>
 ML_file \<open>Tools/dialogue.ML\<close>
 
 

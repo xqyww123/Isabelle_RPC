@@ -84,9 +84,6 @@ class Connection:
         self._user_channel: asyncio.Queue[tuple[int, Any]] = asyncio.Queue()  # (tag, payload)
         self._reader_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()  # serialize writes to the socket
-        # Set once the connected Isabelle proves too old to have the "getenv"
-        # callback (pre-Tools/getenv.ML heap); getenv() then skips the wire.
-        self._getenv_unavailable = False
 
     async def _feed_and_unpack(self) -> Any:
         """Read bytes from StreamReader, feed to Unpacker, return next msgpack object."""
@@ -201,33 +198,6 @@ class Connection:
     async def config_lookup(self, name: str, ctxt: Any = None) -> Any:
         """Look up an Isabelle config option by name via the Config.lookup callback."""
         return await self.callback("Config.lookup", (ctxt, name))
-
-    async def getenv(self, name: str, default: str | None = None) -> str | None:
-        """Read a settings/environment variable, preferring the connected Isabelle.
-
-        This server is a long-lived daemon: its own os.environ is frozen at
-        server start, while the Isabelle process re-sources etc/settings at
-        every Isabelle restart. So the Isabelle-side value is authoritative
-        for user configuration. ML getenv yields "" for unset variables;
-        that is treated as unset here (fall back to this process's env).
-        NOTE: the ML side reads its WHOLE process environment — settings
-        variables and everything the launching shell exported alike.
-        """
-        val = ""
-        if not self._getenv_unavailable:
-            try:
-                val = await self.callback("getenv", name)
-            except IsabelleError as e:
-                # Version skew: the connected Isabelle predates Tools/getenv.ML.
-                # Remember per connection and degrade to the pre-getenv
-                # behaviour, once, instead of warning per variable per call.
-                self._getenv_unavailable = True
-                self.server.logger.warning(
-                    "getenv callback unavailable (%s); falling back to this "
-                    "process's env for the rest of this connection", e)
-        if val:
-            return val
-        return os.environ.get(name, default)
 
     # -- Isabelle logging via "log" callback ----------------------------------
 
