@@ -58,6 +58,12 @@ Concurrency invariants:
 Callback lookup is **local-first**: the command's own `callback` list shadows a global of the
 same name (`lookup_callback`, `RPC.ML:446-449`).
 
+Standing **global** callbacks (servable from any command's dispatch loop): `log`
+(tracing.ML), `dialogue` (dialogue.ML), `getenv` (getenv.ML: string name → string value of
+the Isabelle **process** environment — settings variables and shell exports alike; `""`
+means unset, and `Connection.getenv` treats it as such, falling back to the host's own
+`os.environ`). `Config.lookup` is NOT among them — it is per-command (see SKILL.md gotchas).
+
 ## Errors
 
 | Direction | Carrier |

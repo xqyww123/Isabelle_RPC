@@ -131,6 +131,7 @@ Callbacks may be in flight concurrently — each gets its own channel tag.
 | `await conn.callback(name, arg)` | any registered callback |
 | `await conn.dialogue(question, options) -> str` | `dialogue` (global) — **blocks on a PIDE click; hangs headless** |
 | `await conn.config_lookup(name, ctxt=None)` | `Config.lookup` (**per-command only**) |
+| `await conn.getenv(name, default=None)` | `getenv` (global) — Isabelle-process env first (`""` = unset), then host `os.environ`; degrades to host env against pre-getenv heaps |
 | `Connection.current()` | the current task's connection, or `None` |
 
 `conn.server.logger` writes to the host log file, not to Isabelle.
