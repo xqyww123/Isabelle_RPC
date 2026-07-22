@@ -223,33 +223,6 @@ fun parse_addr (h,p) =
     in INetSock.toAddr (NetHostDB.addr host, port)
    end
 
-fun connect_retry addr remaining =
-  if remaining <= 0
-  then error (String.concat
-           ["Fail to connect to RPC host on ", #1 addr, ":", #2 addr,
-            " after launch (timed out)."])
-  else
-    let val sock = INetSock.TCP.socket ()
-        val addr' = parse_addr addr
-     in if Socket.connectNB (sock, addr')
-        then (tracing (String.concat ["RPC Host on ", #1 addr, ":", #2 addr, " is ready."]); sock)
-        else let
-          val {wrs, exs, ...} = Socket.select {
-              rds = [],
-              wrs = [Socket.sockDesc sock],
-              exs = [Socket.sockDesc sock],
-              timeout = SOME (Time.fromSeconds 1) }
-         in case (wrs, exs)
-              of (_::_, []) =>
-                  if Socket.Ctl.getERROR sock
-                  then (Socket.close sock; OS.Process.sleep (Time.fromSeconds 1);
-                        connect_retry addr (remaining - 1))
-                  else (tracing (String.concat ["RPC Host on ", #1 addr, ":", #2 addr, " is ready."]); sock)
-               | _ => (Socket.close sock; OS.Process.sleep (Time.fromSeconds 1);
-                       connect_retry addr (remaining - 1))
-        end
-    end
-
 val launch_lock : unit Synchronized.var = Synchronized.var "RPC.launch_lock" ()
 
 (** Ephemeral attached-host state (RPC_EPHEMERAL_HOST_PLAN.md v3.3, §3.4)
@@ -322,11 +295,18 @@ fun ephemeral_log_hint () =
               File.platform_path (attached_file "log" (#token s))
   | NONE => "")
 
-fun try_connect addr =
+(* Three-valued: a REFUSED connect (RST -- nothing listens there) is definitive host
+   death, but a connect TIMEOUT is not -- a SIGSTOPed or load-crushed host times out
+   too, and treating that as death would kill-by-relaunch a healthy host at the
+   connect layer, exactly what §3.3 forbids at the handshake layer.  Timeouts are
+   resolved by the caller via the lifeline tiebreaker. *)
+datatype 'a connect_result = Connected of 'a | Conn_Refused | Conn_Timeout
+
+fun try_connect' addr =
   let val sock = INetSock.TCP.socket ()
       val addr' = parse_addr addr
    in if Socket.connectNB (sock, addr')
-      then SOME sock
+      then Connected sock
       else let
         val {wrs, exs, ...} = Socket.select {
             rds = [],
@@ -336,11 +316,15 @@ fun try_connect addr =
        in case (wrs, exs)
             of (_::_, []) =>
                 if Socket.Ctl.getERROR sock
-                then (Socket.close sock; NONE)
-                else SOME sock
-             | _ => (Socket.close sock; NONE)
+                then (Socket.close sock; Conn_Refused)
+                else Connected sock
+             | ([], []) => (Socket.close sock; Conn_Timeout)
+             | _ => (Socket.close sock; Conn_Refused)
       end
   end
+
+fun try_connect addr =
+  (case try_connect' addr of Connected sock => SOME sock | _ => NONE)
 
 fun mk_conn socket : connection =
   let val (cin, cout) = make_streams_timeout socket
@@ -593,7 +577,7 @@ end
 (** Ephemeral attached-host launch (RPC_EPHEMERAL_HOST_PLAN.md v3.3, §3.1-§3.3)
 
   Lock discipline: everything here that creates a connection while `launch_lock` is
-  held is hand-built from the raw socket (try_connect/connect_retry + mk_conn) --
+  held is hand-built from the raw socket (try_connect'/try_connect + mk_conn) --
   never via get_connection/make_connection, whose paths re-enter this machinery and
   would self-deadlock the non-reentrant mutex. **)
 
@@ -629,18 +613,30 @@ fun check_identity expected_token timeout conn =
    live lifeline -> KEEP the state and re-raise to the caller: never kill-by-relaunch
    a merely busy host (documented event-loop stalls reach 17-179 s). *)
 fun validate_attached (s : attached_host) : connection option =
-  (case try_connect (#addr s) of
-    NONE => (invalidate_attached_if (#token s); NONE)
-  | SOME sock =>
+  (case try_connect' (#addr s) of
+    Conn_Refused => (invalidate_attached_if (#token s); NONE)
+  | Conn_Timeout =>
+      (*indeterminate at the connect layer: same tiebreaker as the handshake layer*)
+      if lifeline_dead s
+      then (invalidate_attached_if (#token s); NONE)
+      else raise Remote_Calling_Failure {func_name = NONE,
+             message = "attached RPC host busy/stalled: connect timed out" ^
+                       ephemeral_log_hint ()}
+  | Connected sock =>
       let val conn = mk_conn sock
-       in (case check_identity (#token s) (Time.fromSeconds 10) conn of
-            Ours => SOME conn
-          | Not_Ours =>
-              (close_connection conn; invalidate_attached_if (#token s); NONE)
-          | Indeterminate exn =>
-              if lifeline_dead s
-              then (close_connection conn; invalidate_attached_if (#token s); NONE)
-              else (close_connection conn; Exn.reraise exn))
+          val keep = Unsynchronized.ref false
+       in \<^try>\<open>
+            (case check_identity (#token s) (Time.fromSeconds 10) conn of
+              Ours => (keep := true; SOME conn)
+            | Not_Ours => (invalidate_attached_if (#token s); NONE)
+            | Indeterminate exn =>
+                if lifeline_dead s
+                then (invalidate_attached_if (#token s); NONE)
+                else Exn.reraise exn)
+          finally
+            (*uniform probe-connection release on every path but Ours -- including an
+              Interrupt escaping check_identity (by design)*)
+            (if ! keep then () else (try close_connection conn; ()))\<close>
       end)
 
 fun do_launch_attached () : connection =
@@ -653,6 +649,7 @@ fun do_launch_attached () : connection =
       Interrupt can be delivered at lock-body entry (a thread interrupted while queued
       on launch_lock), and an unscoped cleanup would destroy a sibling's fresh host*)
     val acquired : attached_host option Unsynchronized.ref = Unsynchronized.ref NONE
+    val cmd_conn : connection option Unsynchronized.ref = Unsynchronized.ref NONE
     val installed = Unsynchronized.ref false
     val holder_outcome : Process_Result.T Exn.result option Synchronized.var =
           Synchronized.var "RPC.holder_outcome" NONE
@@ -668,11 +665,17 @@ fun do_launch_attached () : connection =
           per-process; this directory is shared).  Logs older than 7 days go only if
           the ML pid leading their token is dead (kill -0; false keep on pid reuse is
           harmless -- never unlink a live session's log).*)
-      , "case \"$(uname -s 2>/dev/null)\" in CYGWIN*|MSYS*) : ;; *)\n"
-      , "  find ", log_dir_p,
+      (*the .info sweep is platform-independent (find -delete works under Cygwin);
+        only the log sweep needs the gate, because its kill -0 liveness probe cannot
+        see native pids from Cygwin*)
+      , "find ", log_dir_p,
            " -maxdepth 1 -name 'RPC_attached_*.info' -mmin +10 -delete 2>/dev/null\n"
-      , "  for f in $(find ", log_dir_p,
-           " -maxdepth 1 -name 'RPC_attached_*.log' -mtime +7 2>/dev/null); do\n"
+      , "case \"$(uname -s 2>/dev/null)\" in CYGWIN*|MSYS*) : ;; *)\n"
+        (*pipe into a read loop, never `for f in $(find ...)`: an ISABELLE_HOME_USER
+          containing whitespace would word-split and rm the wrong paths*)
+      , "  find ", log_dir_p,
+           " -maxdepth 1 -name 'RPC_attached_*.log' -mtime +7 2>/dev/null |\n"
+      , "  while IFS= read -r f; do\n"
       , "    p=$(basename \"$f\"); p=${p#RPC_attached_}; p=${p%%-*}\n"
       , "    kill -0 \"$p\" 2>/dev/null || rm -f \"$f\"\n"
       , "  done ;;\n"
@@ -748,16 +751,31 @@ fun do_launch_attached () : connection =
         val _ = token' = token orelse fail_diagnosis "ready-file token mismatch"
         val _ = try File.rm ready_file
         val addr = ("127.0.0.1", port)
-        val sock = connect_retry addr 20
+        (*post-ready-file connect: failures here route through fail_diagnosis (log
+          tail + probe), and the holder outcome fast-fails a host that died right
+          after writing the ready-file (component-import crash)*)
+        fun connect_after_ready 0 =
+              fail_diagnosis "the host stopped listening after writing the ready-file"
+          | connect_after_ready n =
+              (if is_some (Synchronized.value holder_outcome)
+               then fail_diagnosis
+                      "the host died after writing the ready-file (component-import crash?)"
+               else ();
+               case try_connect addr of
+                 SOME s => s
+               | NONE => (OS.Process.sleep (Time.fromSeconds 1);
+                          connect_after_ready (n - 1)))
+        val sock = connect_after_ready 20
         val conn = mk_conn sock
+        val _ = cmd_conn := SOME conn
         (*60 s launch-path handshake: must cover the <= 40 s component-import window
           that run_attached__ places AFTER bind (our connection sits in the TCP backlog
           meanwhile)*)
         val _ =
           (case check_identity token (Time.fromSeconds 60) conn of
             Ours => ()
-          | _ => (close_connection conn;
-                  fail_diagnosis "the launched host failed the identity handshake"))
+          | _ => fail_diagnosis "the launched host failed the identity handshake")
+              (*conn is released by the finally-cleanup below (cmd_conn, not installed)*)
         (*lifeline: tight uninterruptible bubble around connect-then-record, so an
           async Interrupt between the two cannot orphan a claimed lifeline*)
         val lsock =
@@ -782,20 +800,29 @@ fun do_launch_attached () : connection =
           | Callback_Request _ => raise Fail "lifeline claim was not acked")
         (*install is the LAST act: on any earlier failure the state var still holds
           nothing of this attempt's*)
-        val _ = install_attached (the (! acquired))
-        val _ = installed := true
+        (*install and its success marker must be ONE uninterruptible step: with the
+          finally-form cleanup below, an Interrupt between them would let the
+          finalizer close an already-installed record's lifeline*)
+        val _ = Thread_Attributes.uninterruptible (fn _ => fn () =>
+                  (install_attached (the (! acquired)); installed := true)) ()
         val _ = tracing ("Attached RPC host ready on 127.0.0.1:" ^ port ^
                          "  Log: " ^ File.platform_path log_path)
        in conn end
   in
+    (*FINALLY, not catch: Isabelle_Thread.try_catch skips its handler on Interrupt,
+      but this block is resource RELEASE, which must run on every unwind path --
+      including cancellation -- and then let the exception keep propagating.  The
+      try_finally finalizer runs uninterruptibly on every outcome; the !installed
+      guard (set atomically with the install above) makes it a no-op on success and
+      on Interrupt-after-install, so an installed record's lifeline is never closed
+      by its own launcher.*)
     \<^try>\<open>launch_body ()
-    catch exn =>
-      ( (*attempt-scoped cleanup (uninterruptible handler): close only THIS attempt's
-          lifeline; the state var was never touched unless install succeeded*)
-        (if ! installed then ()
-         else (case ! acquired of SOME h => #close_lifeline h () | NONE => ()))
-      ; (try File.rm ready_file; ())
-      ; Exn.reraise exn)\<close>
+    finally
+      (if ! installed then ()
+       else
+         ( (case ! cmd_conn of SOME c => (try close_connection c; ()) | NONE => ())
+         ; (case ! acquired of SOME h => #close_lifeline h () | NONE => ())
+         ; (try File.rm ready_file; ())))\<close>
   end
 
 fun ephemeral_connection () =
