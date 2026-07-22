@@ -480,13 +480,18 @@ jobs:
           else
             ISA="$CONDA_PREFIX/bin/isabelle"
           fi
-          mkdir -p "$RUNNER_TEMP/eph_ci"
+          # RELATIVE session dir: $RUNNER_TEMP is a native Windows path (D:\a\_temp)
+          # that Isabelle's -d rejects ("Illegal character :"), and Git-Bash cygpath
+          # emits /d/... while Isabelle's bundled Cygwin expects /cygdrive/d/... --
+          # a relative path sidesteps every mapping question on every OS.
+          cd "$RUNNER_TEMP"
+          mkdir -p eph_ci
           # printf, not a heredoc: inside a YAML block scalar every line is indented, and
           # an indented heredoc terminator is never recognized (<<- strips tabs only).
           printf '%s\n' \
             'session Scratch_CI_Ephemeral = Isabelle_RPC +' \
             '  theories Scratch_CI_Ephemeral' \
-            > "$RUNNER_TEMP/eph_ci/ROOT"
+            > eph_ci/ROOT
           printf '%s\n' \
             'theory Scratch_CI_Ephemeral' \
             '  imports Isabelle_RPC.Remote_Procedure_Calling' \
@@ -498,9 +503,9 @@ jobs:
             '  val () = writeln "CI ephemeral RPC OK";' \
             '\<close>' \
             'end' \
-            > "$RUNNER_TEMP/eph_ci/Scratch_CI_Ephemeral.thy"
+            > eph_ci/Scratch_CI_Ephemeral.thy
           unset RPC_Host || true
-          "$ISA" build -v -d "$RUNNER_TEMP/eph_ci" Scratch_CI_Ephemeral
+          "$ISA" build -v -d eph_ci Scratch_CI_Ephemeral
 
           # The host must die with the build's ML process.  Measure the latency class.
           t0=$(date +%s)
