@@ -31,7 +31,13 @@ def _spawn(tmpdir: str, token: str, env_extra: dict | None = None):
     log = os.path.join(tmpdir, f"RPC_attached_{token}.log")
     ready = os.path.join(tmpdir, f"RPC_attached_{token}.info")
     env = {**os.environ,
-           "PYTHONPATH": HERE + os.pathsep + os.environ.get("PYTHONPATH", "")}
+           "PYTHONPATH": HERE + os.pathsep + os.environ.get("PYTHONPATH", ""),
+           # The real launch script always exports ISABELLE_HOME_USER; mirror that.
+           # Without it, _load_remote_procedures -> isabelle_home_user() sys.exit(1)s
+           # right after the ready-file is written (no Isabelle on CI runners), and
+           # every connect gets ECONNREFUSED.  Pointing it at the tmpdir also isolates
+           # the tests from the developer machine's real etc/rpc_components.
+           "ISABELLE_HOME_USER": tmpdir}
     if env_extra:
         env.update(env_extra)
     proc = subprocess.Popen(
