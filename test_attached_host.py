@@ -40,11 +40,15 @@ def _spawn(tmpdir: str, token: str, env_extra: dict | None = None):
            "ISABELLE_HOME_USER": tmpdir}
     if env_extra:
         env.update(env_extra)
-    proc = subprocess.Popen(
-        [sys.executable, "-c",
-         "import Isabelle_RPC_Host\nIsabelle_RPC_Host.run_attached__()",
-         "127.0.0.1:0", log, ready, token],
-        env=env, stdout=subprocess.DEVNULL, stderr=open(log, "a"))
+    errf = open(log, "a")
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import Isabelle_RPC_Host\nIsabelle_RPC_Host.run_attached__()",
+             "127.0.0.1:0", log, ready, token],
+            env=env, stdout=subprocess.DEVNULL, stderr=errf)
+    finally:
+        errf.close()  # the child inherited the fd; keeping ours open pins the file on Windows
     deadline = time.monotonic() + READY_TIMEOUT
     while time.monotonic() < deadline:
         if os.path.exists(ready):
@@ -87,23 +91,33 @@ def _wait_exit(proc: subprocess.Popen, what: str, timeout: float = EXIT_TIMEOUT)
     raise AssertionError(f"{what}: host still alive after {timeout}s")
 
 
+def _stop(proc: subprocess.Popen):
+    """Hard-stop and REAP: kill() alone races Windows tempdir cleanup (WinError 32)."""
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _assert_alive(proc: subprocess.Popen, what: str):
     assert proc.poll() is None, f"{what}: host died unexpectedly (rc={proc.returncode})"
 
 
 def test_identity_and_ready_file():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokA")
         try:
             with socket.create_connection(("127.0.0.1", port)) as s:
                 tag, tok = _rpc(s, "rpc_host_identity", None)
                 assert (tag, tok) == (0, "tokA")
         finally:
-            proc.kill()
+            _stop(proc)
 
 
 def test_lifeline_clean_close():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokB")
         try:
             s = socket.create_connection(("127.0.0.1", port))
@@ -114,13 +128,12 @@ def test_lifeline_clean_close():
             s.close()
             assert _wait_exit(proc, "clean lifeline EOF") == 0
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            _stop(proc)
 
 
 def test_same_chunk_claim_plus_fin_race():
     """The dominant ordering when the client dies at claim time (plan §3.2)."""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokC")
         try:
             s = socket.create_connection(("127.0.0.1", port))
@@ -128,12 +141,11 @@ def test_same_chunk_claim_plus_fin_race():
             s.close()
             assert _wait_exit(proc, "same-chunk claim+FIN") == 0
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            _stop(proc)
 
 
 def test_wrong_token_rejected_then_claimable():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokD")
         try:
             s = socket.create_connection(("127.0.0.1", port))
@@ -148,13 +160,12 @@ def test_wrong_token_rejected_then_claimable():
             s.close()
             assert _wait_exit(proc, "claim-after-rejection EOF") == 0
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            _stop(proc)
 
 
 def test_garbage_after_claim():
     """Reader death without a close sentinel — what forces the task-await form."""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokE")
         try:
             s = socket.create_connection(("127.0.0.1", port))
@@ -164,8 +175,7 @@ def test_garbage_after_claim():
             s.close()
             assert _wait_exit(proc, "garbage-after-claim") == 0
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            _stop(proc)
 
 
 _CLIENT = textwrap.dedent("""
@@ -191,7 +201,7 @@ def test_killed_client_process_drops_lifeline():
     closes the socket (FIN on POSIX, RST on Windows handle cleanup) and the host's
     reader sees it.  On Windows CI this is the only automated evidence for that.
     """
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokF")
         client = None
         try:
@@ -206,14 +216,13 @@ def test_killed_client_process_drops_lifeline():
             client.kill()  # SIGKILL / TerminateProcess — no cleanup runs in the client
             assert _wait_exit(proc, "client hard-killed") == 0
         finally:
-            if client and client.poll() is None:
-                client.kill()
-            if proc.poll() is None:
-                proc.kill()
+            if client:
+                _stop(client)
+            _stop(proc)
 
 
 def test_leak_guard_fires_when_never_claimed():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, _port, _ = _spawn(d, "tokG",
                                 env_extra={"ISABELLE_RPC_LEAK_GUARD_SECONDS": "2"})
         try:
@@ -222,12 +231,11 @@ def test_leak_guard_fires_when_never_claimed():
             assert rc == 1, f"guard exit code must be 1, got {rc}"
             assert time.monotonic() - t0 >= 1.0, "guard fired implausibly early"
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            _stop(proc)
 
 
 def test_leak_guard_disarmed_by_claim():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         proc, port, _ = _spawn(d, "tokH",
                                env_extra={"ISABELLE_RPC_LEAK_GUARD_SECONDS": "2"})
         try:
@@ -239,8 +247,7 @@ def test_leak_guard_disarmed_by_claim():
             s.close()
             assert _wait_exit(proc, "post-guard clean EOF") == 0
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            _stop(proc)
 
 
 def test_external_server_path_untouched():
