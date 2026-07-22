@@ -7,6 +7,7 @@ import sys
 import socket
 import os
 import tempfile
+import threading
 import traceback
 from enum import IntEnum
 from typing import Callable, TypeAlias, Any, Awaitable
@@ -246,7 +247,15 @@ def isabelle_remote_procedure(name: str):
 
 class Server:
 
-    def __init__(self, addr: str, logger: logging.Logger, debugging: bool = False):
+    def __init__(self, addr: str, logger: logging.Logger, debugging: bool = False, *,
+                 attached_token: str | None = None,
+                 ready_file: str | None = None,
+                 leak_guard: 'threading.Timer | None' = None):
+        # The attached-mode extras are keyword-only WITH defaults: every pre-existing
+        # positional caller (launcher.py, semantics_manage.py, debug launchers, tests,
+        # _daemon_body__) keeps today's behavior -- in particular no leak guard and no
+        # ready-file ever exist on the external-launch path (an armed guard there would
+        # kill every external daemon at 300 s).  See RPC_EPHEMERAL_HOST_PLAN.md §3.6.
         self.addr = addr
         self.host, port_str = addr.split(':')
         self.port = int(port_str)
@@ -256,6 +265,16 @@ class Server:
         self.clients = {}
         self.logger = logger
         self.debugging = debugging
+        self.attached_token = attached_token
+        self.ready_file = ready_file
+        self._leak_guard = leak_guard
+        self._lifeline_connection: 'Connection | None' = None
+
+    def _disarm_leak_guard(self) -> None:
+        t = self._leak_guard
+        self._leak_guard = None
+        if t is not None:
+            t.cancel()  # threading.Timer.cancel is thread-safe
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Handle a client connection."""
@@ -356,6 +375,12 @@ class Server:
             connection._stop_reader()
             _connection_var.reset(token)
             connection.close()
+            if connection is self._lifeline_connection:
+                # Redundant safety net behind attached_lifeline's own EOF wait (which
+                # normally runs os._exit first): the lifeline is gone, this host must
+                # not outlive its Isabelle process.
+                self.logger.info("Lifeline connection closed - exiting (teardown path)")
+                os._exit(0)
 
     async def run_server(self) -> None:
         if self.running:
@@ -366,6 +391,27 @@ class Server:
             self.handle_client, self.host, self.port,
             reuse_address=True, backlog=8)
         self.running = True
+
+        if self.ready_file is not None:
+            # Attached mode (run_attached__): report the OS-assigned port atomically,
+            # THEN run the component imports -- pinned ordering, see
+            # RPC_EPHEMERAL_HOST_PLAN.md §3.1 step 4.  The temp file lives in the
+            # ready-file's own directory (same directory => same filesystem => the
+            # rename is atomic; a default tempfile location such as /tmp is routinely a
+            # different filesystem, where os.replace raises EXDEV), and its '.tmp'
+            # suffix keeps it outside the launcher's RPC_attached_*.info sweep glob.
+            real_port = self._server.sockets[0].getsockname()[1]
+            self.port = real_port
+            self.addr = f"{self.host}:{real_port}"
+            tmp = self.ready_file + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(f"{real_port} {self.attached_token}")
+            os.replace(tmp, self.ready_file)
+            self.logger.info(f"Attached host bound on port {real_port}; ready-file written")
+            # Component imports AFTER bind: they run synchronously on the event-loop
+            # thread (1-40 s); ML's connection is held by the TCP backlog meanwhile and
+            # its 60 s launch-path handshake timeout covers this window.
+            _load_remote_procedures(self.logger)
 
         self.logger.info(f"Start" + (" (debug mode: binary capture on unpack errors)" if self.debugging else ""))
 
@@ -394,6 +440,53 @@ async def _heartbeat_(arg, connection: Connection) -> None:
     """Built-in heartbeat RPC for connection health checks."""
     #connection.server.logger.info(f"Heartbeat from {connection.client_addr}")
     return None
+
+
+@isabelle_remote_procedure("rpc_host_identity")
+async def _rpc_host_identity_(arg, connection: Connection) -> 'str | None':
+    """Return this host's launch token (None on an externally-launched host).
+
+    The ML side compares it against the token it generated at launch to detect
+    "the port I recorded got reused by somebody else" (RPC_EPHEMERAL_HOST_PLAN.md §3.3).
+    A stored constant: this procedure cannot legitimately fail, which is why the ML
+    side may treat ANY error reply as "not our host".
+    """
+    return connection.server.attached_token
+
+
+@isabelle_remote_procedure("attached_lifeline")
+async def _attached_lifeline_(arg, connection: Connection) -> None:
+    """Claim this attached host's lifeline; park until the peer dies, then exit.
+
+    Protocol (RPC_EPHEMERAL_HOST_PLAN.md §3.2): validate token -> disarm the leak
+    guard -> write ONE success reply ourselves (the claim ack; this coroutine never
+    returns, so handle_client's own reply-after-completion can never happen; the ML
+    side reads exactly this one reply and never reads the socket again) -> await the
+    connection's READER TASK under try/finally os._exit(0).
+
+    Await the task, not connection.read(): the reader task's completion -- by the
+    close sentinel, by ANY uncaught exception (e.g. garbage bytes killing the reader
+    without a sentinel), or by cancellation -- is precisely the event "the ML process
+    can never speak on this socket again".  Verified against the same-chunk
+    request+FIN race and adversarial byte streams (2026-07-22 experiments).
+    """
+    server = connection.server
+    token = server.attached_token
+    if token is None or arg != token:
+        raise RuntimeError(
+            "attached_lifeline: claim rejected "
+            "(not an attached host, or wrong token)")
+    server._disarm_leak_guard()
+    server._lifeline_connection = connection
+    server.logger.info("Lifeline claimed")
+    await connection.write(None)  # the claim ack
+    t = connection._reader_task
+    try:
+        if t is not None:
+            await t
+    finally:
+        server.logger.info("Lifeline dropped - exiting")
+        os._exit(0)
 
 
 @isabelle_remote_procedure("load_pymodule")
@@ -519,6 +612,49 @@ def launch_server_(addr: str, logger: logging.Logger, debugging: bool = False) -
     _load_remote_procedures(logger)
     with Server(addr, logger, debugging) as server:
         asyncio.run(server.run_server())
+
+def run_attached__() -> None:
+    """Foreground, attached RPC host: no fork, no setsid, no detach.
+
+    Entry point for Isabelle's ephemeral per-session launch
+    (RPC_EPHEMERAL_HOST_PLAN.md; the ML side execs
+    ``python -c "import Isabelle_RPC_Host; Isabelle_RPC_Host.run_attached__()"``).
+    argv: <host:port -- port may be 0> <log_file> <ready_file> <token>
+
+    The 300 s leak guard is armed HERE, first thing at entry -- before argv parsing
+    and before bind, so even a launch that wedges pre-bind self-limits.  It is a
+    daemon threading.Timer, NOT an event-loop timer: the synchronous component-import
+    loop blocks the asyncio loop for its whole 1-40 s (or wedged-forever) duration --
+    exactly the window the guard exists for -- during which a loop-based timer could
+    never fire.  attached_lifeline disarms it via Timer.cancel() (thread-safe).
+    """
+    # ISABELLE_RPC_LEAK_GUARD_SECONDS exists for the test suite only (CI shortens it
+    # to seconds to test the guard actually firing); production leaves it at 300.
+    guard_seconds = float(os.environ.get("ISABELLE_RPC_LEAK_GUARD_SECONDS", "300"))
+    guard = threading.Timer(guard_seconds, lambda: os._exit(1))
+    guard.daemon = True
+    guard.start()
+    if len(sys.argv) != 5 or sys.argv[0] != "-c":
+        sys.stderr.write("run_attached__ is an internal entry point; "
+                         "argv: <addr> <log_file> <ready_file> <token>\n")
+        sys.exit(1)
+    addr, log_file, ready_file, token = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    try:
+        logger = mk_logger_(addr, log_file)
+        debugging = os.environ.get("ISABELLE_RPC_DEBUG", "").lower() in ("1", "true", "yes")
+        server = Server(addr, logger, debugging,
+                        attached_token=token, ready_file=ready_file, leak_guard=guard)
+        with server:
+            asyncio.run(server.run_server())
+    except Exception:
+        msg = traceback.format_exc()
+        try:
+            logger.critical("Attached RPC host failed", exc_info=True)  # type: ignore[possibly-undefined]
+        except Exception:
+            with open(log_file, "a") as f:
+                f.write(f"CRITICAL: attached RPC host failed\n{msg}")
+        os._exit(1)
+
 
 def _daemon_body__(addr: str, log_file: str) -> None:
     """The daemon proper: record the PID, build the logger, serve forever.

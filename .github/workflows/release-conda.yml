@@ -23,6 +23,10 @@ on:
         description: "conda build number - BUMP if republishing the same VERSION with changed content"
         type: string
         default: "0"
+      windows_e2e:
+        description: "ALSO run the full Isabelle end-to-end ephemeral test on the Windows smoke leg (slow: builds the session heap on the runner)"
+        type: boolean
+        default: false
   push:
     tags: ['v*']
 
@@ -270,8 +274,38 @@ jobs:
                  echo "::error::overwrite conda-owned files.  Check the .dist-info."; exit 1; }
           echo "  OK  pip reports 'already satisfied' and left the install alone"
 
+  # Cross-platform tests of the attached (ephemeral) host -- no Isabelle involved.
+  # This is the CI-side evidence for RPC_EPHEMERAL_HOST_PLAN.md's §5 matrix: on each OS
+  # it exercises port-0 + the atomic ready-file (NTFS os.replace on Windows), the
+  # identity handshake, the lifeline (clean close, same-chunk race, garbage bytes,
+  # HARD-KILLED client process -- i.e. RST-on-termination, the load-bearing Windows
+  # assumption), and the daemon-thread leak guard (both firing and disarm).
+  # Gate for publish: a red leg here must block the release.
+  #
+  # macOS legs: macos-13 is RETIRED and queues forever (runner-images #13402) -- the
+  # Intel leg must be macos-15-intel; arm is macos-15.
+  attached_tests:
+    name: "Attached-host tests (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "pip install the package + pytest"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pytest
+      - name: "run test_attached_host.py"
+        run: python -m pytest test_attached_host.py -v
+
   publish:
-    needs: verify
+    needs: [verify, attached_tests]
     # A dry run stops here: build and verify have already proved the package is
     # sound, and publishing is the irreversible step (bytes go up before the index
     # is rebuilt, and a published name may never be reused).  `smoke` needs this
@@ -320,6 +354,8 @@ jobs:
         # --noprofile --norc and conda is not on PATH at all.
         shell: bash -l {0}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
@@ -408,6 +444,89 @@ jobs:
           conda activate t
           python -c "import Isabelle_RPC_Host; print('imported from', Isabelle_RPC_Host.__file__)"
           command -v isabelle-rpc-host
+
+      - name: "attached-host tests against the PUBLISHED package"
+        run: |
+          set -euo pipefail
+          conda activate t
+          python -m pip install pytest
+          # Run from a copy OUTSIDE the checkout: the test prepends its own directory to
+          # the spawned hosts' PYTHONPATH, and run in-place that would shadow the
+          # published package with the checkout sources -- defeating this step's purpose.
+          cp test_attached_host.py "$RUNNER_TEMP/"
+          cd "$RUNNER_TEMP"
+          python -m pytest test_attached_host.py -v
+
+      - name: "END-TO-END: ephemeral host under a real isabelle build"
+        # Linux always; Windows only when the windows_e2e dispatch input asks for it
+        # (it builds the session heap on the runner -- slow).  This automates the
+        # plan's D-windows smoke, including the host-death-latency measurement that
+        # distinguishes JVM reap (~1 s) / lifeline (~5 s) / leak guard (300 s).
+        if: runner.os == 'Linux' || (github.event_name == 'workflow_dispatch' && inputs.windows_e2e)
+        continue-on-error: ${{ runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          conda activate t
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then
+            ISA="$CONDA_PREFIX/Scripts/isabelle.bat"
+          else
+            ISA="$CONDA_PREFIX/bin/isabelle"
+          fi
+          mkdir -p "$RUNNER_TEMP/eph_ci"
+          # printf, not a heredoc: inside a YAML block scalar every line is indented, and
+          # an indented heredoc terminator is never recognized (<<- strips tabs only).
+          printf '%s\n' \
+            'session Scratch_CI_Ephemeral = Isabelle_RPC +' \
+            '  theories Scratch_CI_Ephemeral' \
+            > "$RUNNER_TEMP/eph_ci/ROOT"
+          printf '%s\n' \
+            'theory Scratch_CI_Ephemeral' \
+            '  imports Isabelle_RPC.Remote_Procedure_Calling' \
+            'begin' \
+            'ML \<open>' \
+            '  val conn = Remote_Procedure_Calling.get_connection ();' \
+            '  val () = Remote_Procedure_Calling.heartbeat conn;' \
+            '  val () = Remote_Procedure_Calling.release_connection conn;' \
+            '  val () = writeln "CI ephemeral RPC OK";' \
+            '\<close>' \
+            'end' \
+            > "$RUNNER_TEMP/eph_ci/Scratch_CI_Ephemeral.thy"
+          unset RPC_Host || true
+          "$ISA" build -v -d "$RUNNER_TEMP/eph_ci" Scratch_CI_Ephemeral
+
+          # The host must die with the build's ML process.  Measure the latency class.
+          t0=$(date +%s)
+          alive() {
+            if [ "${RUNNER_OS:-}" = "Windows" ]; then
+              n=$(powershell -NoProfile -Command \
+                "(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -match 'run_attached__' }).Count" \
+                | tr -d '\r')
+              [ "${n:-0}" -gt 0 ]
+            else
+              pgrep -f 'run_attached_[_]' > /dev/null
+            fi
+          }
+          waited=0
+          while alive; do
+            sleep 1; waited=$((waited+1))
+            [ "$waited" -le 310 ] || { echo "::error::attached host outlived even the leak guard"; exit 1; }
+          done
+          echo "host gone $waited s after the build exited (0-2 s = JVM reap; ~5 s = lifeline; ~300 s = guard only)"
+          if [ "$waited" -gt 30 ]; then
+            echo "::warning::host needed ${waited} s to die -- reap AND lifeline both failed on this OS?"
+          fi
+
+          # No ready-file residue.
+          raw="$("$ISA" getenv -b ISABELLE_HOME_USER)"
+          case "$raw" in
+            /cygdrive/*) home="/${raw#/cygdrive/}" ;;
+            *)           home="$raw" ;;
+          esac
+          if ls "$home"/log/RPC_attached_*.info 2>/dev/null; then
+            echo "::error::ready-file residue left behind"; exit 1
+          fi
+          echo "----- ephemeral host logs -----"
+          ls -la "$home"/log/RPC_attached_* 2>/dev/null || true
 
       - name: "the pre-unlink UNREGISTERED it"
         run: |

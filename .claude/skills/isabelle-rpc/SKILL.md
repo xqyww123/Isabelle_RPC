@@ -29,18 +29,26 @@ After editing any `.ML` file here, just restart the RPC/REPL server; no `isabell
 
 ## Starting the host
 
-You usually do **not** start it by hand. On the first `call_command`, ML auto-launches a
-daemonized host (double-fork) and retries the connection for ~20 s.
+Since 0.4.0, whoever launches the host owns its lifetime — two modes:
+
+- **`RPC_Host` unset (default)**: on the first `call_command`, ML launches a private
+  **ephemeral host** on an OS-assigned port as an *attached* child of this Isabelle
+  process. It dies with the process on every exit path (TCP lifeline + JVM reap + 300 s
+  leak guard); a fresh session always gets a fresh host running fresh code.
+- **`RPC_Host` set** (e.g. `export RPC_Host=127.0.0.1:9999`): external-only. ML just
+  connects, and **errors if nothing is listening — it never launches** at a configured
+  address. Pre-launch yourself: `isabelle-rpc-host`, `python launcher.py [addr] [log]`,
+  or `python -c 'import Isabelle_RPC_Host; Isabelle_RPC_Host.fork_and_launch__()'
+  <host:port> <log>`. This is the mode for several Isabelle processes sharing one host.
 
 | Knob | Effect |
 | --- | --- |
-| `RPC_Host` | Address, e.g. `export RPC_Host=127.0.0.1:9999`. Default `127.0.0.1:27182`. |
-| `AUTO_START_RPC_SERVER=0` \| `false` | Disable auto-launch; ML errors out instead. |
-| `ISABELLE_RPC_DEBUG=1` \| `true` \| `yes` | Debug mode: capture the byte stream and dump it on an unpack error. Only honoured on the auto-launched path. |
+| `RPC_Host` | Set = external-only mode at that address; unset = per-session ephemeral host. (The old `127.0.0.1:27182` default is gone.) |
+| `AUTO_START_RPC_SERVER` | **Retired, ignored** (a leftover `=0` export is a harmless no-op). |
+| `ISABELLE_RPC_DEBUG=1` \| `true` \| `yes` | Debug mode: capture the byte stream and dump it on an unpack error. Honoured on any launch path that inherits it. |
 
-Logs and the PID file land in `$ISABELLE_HOME_USER/log/` as `RPC_<host>_<port>*`.
-Manual start: `python launcher.py [addr] [log_file]`, or the installed
-console script `isabelle-rpc-host` (pip package `isabelle-rpc`).
+Ephemeral host logs land in `$ISABELLE_HOME_USER/log/RPC_attached_<token>.log`
+(the token starts with the launching ML process's pid). There are no pid files.
 
 ## Writing a procedure (Python)
 

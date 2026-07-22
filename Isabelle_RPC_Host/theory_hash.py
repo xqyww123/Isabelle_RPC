@@ -52,6 +52,14 @@ def open_theory_hash_store() -> lmdb.Environment:
                 cache_dir = platformdirs.user_cache_dir("Isabelle_Theory_Hash", "Qiyuan")
                 os.makedirs(cache_dir, exist_ok=True)
                 _theory_hash_env = lmdb.open(os.path.join(cache_dir, "theory_hash.lmdb"), map_size=1 << 30)
+                try:
+                    # Attached RPC hosts die by os._exit/SIGKILL as a matter of design,
+                    # leaving stale reader-table slots (default 126) behind; each new
+                    # opener reaps its predecessors' corpses or the table eventually
+                    # fills up (MDB_READERS_FULL).  See RPC_EPHEMERAL_HOST_PLAN.md, H0.
+                    _theory_hash_env.reader_check()
+                except lmdb.Error:
+                    pass
                 atexit.register(_close_theory_hash_store)
     return _theory_hash_env
 

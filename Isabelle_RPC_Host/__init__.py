@@ -2,7 +2,7 @@ from .rpc import (
     IsabelleError, Connection,
     RemoteProcedure, Remote_Procedures, isabelle_remote_procedure,
     Server,
-    isabelle_home_user, mk_logger_, launch_server_, fork_and_launch__,
+    isabelle_home_user, mk_logger_, launch_server_, fork_and_launch__, run_attached__,
     _load_remote_procedures,
 )
 from .unicode import (get_SYMBOLS, get_REVERSE_SYMBOLS, get_SYMBOLS_AND_REVERSED,

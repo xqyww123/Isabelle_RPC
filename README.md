@@ -179,10 +179,27 @@ The built-in `isabelle_heartbeat` callback (RPC.ML:328) provides a working examp
 
 ## Server Configuration
 
-- **Default address:** `127.0.0.1:27182`
-- **Change address:** Set `RPC_Host` environment variable (e.g., `export RPC_Host=127.0.0.1:9999`)
-- **Auto-launch:** ML code auto-launches server if not running
-- **Protocol:** MessagePack over TCP
+Since 0.4.0, **whoever launches the host owns its lifetime**:
+
+- **`RPC_Host` unset (default): per-session ephemeral host.** On first use, Isabelle
+  launches a private host on an OS-assigned port as an *attached* child. It dies with
+  that Isabelle process on every exit path (including `kill -9`), guarded by a TCP
+  lifeline and a 300 s startup leak guard. Nothing to configure, nothing to clean up.
+- **`RPC_Host` set (e.g. `export RPC_Host=127.0.0.1:9999`): external host, external
+  lifecycle.** Isabelle only connects, and errors if nothing is listening — it never
+  launches at a configured address. Start the host yourself with the `isabelle-rpc-host`
+  console script, `python launcher.py`, or
+  `python -c 'import Isabelle_RPC_Host; Isabelle_RPC_Host.fork_and_launch__()' <host:port> <log>`.
+  Use this mode whenever several Isabelle processes must share one host.
+- **Protocol:** MessagePack over TCP.
+
+**Removed in 0.4.0** (behavior change): the fixed `127.0.0.1:27182` default address,
+auto-launching at a configured `RPC_Host` address, and the `AUTO_START_RPC_SERVER`
+variable (now ignored; exporting `AUTO_START_RPC_SERVER=0` is a harmless no-op).
+Workflows that set `RPC_Host` and relied on auto-launch must pre-launch the host
+externally. Old wheels (< 0.4.0) lack the `run_attached__` entry point and fail loudly
+with an actionable message. Ephemeral host logs land in
+`$ISABELLE_HOME_USER/log/RPC_attached_<token>.log`.
 
 ## Key Files Reference
 

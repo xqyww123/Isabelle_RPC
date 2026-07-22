@@ -70,12 +70,23 @@ exception Remote_Calling_Failure of {func_name: string option, message: string}
 
 (** TCP **)
 
-fun get_addr () =
-  let val addr = getenv "RPC_Host"
-      val addr = if addr = "" then "127.0.0.1:27182" else addr
-   in case space_explode ":" addr of [h, p] => (h,p)
-    | _ => error ("Invalid RPC address: " ^ addr ^ ". Should be `host:port`.")
-  end
+(* RPC_EPHEMERAL_HOST_PLAN.md v3.3: "whoever launches the host owns its lifetime".
+   RPC_Host set   -> Fixed: external launch, external lifecycle; Isabelle only connects,
+                     and errors if nothing listens.  Isabelle NEVER launches at a
+                     configured address (v2's fixed-addr auto-launch is abolished, and
+                     AUTO_START_RPC_SERVER with it -- the variable is ignored).
+   RPC_Host unset -> Ephemeral: a per-ML-process attached host on an OS-assigned port,
+                     lifetime-bound to this process (JVM reap + TCP lifeline + leak
+                     guard).  The old 127.0.0.1:27182 default is gone. *)
+datatype addr_mode = Fixed of string * string | Ephemeral
+
+fun addr_mode () =
+  (case getenv "RPC_Host" of
+    "" => Ephemeral
+  | addr =>
+      (case space_explode ":" addr of
+        [h, p] => Fixed (h, p)
+      | _ => error ("Invalid RPC address: " ^ addr ^ ". Should be `host:port`.")))
 
 fun make_streams_timeout socket =
   let
@@ -196,159 +207,14 @@ val python_cmd = Lazy.lazy (fn () =>
         end
   end)
 
+(* CAUTION: the make_directory here is a BUILD-TIME side effect, frozen into session
+   heaps exactly like a top-level python probe would be (see python_cmd above).  On a
+   machine running distributed prebuilt heaps it may never have run.  Only the PATH
+   value below may be relied on; the attached-launch script re-creates the directory
+   with `mkdir -p` at every launch. *)
 val log_dir = (Path.variable "ISABELLE_HOME_USER" + Path.basic "log")
            |> Isabelle_System.make_directory
 
-fun pid_file_path (host, port) =
-  log_dir + Path.basic (String.concat ["RPC_", host, "_", port, ".pid"])
-
-fun launch_RPC_host (host,port) =
-  let fun mk_log_file () =
-        let val result = Isabelle_System.bash_process (Bash.script "date '+%Y%m%d_%H%M%S'")
-            val _ = Process_Result.check result
-            val name = String.concat ["RPC_", host, "_", port, Process_Result.out result]
-            val path = log_dir + Path.basic name
-         in if File.exists path then mk_log_file () else path
-        end
-      val log_path = mk_log_file ()
-      (* Export the Isabelle home directories so the Python host (and its
-         unicode symbol-table loader) can read them straight from the
-         environment, instead of shelling out to `isabelle getenv` — which is
-         slow and silently yields "" if Isabelle failed to start. *)
-      val script = String.concat
-        [ "export ISABELLE_HOME=", Bash.string (getenv "ISABELLE_HOME"), "\n"
-        , "export ISABELLE_HOME_USER=", Bash.string (getenv "ISABELLE_HOME_USER"), "\n"
-        (* Bash.string, like every other interpolated value in this script.  It used to
-           be raw, which was survivable while the value came from `command -v python3`;
-           it is not now that it can be a conda prefix, and those routinely contain a
-           space (C:\Users\John Smith\...).  Unquoted, bash word-splits it and the
-           failure masquerades as a missing module. *)
-        , Bash.string (Lazy.force python_cmd)
-        , " -c \"import Isabelle_RPC_Host\nIsabelle_RPC_Host.fork_and_launch__()\" "
-        , Bash.string (host ^ ":" ^ port), " "
-        , Bash.string (File.platform_path log_path) ]
-
-      val _ = tracing (String.concat ["Lauching RPC Host on ", host, ":", port, "...  Log: ",
-                                      File.platform_path log_path])
-      val result = Isabelle_System.bash_process (Bash.script script)
-   in if Process_Result.ok result
-      then ()
-      else
-        (* Diagnose before reporting.  The bare traceback names a missing module but not
-           WHICH interpreter is missing it, and on Windows the answer is almost always
-           "a Cygwin python that could never have had it" -- see python_cmd above.  One
-           subprocess on a path that has already failed is cheap, and it turns the
-           report into something the reader can act on. *)
-        let
-          val py = Lazy.force python_cmd
-          val probe =
-            Isabelle_System.bash_process (Bash.script
-              (Bash.string py ^ " -c 'import Isabelle_RPC_Host'"))
-          val hint =
-            if Process_Result.ok probe then ""
-            else
-              (* Report what the probe actually SAID.  A non-zero exit means only "that
-                 command failed" -- the interpreter may be missing, not executable, or its
-                 prefix deleted -- and asserting "cannot import" for all of them would be
-                 a confident wrong diagnosis, sending the reader after a wheel that is
-                 installed fine. *)
-              "\n\nThe interpreter used was:\n    " ^ py ^
-              "\nand `import Isabelle_RPC_Host` under it failed with:\n" ^
-              Process_Result.err probe ^
-              (if getenv "ISABELLE_RPC_PYTHON" <> "" then
-                 "\nThat interpreter came from ISABELLE_RPC_PYTHON; point it at one that\
-                 \ has the host installed."
-               else
-                 "\nIt was discovered with `command -v python3`, which Isabelle runs under\
-                 \ its bundled Cygwin bash on Windows -- so it finds a Cygwin interpreter\
-                 \ rather than the native one your wheels are installed into.\
-                 \\nSet ISABELLE_RPC_PYTHON to the right interpreter.")
-        in
-          error ( "Fail to launch the RPC Host on " ^ host ^ ":" ^ port ^ "\n\n"
-                ^ Process_Result.err result ^ hint)
-        end
-  end
-
-(* Best-effort teardown after a launch that never came up.
-
-   On Windows the PID in that file is a NATIVE Win32 pid, written by a process spawned
-   with DETACHED_PROCESS -- it has no Cygwin pid at all.  Cygwin's `kill` resolves Cygwin
-   pids, so it reports "no such process" and the orphaned host survives, holding the port
-   that the next launch will try to bind.  `taskkill /F /PID` is the native equivalent.
-
-   SINGLE slashes.  `//F` is the MSYS2 (Git-Bash) escape, needed there because MSYS2
-   rewrites an argument shaped like `/F` into a Windows path when exec'ing a native .exe.
-   Isabelle bundles genuine CYGWIN, which passes argv through verbatim (bash_process
-   ultimately exec's plain "bash" off the settings PATH -- bash.scala:140-143 -- and
-   getsettings:26 tests OSTYPE = cygwin), so `//F` would arrive literally and taskkill
-   would reject it -- silently, since the call is wrapped.  An earlier draft of this
-   comment conflated the two runtimes, and that conflation was the bug.  (It also cited
-   bash.scala:74 `local_bash()`, which is the SSH branch, not this one.)
-
-   Absolute path, not a bare name: bash runs NON-login and NON-interactive with Isabelle's
-   settings PATH, so /etc/profile never runs and System32 need not be on it.  `cygpath -S`
-   asks Cygwin for the System32 dir rather than deriving it from an environment
-   variable.  $SYSTEMROOT would also work today, but only via a four-hop accident: Windows
-   sets `SystemRoot`, and it is Cygwin's native->posix env conversion (during
-   Environment.java's `bash -l isabelle getenv -d`) that upper-cases it into the settings
-   map that Bash.process later replays.  Bash is case-sensitive, so if any hop changed,
-   `$SYSTEMROOT` would expand to empty and the command would silently become
-   "/System32/taskkill.exe".  cygpath depends on none of that, and returns a posix path,
-   so the mixed-separator question does not arise either.  Its presence is guaranteed:
-   Isabelle's own startup already relies on cygpath throughout the Cygwin branch that this
-   command likewise only runs in (getsettings:26-42 -- :38-39 derive CYGWIN_ROOT and
-   ISABELLE_ROOT through it, :30 and :41 likewise).  That establishes the BINARY's
-   presence, not `-S`'s behaviour: Isabelle never uses -S, so its output form is not
-   attested anywhere in this tree.  Hence `-u` explicitly -- posix output is what the
-   concatenation below assumes, and every other Isabelle call site spells -u out too
-   (getfunctions:18, getsettings:30).  If -S already defaults to posix, -u is redundant
-   and harmless; if it does not, -u is what makes this correct.  `tr -d '\r'` for the same reason getfunctions:18 does it on
-   cygpath's posix-form output -- `$(...)` strips a trailing newline but not a CR, which
-   would land in the MIDDLE of the word here.
-
-   Every failure mode of this branch degrades safely: if cygpath is missing or errors the
-   word becomes "/taskkill.exe", which kills nothing rather than the wrong thing, the pid
-   file is still removed, and the caller is about to `error` regardless.  An orphaned host
-   is the accepted outcome.
-
-   WHICH killer to use is read from the file, NOT inferred from ML_System.platform_is_windows.
-   The pid's namespace is fixed by the python that wrote it: a CYGWIN python under Windows
-   takes rpc.py's POSIX branch and records a Cygwin pid, which names no Win32 process, so
-   inferring `taskkill` from the Isabelle platform would force-kill an unrelated native
-   process holding that number -- silently, since this is all best-effort.  Since
-   ISABELLE_RPC_PYTHON lets the user choose that interpreter, the inference is not sound.
-
-   A bare pid with no namespace is the pre-0.3.4 format, and it is unambiguously POSIX:
-   the old code wrote the file only after os.fork(), which on Windows raised
-   AttributeError before ever getting there.  So the legacy branch is `kill`, by
-   derivation rather than by default.
-
-   Still best-effort on both platforms: every step is wrapped, because this runs on a path
-   that is about to `error` anyway and must not replace that message with its own. *)
-fun kill_RPC_host (host, port) =
-  let val path = pid_file_path (host, port)
-   in if File.exists path
-      then
-        let val cmd =
-              case File.read path |> String.tokens Char.isSpace of
-                ["nt", pid] =>
-                  SOME ("\"$(cygpath -u -S | tr -d '\\r')/taskkill.exe\" /F /PID " ^ Bash.string pid)
-              | ["posix", pid] => SOME ("kill " ^ Bash.string pid)
-              | [pid] => SOME ("kill " ^ Bash.string pid)  (* legacy: see above *)
-              | _ => NONE  (* unrecognised shape: kill nothing rather than guess.
-                              This is NOT a truncation guard.  A file cut to "nt" matches
-                              [pid] and runs `kill nt`, which bash rejects -- harmless.
-                              But "nt 12" matches the nt branch cleanly and would taskkill
-                              PID 12, an unrelated native process: NOT bounded by the
-                              accepted orphaned-host outcome.  Vanishingly unlikely (one
-                              buffered ~10-byte write), and not worth a checksum, but it
-                              is a real hole rather than a benign one. *)
-            val _ = try (fn () =>
-              Option.map (Isabelle_System.bash_process o Bash.script) cmd) ()
-            val _ = try File.rm path
-         in () end
-      else ()
-  end
 
 fun parse_addr (h,p) =
    let fun err () = error ("Bad address " ^ h ^ ":" ^ p)
@@ -359,10 +225,9 @@ fun parse_addr (h,p) =
 
 fun connect_retry addr remaining =
   if remaining <= 0
-  then ( kill_RPC_host addr
-       ; error (String.concat
+  then error (String.concat
            ["Fail to connect to RPC host on ", #1 addr, ":", #2 addr,
-            " after launch (timed out)."]) )
+            " after launch (timed out)."])
   else
     let val sock = INetSock.TCP.socket ()
         val addr' = parse_addr addr
@@ -387,6 +252,76 @@ fun connect_retry addr remaining =
 
 val launch_lock : unit Synchronized.var = Synchronized.var "RPC.launch_lock" ()
 
+(** Ephemeral attached-host state (RPC_EPHEMERAL_HOST_PLAN.md v3.3, §3.4)
+
+  ONE Synchronized.var holds the whole record -- the lifeline lives INSIDE it, so
+  "close the old lifeline whenever the record is replaced or cleared" holds by
+  construction, and every invalidation is token-conditional: a stale clear can never
+  close a newer record's lifeline.  The lifeline is kept as a sock_desc (for the
+  zero-timeout liveness poll) plus a closing closure, which avoids spelling the
+  concrete socket type.
+
+  Heap inheritance: this var's contents get saved into session heaps.  The pid stamp
+  (ML_Pid.get () of the LAUNCHING process) detects that: a mismatch means the record
+  was inherited -- treat as absent, and NEVER close its socket (the embedded fd number
+  may alias an unrelated open file in this process). **)
+
+type attached_host =
+  {pid: int, addr: string * string, token: string,
+   lifeline_desc: Socket.sock_desc, close_lifeline: unit -> unit}
+
+val attached_host : attached_host option Synchronized.var =
+  Synchronized.var "RPC.attached_host" NONE
+
+(* Not a credential (threat model: accidental cross-connection on localhost).  The pid
+   field doubles as the log-sweep liveness key (launch script) and makes heap-sibling
+   serial collisions harmless. *)
+fun new_token () =
+  string_of_int (ML_Pid.get ()) ^ "-" ^ serial_string () ^ "-" ^
+  LargeInt.toString (Time.toMicroseconds (Time.now ()))
+
+fun attached_file ext token =
+  log_dir + Path.basic ("RPC_attached_" ^ token ^ "." ^ ext)
+
+fun read_attached_state () =
+  (case Synchronized.value attached_host of
+    NONE => NONE
+  | SOME s => if #pid s = ML_Pid.get () then SOME s else NONE)
+
+fun install_attached (s : attached_host) =
+  Synchronized.change attached_host (fn prev =>
+    ( (case prev of
+        SOME p => if #pid p = ML_Pid.get () then #close_lifeline p () else ()
+      | NONE => ())
+    ; SOME s))
+
+fun invalidate_attached_if token =
+  Synchronized.change attached_host (fn
+      SOME s =>
+        if #token s = token andalso #pid s = ML_Pid.get ()
+        then (#close_lifeline s (); NONE)
+        else SOME s   (*stale invalidation: a newer record must survive untouched*)
+    | NONE => NONE)
+
+(* The host side is write-silent after the claim ack, so ANY readability on the
+   lifeline means EOF/RST means our host is dead; an errored select on a stale
+   descriptor counts as dead too.  This is the tiebreaker that resolves indeterminate
+   handshake outcomes (§3.3): it distinguishes "host died, port squatted by a silent
+   or garbage-speaking foreigner" (relaunch) from "own host merely busy/stalled"
+   (keep state, never kill-by-relaunch). *)
+fun lifeline_dead (s : attached_host) =
+  (case Socket.select {rds = [#lifeline_desc s], wrs = [], exs = [],
+                       timeout = SOME Time.zeroTime}
+     of {rds = [], ...} => false
+      | _ => true)
+  handle OS.SysErr _ => true
+
+fun ephemeral_log_hint () =
+  (case read_attached_state () of
+    SOME s => "\nThe session's ephemeral RPC host may have died; its log:\n    " ^
+              File.platform_path (attached_file "log" (#token s))
+  | NONE => "")
+
 fun try_connect addr =
   let val sock = INetSock.TCP.socket ()
       val addr' = parse_addr addr
@@ -407,36 +342,19 @@ fun try_connect addr =
       end
   end
 
-fun launch_and_retry addr =
-  Synchronized.change_result launch_lock (fn () =>
-    case try_connect addr
-      of SOME sock => (sock, ())
-       | NONE => ( launch_RPC_host addr
-                 ; (connect_retry addr 20, ()) ))
-
-fun auto_start_enabled () =
-  case getenv "AUTO_START_RPC_SERVER" of
-      "" => true
-    | s => (case String.map Char.toLower s of
-                "0" => false | "false" => false | _ => true)
-
-fun connect_agent_socket () =
-  let val addr = get_addr ()
-   in case try_connect addr
-        of SOME sock => sock
-         | NONE =>
-            if auto_start_enabled ()
-            then launch_and_retry addr
-            else error (String.concat
-                   ["Cannot connect to RPC host on ", #1 addr, ":", #2 addr,
-                    " (auto-start disabled by AUTO_START_RPC_SERVER)"])
-  end
-
-fun make_connection () : connection =
-  let val socket = connect_agent_socket ()
-      val (cin,cout) = make_streams_timeout socket
+fun mk_conn socket : connection =
+  let val (cin, cout) = make_streams_timeout socket
    in (Unsynchronized.ref cin, cout, Unsynchronized.ref NONE)
   end
+
+fun close_connection (conn : connection) =
+  let val (cin, cout, _) = conn
+   in BinIO.StreamIO.closeOut cout
+    ; BinIO.StreamIO.closeIn (!cin)
+  end
+
+(*make_connection is defined AFTER the tagged-IO layer (it needs the identity
+  handshake); see "Ephemeral attached-host launch" below.*)
 
 (** IO Infrastructure **)
 
@@ -638,7 +556,8 @@ fun call_command' {name, arg_schema, ret_schema, callback, timeout} conn arg =
       val _ = write conn (packPair (packString, arg_schema)) (name, arg)
    in dispatch_loop conn local_tab name ret_schema
   end handle MessagePackBinIO.Unpack.Unpack =>
-      raise Remote_Calling_Failure {func_name=SOME name, message="Invalid response, protocol error"}
+      raise Remote_Calling_Failure {func_name=SOME name,
+        message="Invalid response, protocol error" ^ ephemeral_log_hint ()}
   
 
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
@@ -671,13 +590,249 @@ val call_heartbeat_callback_cmd = {
 
 end
 
-(** Connection Pool **)
+(** Ephemeral attached-host launch (RPC_EPHEMERAL_HOST_PLAN.md v3.3, §3.1-§3.3)
 
-fun close_connection conn =
-  let val (cin, cout, _) = conn
-   in BinIO.StreamIO.closeOut cout
-    ; BinIO.StreamIO.closeIn (!cin)
+  Lock discipline: everything here that creates a connection while `launch_lock` is
+  held is hand-built from the raw socket (try_connect/connect_retry + mk_conn) --
+  never via get_connection/make_connection, whose paths re-enter this machinery and
+  would self-deadlock the non-reentrant mutex. **)
+
+local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
+
+datatype identity_verdict = Ours | Not_Ours | Indeterminate of exn
+
+(* Structural outcome classification, no string matching (§3.3): a healthy own host
+   cannot error this call (rpc_host_identity returns a stored constant), so ANY tag-1
+   reply -- "Unknown procedure" from an old wheel, a rejection from a foreign RPC host,
+   an externally-launched host's NONE token -- means "not our host".  Timeouts and
+   protocol garbage are indeterminate; the caller resolves them with the
+   lifeline-liveness tiebreaker. *)
+fun check_identity expected_token timeout conn =
+  ( (#3 conn) := SOME timeout
+  ; (case (write conn (packPair (packString, packUnit)) ("rpc_host_identity", ());
+           read_tagged (unpackOption unpackString) conn) of
+      User_Response (SOME tok) => if tok = expected_token then Ours else Not_Ours
+    | User_Response NONE => Not_Ours
+    | Remote_Error _ => Not_Ours
+    | Callback_Request _ => Not_Ours)
+    handle Timeout.TIMEOUT t => Indeterminate (Timeout.TIMEOUT t)
+         | Read_Timeout => Indeterminate Read_Timeout
+         | Unpack => Indeterminate
+             (Remote_Calling_Failure {func_name = SOME "rpc_host_identity",
+                                      message = "protocol error during identity handshake"})
+         | exn as IO.Io _ => Indeterminate exn
+         | exn as OS.SysErr _ => Indeterminate exn )
+
+(* Validate the stored record on a fresh connection (§3.3 reconnect path, 10 s).
+   SOME conn = live own host; NONE = definitively not ours (record invalidated,
+   token-conditionally).  Indeterminate + dead lifeline -> not ours; indeterminate +
+   live lifeline -> KEEP the state and re-raise to the caller: never kill-by-relaunch
+   a merely busy host (documented event-loop stalls reach 17-179 s). *)
+fun validate_attached (s : attached_host) : connection option =
+  (case try_connect (#addr s) of
+    NONE => (invalidate_attached_if (#token s); NONE)
+  | SOME sock =>
+      let val conn = mk_conn sock
+       in (case check_identity (#token s) (Time.fromSeconds 10) conn of
+            Ours => SOME conn
+          | Not_Ours =>
+              (close_connection conn; invalidate_attached_if (#token s); NONE)
+          | Indeterminate exn =>
+              if lifeline_dead s
+              then (close_connection conn; invalidate_attached_if (#token s); NONE)
+              else (close_connection conn; Exn.reraise exn))
+      end)
+
+fun do_launch_attached () : connection =
+  let
+    val token = new_token ()
+    val ready_file = attached_file "info" token
+    val log_path = attached_file "log" token
+    val log_dir_p = Bash.string (File.platform_path log_dir)
+    (*attempt-local acquisitions: step-7 cleanup is scoped to THIS attempt -- an
+      Interrupt can be delivered at lock-body entry (a thread interrupted while queued
+      on launch_lock), and an unscoped cleanup would destroy a sibling's fresh host*)
+    val acquired : attached_host option Unsynchronized.ref = Unsynchronized.ref NONE
+    val installed = Unsynchronized.ref false
+    val holder_outcome : Process_Result.T Exn.result option Synchronized.var =
+          Synchronized.var "RPC.holder_outcome" NONE
+
+    val script = String.concat
+      [ (*created at EVERY launch: log_dir's make_directory side effect is heap-frozen*)
+        "mkdir -p ", log_dir_p, "\n"
+      , "export ISABELLE_HOME=", Bash.string (getenv "ISABELLE_HOME"), "\n"
+      , "export ISABELLE_HOME_USER=", Bash.string (getenv "ISABELLE_HOME_USER"), "\n"
+        (*stale-file sweep, POSIX only (Cygwin kill(1) cannot probe native pids).
+          Ready-files older than 10 min are crashed predecessors' debris -- the age
+          bound protects concurrent siblings' in-flight ready-files (launch_lock is
+          per-process; this directory is shared).  Logs older than 7 days go only if
+          the ML pid leading their token is dead (kill -0; false keep on pid reuse is
+          harmless -- never unlink a live session's log).*)
+      , "case \"$(uname -s 2>/dev/null)\" in CYGWIN*|MSYS*) : ;; *)\n"
+      , "  find ", log_dir_p,
+           " -maxdepth 1 -name 'RPC_attached_*.info' -mmin +10 -delete 2>/dev/null\n"
+      , "  for f in $(find ", log_dir_p,
+           " -maxdepth 1 -name 'RPC_attached_*.log' -mtime +7 2>/dev/null); do\n"
+      , "    p=$(basename \"$f\"); p=${p#RPC_attached_}; p=${p%%-*}\n"
+      , "    kill -0 \"$p\" 2>/dev/null || rm -f \"$f\"\n"
+      , "  done ;;\n"
+      , "esac\n"
+      , "exec ", Bash.string (Lazy.force python_cmd)
+      , " -c \"import Isabelle_RPC_Host\nIsabelle_RPC_Host.run_attached__()\" "
+      , Bash.string "127.0.0.1:0", " "
+      , Bash.string (File.platform_path log_path), " "
+      , Bash.string (File.platform_path ready_file), " "
+      , Bash.string token
+        (*BOTH stdio streams to the log: an attached child's inherited pipes would
+          otherwise accumulate in JVM heap for the host's whole life and be lost at
+          its os._exit*)
+      , " >> ", Bash.string (File.platform_path log_path), " 2>&1" ]
+
+    fun fail_diagnosis reason =
+      let val py = Lazy.force python_cmd
+          (*attribute reference, not a bare import: a plain `import Isabelle_RPC_Host`
+            SUCCEEDS on an old wheel and would hide the version skew*)
+          val probe = Isabelle_System.bash_process (Bash.script
+            (Bash.string py ^
+             " -c 'import Isabelle_RPC_Host; Isabelle_RPC_Host.run_attached__'"))
+          val hint =
+            if Process_Result.ok probe then ""
+            else "\n\nThe interpreter used was:\n    " ^ py ^
+                 "\nand probing it failed with:\n" ^ Process_Result.err probe ^
+                 (if getenv "ISABELLE_RPC_PYTHON" <> "" then
+                    "\nThat interpreter came from ISABELLE_RPC_PYTHON; point it at one\
+                    \ that has an Isabelle_RPC_Host wheel >= 0.4.0 installed\
+                    \ (run_attached__ must exist)."
+                  else
+                    "\nIt was discovered with `command -v python3` under Isabelle's bash\
+                    \ (Cygwin on Windows -- it finds a Cygwin interpreter rather than the\
+                    \ native one wheels are installed into).  Set ISABELLE_RPC_PYTHON to\
+                    \ an interpreter with an Isabelle_RPC_Host wheel >= 0.4.0.")
+          val log_tail =
+            (case try File.read log_path of
+              SOME s =>
+                let val lines = split_lines s
+                    val tail =
+                      if length lines > 20
+                      then List.drop (lines, length lines - 20) else lines
+                 in "\n\nHost log tail (" ^ File.platform_path log_path ^ "):\n" ^
+                    cat_lines tail
+                end
+            | NONE => "")
+       in error ("Failed to launch the attached RPC host: " ^ reason ^ hint ^ log_tail)
+      end
+
+    fun launch_body () =
+      let
+        (*holder thread: blocks in bash_process for the host's whole life; forked with
+          default params = uninterruptible, so no spurious interrupt can kill the host.
+          Its result is recorded so the poll below fails fast on instant death instead
+          of burning the 40 s budget.  When the host eventually dies, bash_process
+          returns and the thread ends -- holders never accumulate.*)
+        val _ = Isabelle_Thread.fork (Isabelle_Thread.params "rpc_attached_host_holder")
+                  (fn () =>
+                    let val res = Exn.capture (fn () =>
+                          Isabelle_System.bash_process (Bash.script script)) ()
+                     in Synchronized.change holder_outcome (K (SOME res)) end)
+        fun poll 0 = fail_diagnosis "timed out waiting for the ready-file"
+          | poll n =
+              if File.exists ready_file then ()
+              else if is_some (Synchronized.value holder_outcome)
+              then fail_diagnosis "the launched python exited before binding"
+              else (OS.Process.sleep (Time.fromSeconds 1); poll (n - 1))
+        val _ = poll 40
+        val (port, token') =
+          (case File.read ready_file |> String.tokens Char.isSpace of
+            [port, tok] => (port, tok)
+          | _ => fail_diagnosis "malformed ready-file")
+        val _ = token' = token orelse fail_diagnosis "ready-file token mismatch"
+        val _ = try File.rm ready_file
+        val addr = ("127.0.0.1", port)
+        val sock = connect_retry addr 20
+        val conn = mk_conn sock
+        (*60 s launch-path handshake: must cover the <= 40 s component-import window
+          that run_attached__ places AFTER bind (our connection sits in the TCP backlog
+          meanwhile)*)
+        val _ =
+          (case check_identity token (Time.fromSeconds 60) conn of
+            Ours => ()
+          | _ => (close_connection conn;
+                  fail_diagnosis "the launched host failed the identity handshake"))
+        (*lifeline: tight uninterruptible bubble around connect-then-record, so an
+          async Interrupt between the two cannot orphan a claimed lifeline*)
+        val lsock =
+          Thread_Attributes.uninterruptible (fn _ => fn () =>
+            let val s =
+                  (case try_connect addr of
+                    SOME s => s
+                  | NONE => raise Fail "lifeline connect failed")
+                val host : attached_host =
+                  {pid = ML_Pid.get (), addr = addr, token = token,
+                   lifeline_desc = Socket.sockDesc s,
+                   close_lifeline = fn () => Socket.close s handle OS.SysErr _ => ()}
+             in acquired := SOME host; s end) ()
+        val lconn = mk_conn lsock
+        val _ = (#3 lconn) := SOME (Time.fromSeconds 60)
+        val _ = write lconn (packPair (packString, packString))
+                      ("attached_lifeline", token)
+        val _ =
+          (case read_tagged unpackUnit lconn of
+            User_Response () => ()   (*the claim ack; the host never writes again*)
+          | Remote_Error err => raise Fail ("lifeline claim rejected: " ^ err)
+          | Callback_Request _ => raise Fail "lifeline claim was not acked")
+        (*install is the LAST act: on any earlier failure the state var still holds
+          nothing of this attempt's*)
+        val _ = install_attached (the (! acquired))
+        val _ = installed := true
+        val _ = tracing ("Attached RPC host ready on 127.0.0.1:" ^ port ^
+                         "  Log: " ^ File.platform_path log_path)
+       in conn end
+  in
+    \<^try>\<open>launch_body ()
+    catch exn =>
+      ( (*attempt-scoped cleanup (uninterruptible handler): close only THIS attempt's
+          lifeline; the state var was never touched unless install succeeded*)
+        (if ! installed then ()
+         else (case ! acquired of SOME h => #close_lifeline h () | NONE => ()))
+      ; (try File.rm ready_file; ())
+      ; Exn.reraise exn)\<close>
   end
+
+fun ephemeral_connection () =
+  let
+    fun revalidate () =
+      (case read_attached_state () of
+        SOME s => validate_attached s
+      | NONE => NONE)
+  in
+    (case revalidate () of   (*fast path, outside the lock*)
+      SOME conn => conn
+    | NONE =>
+        Synchronized.change_result launch_lock (fn () =>
+          ((case revalidate () of   (*step 0: in-lock re-check -- replaces the old
+                                      addr-keyed try_connect double-check, which has
+                                      no addr to probe before a launch*)
+             SOME conn => conn
+           | NONE => do_launch_attached ()), ())))
+  end
+
+end
+
+fun make_connection () : connection =
+  (case addr_mode () of
+    Fixed (h, p) =>
+      (case try_connect (h, p) of
+        SOME sock => mk_conn sock
+      | NONE =>
+          error ("RPC_Host=" ^ h ^ ":" ^ p ^ " is set but nothing is listening.\n\
+            \Setting RPC_Host means the host is launched and managed externally:\
+            \ start it with `isabelle-rpc-host` or\n\
+            \  python -c 'import Isabelle_RPC_Host; Isabelle_RPC_Host.fork_and_launch__()' " ^
+            h ^ ":" ^ p ^ " <log-file>\n\
+            \or unset RPC_Host to get an automatic per-session host."))
+  | Ephemeral => ephemeral_connection ())
+
+(** Connection Pool **)
 
 val connection_pool : connection list Synchronized.var
       = Synchronized.var "RPC.connection_pool" []

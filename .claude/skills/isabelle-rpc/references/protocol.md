@@ -95,27 +95,39 @@ type connection = BinIO.StreamIO.instream Unsynchronized.ref
 The read side uses `Socket.select` with the timeout ref, so a hung server surfaces as
 `Read_Timeout` rather than a permanent block.
 
-## Host lifecycle
+## Host lifecycle (since 0.4.0: RPC_EPHEMERAL_HOST_PLAN.md)
 
-`connect_agent_socket` (`RPC.ML:278-288`):
+`make_connection` branches on `addr_mode ()`:
 
-1. `try_connect` — 5 s connect timeout.
-2. On failure, if `AUTO_START_RPC_SERVER` is unset/true, take `launch_lock`, re-try the
-   connect (another thread may have won), else `launch_RPC_host` and `connect_retry` 20× at
-   1 s intervals. Exhausting the retries kills the host via its PID file and errors.
-3. If auto-start is disabled, error immediately.
+- **Fixed** (`RPC_Host` set): `try_connect` (5 s) → use, or an actionable error. Isabelle
+  never launches at a configured address; `AUTO_START_RPC_SERVER` is retired/ignored.
+- **Ephemeral** (`RPC_Host` unset): consult the per-process state record
+  `{pid, addr, token, lifeline}` (pid stamp discards heap-inherited records without
+  closing their socket) → validate a live record with the `rpc_host_identity` token
+  handshake (10 s; any tag-1 error = not ours; timeout/protocol errors are resolved by a
+  zero-timeout readability poll of the lifeline — readable = EOF = host dead) → else
+  launch under `launch_lock` (with an in-lock state re-check first).
 
-`launch_RPC_host` shells out to:
+The ephemeral launch (`do_launch_attached`): a holder thread blocks in `bash_process` on
+a script that `mkdir -p`s the log dir, sweeps stale `RPC_attached_*` files (POSIX only),
+and `exec`s
 
 ```
 python -c "import Isabelle_RPC_Host
-Isabelle_RPC_Host.fork_and_launch__()" <host:port> <log_path>
+Isabelle_RPC_Host.run_attached__()" 127.0.0.1:0 <log> <ready_file> <token> >> <log> 2>&1
 ```
 
-`fork_and_launch__` (`rpc.py:486-556`) is a classic double-fork daemon: `os.chdir("/")`,
-`setsid`, `umask(0)`, second fork, stdio → `/dev/null`. It writes
-`$ISABELLE_HOME_USER/log/RPC_<host>_<port>.pid` (**one file per address, overwritten each
-launch — no multi-instance protection**) and reads `ISABELLE_RPC_DEBUG`.
+`run_attached__` arms a 300 s daemon-thread leak guard at entry, binds port 0, atomically
+writes `"<port> <token>"` to the ready-file, runs the component imports, then serves. ML
+polls the ready-file (fast-failing via the holder's outcome var if the python dies
+instantly), connects, does the 60 s identity handshake, then claims the lifeline: an
+`attached_lifeline` call whose reply is written by the procedure itself (it never
+returns — it disarms the guard, acks once, then awaits the connection's reader task and
+`os._exit(0)`s when it completes, i.e. the instant this Isabelle process dies).
+
+`fork_and_launch__` (the classic double-fork daemon, unchanged) is now used **only by
+external launches** (CLI/scripts); the ML side never calls it. It still writes the
+per-address pid file; attached hosts write none.
 
 `launcher.py`'s `main()` does **not** daemonize; it runs the server in the foreground. The two
 entry points differ in `argv` shape: `main()` takes `[prog, addr, log_file]`,
