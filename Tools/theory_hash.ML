@@ -26,6 +26,15 @@ signature THEORY_HASH = sig
   val to_hex : hash -> string
   val store_theory_hash : theory -> unit
   val resolve_theory : Context.generic -> string -> theory
+  (* Identity of THIS ML process, generated once on first use.  Together with a
+     theory's serial (Context.theory_identifier) it forms the WIP theory-status
+     skip pair (Semantic_Embedding CHECK_OUTDATE_PLAN.md §3.4): a serial is a
+     process-local counter, so two sessions can mint the same value for
+     different content -- a stored serial may only ever be trusted alongside
+     the process that minted it.  LAZY on purpose: a plain top-level value
+     would be computed at heap-build time and frozen into the heap, giving
+     every process that loads the heap the SAME identity. *)
+  val process_id : unit -> string
 end
 
 structure Theory_Hash : THEORY_HASH = struct
@@ -231,6 +240,22 @@ fun store_theory_hash thy =
     Remote_Procedure_Calling.call_command store_cmd entries
   end
 
+(* See the signature comment.  Nanosecond start time ++ Isabelle's own serial
+   counter: unique enough that a collision would additionally need the same
+   theory serial to cause even one false skip. *)
+local
+  val id_var : string option Synchronized.var =
+    Synchronized.var "Theory_Hash.process_id" NONE
+in
+fun process_id () =
+  Synchronized.change_result id_var (fn
+    SOME id => (id, SOME id)
+  | NONE =>
+      let val id =
+        string_of_int (Time.toNanoseconds (Time.now ())) ^ "-" ^ serial_string ()
+      in (id, SOME id) end)
+end
+
 end
 
 val _ = Theory.setup (Context.theory_map (
@@ -240,5 +265,24 @@ val _ = Theory.setup (Context.theory_map (
     ret_schema = MessagePackBinIO.Pack.packOption MessagePackBinIO.Pack.packString,
     function = fn h =>
       Option.map Context.theory_long_name (Theory_Hash.theory_of h),
+    timeout = NONE
+  }
+  #> Remote_Procedure_Calling.register_global_callback {
+    (* The WIP theory-status skip pair (process id, theory serial) of the
+       loaded theory behind a hash -- for Python paths (the embed side) that
+       hold only a theory hash.  NB the value-passing discipline
+       (CHECK_OUTDATE_PLAN.md §3.4): the serial is read off the theory VALUE
+       this process most recently hashed under `h` (theory_of's table), which
+       is the value whose entities the pipeline enumerated; interpret-side ML
+       callers do not use this callback at all -- they read the serial off the
+       theory value already in hand. *)
+    name = "Theory_Hash.process_serial_of",
+    arg_schema = MessagePackBinIO.Unpack.unpackBytes,
+    ret_schema = MessagePackBinIO.Pack.packOption
+      (MessagePackBinIO.Pack.packPair
+        (MessagePackBinIO.Pack.packString, MessagePackBinIO.Pack.packInt)),
+    function = fn h =>
+      Option.map (fn thy => (Theory_Hash.process_id (), Context.theory_identifier thy))
+        (Theory_Hash.theory_of h),
     timeout = NONE
   }))
