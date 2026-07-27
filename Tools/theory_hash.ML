@@ -179,7 +179,21 @@ fun hash_of thy =
               end
             else
               let
-                (* FNV-1a 128-bit hash of theory name, set LSB *)
+                (* FNV-1a 128-bit hash of theory name, set LSB.
+
+                   THIS BRANCH DEFINES "WIP": a theory with Resources.loaded_theory
+                   false is a WIP theory, keyed by NAME -- the hash is deliberately
+                   content-independent (it does not change when the theory's content
+                   changes), giving identity that is stable across edits and
+                   sessions.  Change detection for WIP entities is someone else's
+                   job by design: Semantic_Embedding's incremental-invalidation
+                   fields (semantic digest / deps / version / interpreted_at, see
+                   its CHECK_OUTDATE_PLAN.md §2-§4) exist exactly for keys minted
+                   here, and its enumerate_entries computes digests only for
+                   theories on this side of the fork.  Keep the two branch
+                   conditions in sync with that consumer: the WIP bit this branch
+                   sets (LSB = 1) is what Python's is_WIP and the CI export filter
+                   read. *)
                 val arr = Term_Digest.digest128_to_array (Term_Digest.string128 name)
                 val _ = Word8Array.update (arr, 0,
                   Word8.orb (Word8Array.sub (arr, 0), 0w1))
