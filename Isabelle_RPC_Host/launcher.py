@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Entry point of the Isabelle RPC host server."""
 import asyncio
-import logging
 import os
 import sys
 
@@ -9,8 +8,9 @@ import Isabelle_RPC_Host
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
-
+    # No logging.basicConfig here: mk_logger_ below configures the root logger
+    # itself (with force=True).  Doing it here as well only ever added a second
+    # stderr handler that doubled every line.
     if len(sys.argv) > 1:
         addr = sys.argv[1]
     else:

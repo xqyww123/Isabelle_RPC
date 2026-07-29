@@ -585,28 +585,47 @@ def _load_remote_procedures(logger: logging.Logger) -> None:
             logger.info(f"Loading RPC component: {line}")
             importlib.import_module(line)
 
-def mk_logger_(addr: str, log_file: str | None) -> logging.Logger:
-    # Configure logging
-    logger = logging.getLogger(__name__)
-    logger.propagate = False  # Prevent duplicate logging to root logger
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        #file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter(
-            f'%(asctime)s - Isabelle RPC Host {addr} - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(formatter)
+# Third-party loggers that are far too chatty at DEBUG, which is what the root
+# logger now runs at.  httpx emits one INFO per HTTP request (i.e. per embedding
+# call) and httpcore around ten DEBUG lines per request; between them they can
+# bury the host's own lines entirely.
+_NOISY_LOGGERS = ('httpx', 'httpcore', 'anthropic', 'mcp', 'uvicorn', 'asyncio')
 
-        # Add handler to logger
-        logger.addHandler(file_handler)
+def _log_format_(addr: str) -> str:
+    # %(name)s replaces the old hardcoded "Isabelle RPC Host" prefix: now that
+    # records arrive from every loaded component, which logger emitted a line is
+    # the useful thing to see, and the shortened "Host <addr>" still says whose
+    # log this is.
+    return f'%(asctime)s - Host {addr} - %(name)s - %(levelname)s - %(message)s'
+
+
+def mk_logger_(addr: str, log_file: str | None) -> logging.Logger:
+    """Configure process-wide logging for an RPC host and return its own logger.
+
+    THE HANDLER GOES ON THE ROOT LOGGER, not on this module's.  The host does not
+    only log for itself: the RPC components it loads -- Isabelle_Semantic_Embedding
+    above all -- log under their own module names, which are not children of
+    ``Isabelle_RPC_Host.rpc``.  With the handler attached here and ``propagate``
+    off (as it used to be), every one of those records missed the log file: under
+    ``fork_and_launch__`` -- the path long-lived hosts actually use -- stderr went
+    to /dev/null and they were destroyed outright.  Attaching to root makes the log
+    file the one place everything lands, and ``Isabelle_RPC_Host.rpc`` is left
+    handler-less and propagating so ``server.logger`` and every ``getChild`` call
+    site keep working unchanged.
+    """
+    fmt = _log_format_(addr)
+    if log_file:
+        handler: logging.Handler = logging.FileHandler(log_file)
+        handler.setFormatter(logging.Formatter(fmt))
     else:
-        stream_handler = logging.StreamHandler(sys.stderr)
-        #stream_handler.setLevel(logging.DEBUG)
-        color_formatter = ColorFormatter(f'%(asctime)s - Isabelle RPC Host {addr} - %(levelname)s - %(message)s')
-        stream_handler.setFormatter(color_formatter)
-        logger.addHandler(stream_handler)
-    logger.setLevel(logging.DEBUG)
-    return logger
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(ColorFormatter(fmt))
+    # force=True: drop whatever a library (or an earlier call) left on root, so the
+    # host's log file is the single destination rather than one of several.
+    logging.basicConfig(handlers=[handler], level=logging.DEBUG, force=True)
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    return logging.getLogger(__name__)
 
 def launch_server_(addr: str, logger: logging.Logger, debugging: bool = False) -> None:
     _load_remote_procedures(logger)
@@ -912,7 +931,15 @@ def fork_and_launch__():
 
     si = open(os.devnull, 'r')
     so = open(os.devnull, 'a+')
-    se = open(os.devnull, 'a+')
+    # stderr to the LOG FILE, not /dev/null -- the same choice _spawn_detached_nt__
+    # makes on Windows, and the same one Tools/RPC.ML makes for the attached host.
+    # Anything written to fd 2 rather than through the logging machinery (a C-level
+    # abort, a stray print, a traceback from a thread that outlives the handler) was
+    # simply destroyed here, in exactly the deployment where it was least
+    # recoverable: the detached, long-lived host nobody is watching a terminal for.
+    # A regular file is not the bash pipe Isabelle reads to EOF, so it does not
+    # reintroduce the hang _spawn_detached_nt__'s comment describes.
+    se = open(log_file, 'a')
 
     os.dup2(si.fileno(), sys.stdin.fileno())
     os.dup2(so.fileno(), sys.stdout.fileno())
