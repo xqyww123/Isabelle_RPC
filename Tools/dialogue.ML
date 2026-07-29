@@ -79,21 +79,36 @@ val _ = Theory.setup (Context.theory_map (
     arg_schema = unpackPair (unpackString, unpackList unpackString),
     ret_schema = packOption packString,
     function = fn (question, options) =>
-      if Dialogue.responder_attached () then
-        SOME (let
-          val (text, promise) = Active.dialog_text ()
-          val opts_str = String.concatWith "  " (map text options)
-          val _ = writeln (question ^ "\n" ^ opts_str)
-        in Future.join promise end)
-      else
-        let
-          val (capable, interactive, cls) = Dialogue.frontend_identity ()
-          val _ = tracing ("dialogue: no responder (capable=" ^
-            Value.print_bool capable ^ ", interactive=" ^
-            (case interactive of NONE => "unknown"
-             | SOME b => Value.print_bool b) ^ ", frontend=" ^ cls ^
-            ") -- returning the sentinel")
-        in NONE end,
+      let
+        fun ask () =
+          SOME (let
+            val (text, promise) = Active.dialog_text ()
+            val opts_str = String.concatWith "  " (map text options)
+            val _ = writeln (question ^ "\n" ^ opts_str)
+          in Future.join promise end)
+      in
+        (* ONE probe per call, shared by the decision and the trace (the
+           over-design audit found the previous shape probed a second time
+           just for the tracing line -- and re-introduced the probe under
+           policy "absent", the very round trip that policy exists to save).
+           Same semantics as Dialogue.responder_attached, inlined so the
+           probe triple is in hand for the trace. *)
+        case try Options.default_string "isabelle_rpc_dialogue" of
+          SOME "present" => ask ()
+        | SOME "absent" =>
+            (tracing "dialogue: policy absent -- returning the sentinel"; NONE)
+        | _ =>
+            let val (capable, interactive, cls) = Dialogue.frontend_identity ()
+            in
+              if capable then ask ()
+              else
+                (tracing ("dialogue: no responder (interactive=" ^
+                   (case interactive of NONE => "unknown"
+                    | SOME b => Value.print_bool b) ^ ", frontend=" ^ cls ^
+                   ") -- returning the sentinel");
+                 NONE)
+            end
+      end,
     timeout = NONE  (* NB dead field: mk_callback never applies it (RPC.ML:440) *)
   }))
 
