@@ -1,0 +1,6 @@
+(* :mode=isabelle-options: *)
+
+section "Isabelle_RPC"
+
+public option isabelle_rpc_dialogue : string = "auto"
+  -- "dialogue policy: auto (probe for a responder), present (always ask), absent (never ask)"

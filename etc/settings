@@ -1,0 +1,3 @@
+# -*- shell-script -*- :mode=shellscript:
+ISABELLE_RPC_HOME="$COMPONENT"
+classpath "$ISABELLE_RPC_HOME/lib/isabelle_rpc.jar"

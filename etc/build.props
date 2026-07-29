@@ -1,0 +1,9 @@
+title = Isabelle/Scala/Isabelle_RPC
+module = lib/isabelle_rpc.jar
+no_build = true
+requirements = \
+  env:ISABELLE_SCALA_JAR
+sources = \
+  src/scala/frontend_identity.scala
+services = \
+  isabelle.isabelle_rpc.RPC_Functions
