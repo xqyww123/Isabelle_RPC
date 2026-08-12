@@ -1254,17 +1254,16 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
                             fact_space = fact_space, snapshot = snapshot}
         val (live_entries, _) =
           fold (fn (disp, filt_name, thm, pos, is_local) => fn (acc, remaining) =>
-            (* filters ordered cheap-to-expensive.  scope_ok is LAST: its
-               thm_constituents does a name-space lookup and a theory hash per
-               constant, well above one whole-prop walk. *)
+            (* filters ordered cheap-to-expensive: filter_opt (infra: name + blacklist)
+               before prop_matches / target_type_filter which walk the whole prop. *)
             if remaining = 0 then (acc, 0)
             else if not (name_filter disp) then (acc, remaining)
+            else if not (scope_ok (map #1 (#2 (Universal_Key.thm_constituents ctx thm))))
+                 then (acc, remaining)
             else if not (case filter_opt of NONE => true | SOME f => f (filt_name, thm))
                  then (acc, remaining)
             else if not (prop_matches (Thm.full_prop_of thm)) then (acc, remaining)
             else if not (target_type_filter thm) then (acc, remaining)
-            else if not (scope_ok (map #1 (#2 (Universal_Key.thm_constituents ctx thm))))
-                 then (acc, remaining)
             else
               let val k = key_of ctx thm
               in if Bytehashtab.defined key_seen k then (acc, remaining)

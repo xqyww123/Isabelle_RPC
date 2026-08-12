@@ -578,9 +578,21 @@ fun compute_constituents (context : Context.generic) (prop : term)
    is claimed by at most one theory.
 
    That population is a shared mutable pair — the cache, plus a claims map (theory
-   base name -> theory long name) recording who has claimed each base name under
-   it — carried in Theory_Data.  merge reconciles the parents, and a beginning
-   theory whose base name is already claimed by another forks a filtered copy.
+   base name -> theory long name) — carried in Theory_Data.  The invariant is over
+   CONES, not over the theories that ran the hook: for every theory T sharing the
+   pair and every theory A in T's cone, claims[base A] = long A.  Then two members
+   whose cones both hold a theory of base name b must hold the SAME one, so both
+   resolve the internal names it qualifies identically — which is exactly what the
+   digest key cannot distinguish.
+
+   Checking the whole cone is what the hook must do, because a theory can join the
+   population without any of its cone running the hook: Context.merge_data skips
+   the merge function entirely when only one parent carries the data
+   (Pure/context.ML:454), so a theory inherits the pair from one parent while
+   dragging in the cones of its other parents.  Theory.ancestors_of is a
+   materialised field (Pure/context.ML:323), so the walk is one Symtab lookup per
+   ancestor, not a graph traversal.
+
    The pair's Synchronized.var is the lock for every read and write of the cache
    it holds: a fork's `dest` must not walk a table being rehashed in place. *)
 
@@ -588,8 +600,8 @@ type cache_and_claims =
   {cache : (Theory_Hash.hash * constituent list * constituents_report) Digest_Tab.table,
    claims : theory_long_name Symtab.table}
 
-(* `id` because Synchronized.var is abstract and admits no equality, while merge
-   must decide whether two parents hold the SAME pair. *)
+(* `id` because Synchronized.var is abstract and admits no equality, so a fork is
+   otherwise unobservable (cache_scope_id, and the tests that use it). *)
 type shared_pair = {id : int, var : cache_and_claims Synchronized.var}
 
 datatype cache_scope = No_Cache | Cache of shared_pair
@@ -608,70 +620,77 @@ structure Cache_Scope = Theory_Data'(
      defect this scoping exists to prevent.  thm_constituents bypasses the cache
      entirely on No_Cache, so such a heap runs uncached. *)
   val empty = No_Cache
-  (* Same pair in every data-carrying parent -> inherit it.  Otherwise a FRESH
-     pair: empty cache (entries of either population may be unsound in the merged
-     cone) and the union of the parents' claims maps.  Allocating and unioning
-     only on that branch matters: a claims map holds one entry per theory begun
-     under the pair, so unconditional unioning would be a five-figure Symtab merge
-     at every theory begin.  Conflicting claims for one base name can only come
-     from foreign cones (eq_thy_consistent forbids two same-base-name ancestors),
-     and keeping either is conservative — the merged cache is empty.
-
-     Merge cannot do more: the beginning theory is not among its arguments. *)
+  (* Any parent's pair will do.  claim_cache_scope then checks the beginning
+     theory's WHOLE cone — which subsumes every parent's — against that pair's
+     claims and forks if the other parents' cones disagree.  Merge cannot do more
+     anyway: the beginning theory is not among its arguments. *)
   fun merge args =
     (case map_filter (fn (_, No_Cache) => NONE | (_, Cache p) => SOME p) args of
        [] => No_Cache
-     | (p : shared_pair) :: rest =>
-         if forall (fn (q : shared_pair) => #id q = #id p) rest then Cache p
-         else
-           make_pair (Digest_Tab.empty 1024)
-             (fold (fn (q : shared_pair) => fn cs =>
-                      Symtab.merge (K true) (cs, #claims (Synchronized.value (#var q))))
-                   (p :: rest) Symtab.empty))
+     | p :: _ => Cache p)
 )
 
-(* A beginning theory claims its own base name under the pair it inherits.
-   - already mapped to THIS theory's long name: the hook is being re-applied.
-     Theory.apply_wrappers re-runs the whole wrapper list until every wrapper
-     returns NONE (theory.ML:83, library.ML:334-340), and semantic_store's
-     update_thm_cache forces at least one extra pass, so without this test a fork
-     would re-fork forever inside the critical section.
-   - mapped to a DIFFERENT long name: fork.  The copy keeps exactly those entries
-     whose constituent list names no theory of the colliding base name; an entry
-     that does name one was computed where that base name resolved elsewhere.
-   - absent: record the claim in the inherited pair and change nothing else. *)
+(* A beginning theory accounts for its whole cone under the pair it inherits.
+   Per ancestor (and itself), the claims map either
+   - maps its base name to its own long name: already accounted for;
+   - has no entry for its base name: record one.  NOT a reason to fork — the first
+     theory to allocate a pair brings thousands of never-claimed ancestors, none of
+     which collides with anything;
+   - maps its base name to a DIFFERENT long name: a collision.
+
+   With no collision the theory value is unchanged, so the hook returns NONE and
+   Theory.apply_wrappers' loop (theory.ML:83, library.ML:334-340) need not run
+   again on our account.  With collisions it forks: a copy of the cache keeping
+   exactly the entries whose constituent list names no theory of any colliding base
+   name, and the claims map with this cone's answers written over the colliding
+   ones.  A re-application then finds the whole cone accounted for and returns
+   NONE, which is what stops the fork from repeating forever inside the critical
+   section (semantic_store's update_thm_cache forces at least one extra pass). *)
 fun claim_cache_scope thy =
   let
-    val long = Context.theory_long_name thy
-    val base = Long_Name.base_name long
-    fun purge cache =
+    val cone =
+      map (fn t => let val long = Context.theory_long_name t
+                   in (Long_Name.base_name long, long) end)
+          (Theory.nodes_of thy)
+
+    (* base names this cone answers differently from the claims map, and the
+       claims the map is missing *)
+    fun classify claims =
+      fold (fn (base, long) => fn (missing, clashing) =>
+               case Symtab.lookup claims base of
+                 NONE => ((base, long) :: missing, clashing)
+               | SOME claimed =>
+                   if claimed = long then (missing, clashing)
+                   else (missing, Symtab.update (base, ()) clashing))
+           cone ([], Symtab.empty)
+
+    fun purge clashing cache =
       Digest_Tab.make
         (filter (fn (_, (_, cs, _)) =>
-                    not (exists (fn (n, _) => Long_Name.base_name n = base) cs))
+                    not (exists (fn (n, _) =>
+                                    Symtab.defined clashing (Long_Name.base_name n))
+                                cs))
                 (Digest_Tab.dest cache))
   in
     case Cache_Scope.get thy of
       No_Cache =>
         SOME (Cache_Scope.put
-                (make_pair (Digest_Tab.empty 1024) (Symtab.make [(base, long)])) thy)
+                (make_pair (Digest_Tab.empty 1024) (fold Symtab.update cone Symtab.empty))
+                thy)
     | Cache p =>
         Synchronized.change_result (#var p) (fn content =>
-          case Symtab.lookup (#claims content) base of
-            SOME claimed =>
-              if claimed = long then (NONE, content)
-              else
-                (SOME (Cache_Scope.put
-                         (make_pair (purge (#cache content))
-                                    (Symtab.update (base, long) (#claims content)))
-                         thy),
-                 content)
-          | NONE =>
-              (* The pair is already inherited and the claim is recorded in it, so
-                 the theory value does not change: NONE, and the wrapper loop need
-                 not run again on our account. *)
+          let val (missing, clashing) = classify (#claims content) in
+            if Symtab.is_empty clashing then
               (NONE,
                {cache = #cache content,
-                claims = Symtab.update (base, long) (#claims content)}))
+                claims = fold Symtab.update missing (#claims content)})
+            else
+              (SOME (Cache_Scope.put
+                       (make_pair (purge clashing (#cache content))
+                                  (fold Symtab.update cone (#claims content)))
+                       thy),
+               content)
+          end)
   end
 
 val _ = Theory.setup (Theory.at_begin claim_cache_scope)

@@ -6,3 +6,4 @@ session Isabelle_RPC_Test in "test" = "HOL-Library" +
   theories
     Test_Universal_Key
     Test_Name_Spaces
+    Test_Cache_Scope

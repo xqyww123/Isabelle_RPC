@@ -51,6 +51,14 @@ val _ =
               " names are carried by both the constant and the type space of " ^
               "HOL-Library.Multiset, not the 4 measured: " ^ commas_quote shared)
 
+(* 3. A theory from a pre-built heap must carry NO constituents cache.  This is
+      what Cache_Scope's `empty = No_Cache` buys: THEORY_DATA'_ARGS' empty is one
+      shared value, so a Cache-valued default would hand every theory of the image
+      the same unpartitioned cache. *)
+val _ =
+  if is_none (Universal_Key.cache_scope_id \<^theory>\<open>List\<close>) then ()
+  else error "Test_Name_Spaces: a theory loaded from the heap carries a constituents cache"
+
 in
 val _ = writeln "Test_Name_Spaces: all checks passed"
 end
