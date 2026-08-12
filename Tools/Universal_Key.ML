@@ -639,7 +639,7 @@ structure Cache_Scope = Theory_Data'(
    - mapped to a DIFFERENT long name: fork.  The copy keeps exactly those entries
      whose constituent list names no theory of the colliding base name; an entry
      that does name one was computed where that base name resolved elsewhere.
-   - absent: inherit the pair and record the claim. *)
+   - absent: record the claim in the inherited pair and change nothing else. *)
 fun claim_cache_scope thy =
   let
     val long = Context.theory_long_name thy
@@ -666,7 +666,10 @@ fun claim_cache_scope thy =
                          thy),
                  content)
           | NONE =>
-              (SOME (Cache_Scope.put (Cache p) thy),
+              (* The pair is already inherited and the claim is recorded in it, so
+                 the theory value does not change: NONE, and the wrapper loop need
+                 not run again on our account. *)
+              (NONE,
                {cache = #cache content,
                 claims = Symtab.update (base, long) (#claims content)}))
   end
