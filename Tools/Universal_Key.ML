@@ -58,11 +58,18 @@
   - Constituent theories.  The prefix is the XOR of the theory hashes of the
     proposition's constituent theories — the defining theory of every constant
     and type constructor in Thm.prop_of.  A constant/type's defining theory is
-    taken as the LEADING QUALIFIER of its fully qualified name (HOL.conj -> HOL,
-    Groups.plus_class.plus -> Groups); Pure's primitive types (fun, prop, ...)
-    carry no qualifier and belong to Pure.  No name-space lookup is involved, so
-    the key depends only on the thm, not on the context it is reached from.
-    (See compute_constituents / theory_short_of below.)
+    read off its Name_Space entry (#theory_long_name), the same source
+    key_of_ns_entity uses, and is therefore a theory LONG name.  NOT the leading
+    qualifier of the internal name: that qualifier is a theory BASE name, and
+    1,652 of AFP-ALL-4's 10,614 theories share one with another theory
+    (BUG_UNIVERSAL_KEY_SHORT_NAME.md).
+
+    The key is therefore a function of the proposition and of the CONE it is read
+    in, not of the path the thm was reached along.  Within one cone a theory base
+    name is unique by construction — Context.eq_thy_consistent
+    (Pure/context.ML:380-391) rejects two ancestors that share one — so two
+    contexts over the same ancestor set agree, in either resolution order.
+    (See compute_constituents below.)
 
   - LSB / WIP.  Hashes are XORed in full; the result's byte-0 LSB is then OR'd
     with the constituents' LSBs, so a key is WIP iff any constituent theory is
@@ -182,12 +189,32 @@ val retag_thm_key       : universal_key -> Word8.word -> universal_key
    16-byte theory-key component of theorem/rule keys) together with the
    sorted (theory long name, theory hash) list it was XORed from. *)
 type constituent = theory_long_name * Theory_Hash.hash
-val thm_constituents : Context.generic -> thm -> Theory_Hash.hash * constituent list
+(* The two ways the computation can be less than exact, so callers can gate on them:
+   - `skipped`: internal names with no entry in their name space.  Each contributes
+     nothing to the XOR and nothing to the constituent list.  A batch is exact iff
+     its total is 0.
+   - `empty_name_fallback`: some entry carried no theory name (proof-local and
+     global_naming declarations) and default_thy_long_name substituted the reading
+     context's own theory, making the result a function of that context rather than
+     of the proposition alone.  thm_constituents refuses to cache such a result. *)
+type constituents_report = {skipped : int, empty_name_fallback : bool}
+(* Running totals over every compute_constituents call in this process, so a batch
+   too deep to thread a report out of (key construction) can still gate: its
+   constituent sets are complete iff #skipped has not moved. *)
+val constituents_totals : unit -> {skipped : int, empty_name_fallback : int}
+(* Identity of the constituents cache a theory shares.  NONE means the theory
+   carries no cache — every theory of a heap built before this code.  Two theories
+   with the same id share one cache; a different id means the cache was forked or
+   freshly merged.  Diagnostic only. *)
+val cache_scope_id : theory -> int option
+val thm_constituents : Context.generic -> thm
+                     -> Theory_Hash.hash * constituent list * constituents_report
 (* Constituent theories of an arbitrary term (the defining theories of its
    constants and type constructors), same XOR-hash + sorted (long name, hash)
    list as thm_constituents.  Exposed for experience-memory keys, whose patterns
    are bare terms, not thms. *)
-val compute_constituents : Context.generic -> term -> Theory_Hash.hash * constituent list
+val compute_constituents : Context.generic -> term
+                         -> Theory_Hash.hash * constituent list * constituents_report
 (* Constituent list of a theorem/rule key built earlier in this session
    (populated as a side effect of key construction); NONE for any other key
    shape, or a thm/rule key not yet built in this session. *)
@@ -425,9 +452,10 @@ fun default_thy_long_name context "" = Context.theory_long_name (Context.theory_
    the XOR of the theory hashes of the proposition's constituent theories: the
    defining theories of all constants and type constructors occurring in
    Thm.prop_of (the same term Term_Digest.thm128 digests).  The key is thus
-   computable from the thm alone, identical along whatever path the thm is
-   reached, and changes whenever any constituent theory's content changes
-   (automatic invalidation of derived records).
+   computable from the proposition and the cone it is read in, identical along
+   whatever path the thm is reached within that cone, and changes whenever any
+   constituent theory's content changes (automatic invalidation of derived
+   records).
 
    LSB convention: hashes are XORed in full and the result's byte-0 LSB is then
    OR'd with the constituents' LSBs, so a key is WIP iff any constituent theory
@@ -442,7 +470,7 @@ fun default_thy_long_name context "" = Context.theory_long_name (Context.theory_
 
 type constituent = theory_long_name * Theory_Hash.hash
 
-val constituents_lock = Synchronized.var "Universal_Key.constituents" ()
+type constituents_report = {skipped : int, empty_name_fallback : bool}
 
 structure Digest_Tab = Hash_Table(struct
   type key = Term_Digest.digest128
@@ -450,40 +478,69 @@ structure Digest_Tab = Hash_Table(struct
   val eq = op = : Term_Digest.digest128 * Term_Digest.digest128 -> bool
 end)
 
-(* thm128 digest -> (XOR theory hash, sorted constituent list) *)
-val constituents_cache : (Theory_Hash.hash * constituent list) Digest_Tab.table =
-  Digest_Tab.empty 1024
-
-(* theorem/rule universal key -> sorted constituent list, for record writers *)
+(* theorem/rule universal key -> sorted constituent list, for record writers.
+   Process-global, and sound as such: the key embeds the XOR and the WIP OR of
+   exactly the list stored, so the key determines the value. *)
+val registry_lock = Synchronized.var "Universal_Key.constituents_registry" ()
 val constituents_registry : constituent list UK_Table.table = UK_Table.empty 1024
 
-(* The defining theory of a constant or type constructor is the leading
-   qualifier of its fully qualified name (HOL.conj -> HOL,
-   Groups.plus_class.plus -> Groups).  Pure's primitive types (fun, prop,
-   itself, idt, ...) carry no qualifier; they belong to Pure. *)
-fun theory_short_of name =
-  case Long_Name.explode name of
-    seg :: _ :: _ => seg
-  | _ => "Pure"
+val totals = Synchronized.var "Universal_Key.constituents_totals"
+  {skipped = 0, empty_name_fallback = 0}
+
+fun constituents_totals () = Synchronized.value totals
+
+(* Only an inexact run takes the lock. *)
+fun note_report {skipped = s, empty_name_fallback = f} =
+  if s = 0 andalso not f then ()
+  else
+    Synchronized.change totals (fn {skipped, empty_name_fallback} =>
+      {skipped = skipped + s,
+       empty_name_fallback = empty_name_fallback + (if f then 1 else 0)})
 
 fun compute_constituents (context : Context.generic) (prop : term)
-    : Theory_Hash.hash * constituent list =
+    : Theory_Hash.hash * constituent list * constituents_report =
   let
-    (* constituent theories, keyed by short name (unique within a runtime);
-       short-name resolution + hashing is memoized inside Theory_Hash. *)
-    val thys : constituent Strhashtab.table = Strhashtab.empty 16
+    val const_space =
+      Consts.space_of (Context.cases Sign.consts_of Proof_Context.consts_of context)
+    val type_space = Context.cases Sign.type_space Proof_Context.type_space context
 
-    fun add name =
-      let val short = theory_short_of name
-      in if Strhashtab.defined thys short then ()
-         else Strhashtab.update thys (short, Theory_Hash.hash_of_short context short)
-      end
+    (* Constituent theories keyed by theory LONG name.  The defining theory comes
+       from the name-space entry — the same source key_of_ns_entity uses — never
+       from the internal name's leading qualifier, which is a theory BASE name
+       shared by 1,652 of AFP-ALL-4's 10,614 theories. *)
+    val thys : constituent Strhashtab.table = Strhashtab.empty 16
+    (* One `seen` table PER NAME SPACE: a constant and a type constructor may
+       carry the same internal name, and a single shared table would then look up
+       only whichever of the two the walk met first. *)
+    val seen_const : unit Strhashtab.table = Strhashtab.empty 32
+    val seen_type  : unit Strhashtab.table = Strhashtab.empty 32
+    val skipped = Unsynchronized.ref 0
+    val fallback = Unsynchronized.ref false
+
+    (* `try` around the lookup rather than a Name_Space.declared guard followed by
+       the projection: both are Change_Table lookups on the same table, so the
+       guard would double the common case. *)
+    fun add seen space name =
+      if Strhashtab.defined seen name then ()
+      else
+        (Strhashtab.update seen (name, ());
+         case try (Name_Space.theory_name {long = true} space) name of
+           NONE => skipped := ! skipped + 1
+         | SOME raw =>
+             let
+               val _ = if raw = "" then fallback := true else ()
+               val long = default_thy_long_name context raw
+             in
+               if Strhashtab.defined thys long then ()
+               else Strhashtab.update thys
+                      (long, (long, Theory_Hash.hash_of_long context long))
+             end)
 
     (* NB: Term.Type qualified — the bare constructor name is shadowed by
        this structure's entity datatype. *)
-    fun walk_typ (Term.Type (c, Ts)) = (add c; List.app walk_typ Ts)
+    fun walk_typ (Term.Type (c, Ts)) = (add seen_type type_space c; List.app walk_typ Ts)
       | walk_typ _ = ()
-    fun walk (Const (c, T)) = (add c; walk_typ T)
+    fun walk (Const (c, T)) = (add seen_const const_space c; walk_typ T)
       | walk (Free (_, T)) = walk_typ T
       | walk (Var (_, T)) = walk_typ T
       | walk (Abs (_, T, t)) = (walk_typ T; walk t)
@@ -508,25 +565,143 @@ fun compute_constituents (context : Context.generic) (prop : term)
     val provenance =
       Strhashtab.fold (fn (_, c) => fn cs => c :: cs) thys []
       |> sort (string_ord o apply2 #1)
-  in (Word8Array.vector acc, provenance) end
+    val report = {skipped = ! skipped, empty_name_fallback = ! fallback}
+    val _ = note_report report
+  in (Word8Array.vector acc, provenance, report) end
 
-fun thm_constituents (context : Context.generic) (thm : thm)
-    : Theory_Hash.hash * constituent list =
-  let val d = Term_Digest.thm128 thm
+(* --- The constituents cache, and the population that may share one ---
+
+   Term_Digest.thm128 hashes a Const by its internal name, and an internal name is
+   qualified by its declaring theory's BASE name.  Two theories that share a base
+   name therefore give the same digest to two DIFFERENT propositions, so a cache
+   keyed by digest is sound only over a population in which every theory base name
+   is claimed by at most one theory.
+
+   That population is a shared mutable pair — the cache, plus a claims map (theory
+   base name -> theory long name) recording who has claimed each base name under
+   it — carried in Theory_Data.  merge reconciles the parents, and a beginning
+   theory whose base name is already claimed by another forks a filtered copy.
+   The pair's Synchronized.var is the lock for every read and write of the cache
+   it holds: a fork's `dest` must not walk a table being rehashed in place. *)
+
+type cache_and_claims =
+  {cache : (Theory_Hash.hash * constituent list * constituents_report) Digest_Tab.table,
+   claims : theory_long_name Symtab.table}
+
+(* `id` because Synchronized.var is abstract and admits no equality, while merge
+   must decide whether two parents hold the SAME pair. *)
+type shared_pair = {id : int, var : cache_and_claims Synchronized.var}
+
+datatype cache_scope = No_Cache | Cache of shared_pair
+
+fun make_pair cache claims : cache_scope =
+  {id = serial (),
+   var = Synchronized.var "Universal_Key.cache_scope" {cache = cache, claims = claims}}
+  |> Cache
+
+structure Cache_Scope = Theory_Data'(
+  type T = cache_scope
+  (* No_Cache is load-bearing.  THEORY_DATA'_ARGS' `empty` is a VALUE, evaluated
+     once and handed by get_data to every theory without an entry of its own
+     (Pure/context.ML:441-444, :744-749), so a Cache-valued default would be ONE
+     cache shared by all 10,614 theories of a heap built before this code — the
+     defect this scoping exists to prevent.  thm_constituents bypasses the cache
+     entirely on No_Cache, so such a heap runs uncached. *)
+  val empty = No_Cache
+  (* Same pair in every data-carrying parent -> inherit it.  Otherwise a FRESH
+     pair: empty cache (entries of either population may be unsound in the merged
+     cone) and the union of the parents' claims maps.  Allocating and unioning
+     only on that branch matters: a claims map holds one entry per theory begun
+     under the pair, so unconditional unioning would be a five-figure Symtab merge
+     at every theory begin.  Conflicting claims for one base name can only come
+     from foreign cones (eq_thy_consistent forbids two same-base-name ancestors),
+     and keeping either is conservative — the merged cache is empty.
+
+     Merge cannot do more: the beginning theory is not among its arguments. *)
+  fun merge args =
+    (case map_filter (fn (_, No_Cache) => NONE | (_, Cache p) => SOME p) args of
+       [] => No_Cache
+     | (p : shared_pair) :: rest =>
+         if forall (fn (q : shared_pair) => #id q = #id p) rest then Cache p
+         else
+           make_pair (Digest_Tab.empty 1024)
+             (fold (fn (q : shared_pair) => fn cs =>
+                      Symtab.merge (K true) (cs, #claims (Synchronized.value (#var q))))
+                   (p :: rest) Symtab.empty))
+)
+
+(* A beginning theory claims its own base name under the pair it inherits.
+   - already mapped to THIS theory's long name: the hook is being re-applied.
+     Theory.apply_wrappers re-runs the whole wrapper list until every wrapper
+     returns NONE (theory.ML:83, library.ML:334-340), and semantic_store's
+     update_thm_cache forces at least one extra pass, so without this test a fork
+     would re-fork forever inside the critical section.
+   - mapped to a DIFFERENT long name: fork.  The copy keeps exactly those entries
+     whose constituent list names no theory of the colliding base name; an entry
+     that does name one was computed where that base name resolved elsewhere.
+   - absent: inherit the pair and record the claim. *)
+fun claim_cache_scope thy =
+  let
+    val long = Context.theory_long_name thy
+    val base = Long_Name.base_name long
+    fun purge cache =
+      Digest_Tab.make
+        (filter (fn (_, (_, cs, _)) =>
+                    not (exists (fn (n, _) => Long_Name.base_name n = base) cs))
+                (Digest_Tab.dest cache))
   in
-    case Synchronized.change_result constituents_lock
-           (fn () => (Digest_Tab.lookup constituents_cache d, ())) of
-      SOME r => r
-    | NONE =>
-        let
-          val r = compute_constituents context (Thm.prop_of thm)
-          val _ = Synchronized.change_result constituents_lock
-                    (fn () => (Digest_Tab.update constituents_cache (d, r), ()))
-        in r end
+    case Cache_Scope.get thy of
+      No_Cache =>
+        SOME (Cache_Scope.put
+                (make_pair (Digest_Tab.empty 1024) (Symtab.make [(base, long)])) thy)
+    | Cache p =>
+        Synchronized.change_result (#var p) (fn content =>
+          case Symtab.lookup (#claims content) base of
+            SOME claimed =>
+              if claimed = long then (NONE, content)
+              else
+                (SOME (Cache_Scope.put
+                         (make_pair (purge (#cache content))
+                                    (Symtab.update (base, long) (#claims content)))
+                         thy),
+                 content)
+          | NONE =>
+              (SOME (Cache_Scope.put (Cache p) thy),
+               {cache = #cache content,
+                claims = Symtab.update (base, long) (#claims content)}))
   end
 
+val _ = Theory.setup (Theory.at_begin claim_cache_scope)
+
+fun cache_scope_id thy =
+  case Cache_Scope.get thy of No_Cache => NONE | Cache p => SOME (#id p)
+
+fun thm_constituents (context : Context.generic) (thm : thm)
+    : Theory_Hash.hash * constituent list * constituents_report =
+  case Cache_Scope.get (Context.theory_of context) of
+    No_Cache => compute_constituents context (Thm.prop_of thm)
+  | Cache p =>
+      let val d = Term_Digest.thm128 thm
+      in
+        case Synchronized.change_result (#var p)
+               (fn c => (Digest_Tab.lookup (#cache c) d, c)) of
+          SOME r => r
+        | NONE =>
+            let
+              val r as (_, _, report) = compute_constituents context (Thm.prop_of thm)
+              (* A result that fell back to the reading context's own theory is a
+                 function of that context, not of the proposition: two theories
+                 with textually identical local statements share a thm128, and no
+                 base-name collision need occur, so no fork would purge it. *)
+              val _ =
+                if #empty_name_fallback report then ()
+                else Synchronized.change (#var p)
+                       (fn c => (Digest_Tab.update (#cache c) (d, r); c))
+            in r end
+      end
+
 fun constituents_of (uk : universal_key) : constituent list option =
-  Synchronized.change_result constituents_lock
+  Synchronized.change_result registry_lock
     (fn () => (UK_Table.lookup constituents_registry uk, ()))
 
 (* Unified key builder for theorem/rule keys: all tags, named or anonymous. *)
@@ -534,9 +709,9 @@ fun build_thm_key (cache : thm_uk_cache option) (context : Context.generic)
                   (tag : Word8.word) (thm : thm) : universal_key =
   cached_thm_key cache tag thm (fn () =>
     let
-      val (thy_hash, prov) = thm_constituents context thm
+      val (thy_hash, prov, _) = thm_constituents context thm
       val uk = build_key thy_hash tag (ent_digest128_15 (Term_Digest.thm128 thm))
-      val _ = Synchronized.change_result constituents_lock
+      val _ = Synchronized.change_result registry_lock
                 (fn () => (UK_Table.update constituents_registry (uk, prov), ()))
     in uk end)
 

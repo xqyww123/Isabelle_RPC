@@ -17,9 +17,11 @@ signature THEORY_HASH = sig
   type hash = Word8Vector.vector  (* 16 bytes, xxhash128 *)
   exception Cannot_Hash of theory
   val hash_of : theory -> hash
-  (* Resolve a theory short name (runtime-unique) to its (long name, hash),
-     memoized session-wide.  Centralizes short-name resolution + hashing. *)
-  val hash_of_short : Context.generic -> string -> string * hash
+  (* Hash of a theory given by its LONG name.  Prefers Thy_Info's registry of
+     loaded theories (a Symtab lookup) over resolve_theory, whose Context.get_theory
+     is a linear scan of the context's ancestors.  See hash_of_long below for why
+     the two routes cannot disagree on the hash. *)
+  val hash_of_long : Context.generic -> string -> hash
   val theory_of : hash -> theory option
   val is_persistent : hash -> bool
   val hasher : hash -> word
@@ -214,23 +216,25 @@ fun hash_of thy =
         in h end
   end
 
-(* short theory name -> (long name, hash).  Session memo keyed by short name
-   (runtime-unique), so a short name resolves to the same theory and hash
-   regardless of which context first triggered resolution.  Lookup under the
-   lock; on miss resolve + hash outside it (hash_of may RPC) and insert after
-   — a racing duplicate resolution is idempotent. *)
-val by_short_cache : (string * hash) Symtab.table Synchronized.var =
-  Synchronized.var "Theory_Hash.by_short" Symtab.empty
+(* Long theory name -> hash.  No memo of its own: hash_of memoizes on the theory
+   identifier, and Thy_Info.lookup_theory is a Symtab lookup in Isabelle's own
+   registry of loaded theories.  resolve_theory is the fallback for a theory under
+   construction, which is not in that registry yet.
 
-fun hash_of_short context short =
-  case Synchronized.change_result by_short_cache (fn tab => (Symtab.lookup tab short, tab)) of
-    SOME info => info
-  | NONE =>
-      let
-        val thy = resolve_theory context short
-        val info = (Context.theory_long_name thy, hash_of thy)
-        val _ = Synchronized.change by_short_cache (Symtab.update (short, info))
-      in info end
+   The two routes may hand back different theory VALUES for one long name, with no
+   key divergence: hash_of reads only the name (Resources.loaded_theory picks the
+   branch; the WIP hash is FNV of the name) and the file content plus parent hashes.
+   Do NOT route key_of_ns_entity through here — it would prefer the heap-registered
+   theory over the in-flight one, a regression in the editing case.
+
+   resolve_theory infers long-vs-short by String.isSubstring ".", so the dotless
+   global names (Pure, Main, Complex_Main, ML_Bootstrap, the AFP (global) theories)
+   take its base-name branch.  Harmless: no loaded theory shares a base name with
+   them, and the path is reached only on a Thy_Info miss. *)
+fun hash_of_long context long =
+  hash_of (case Thy_Info.lookup_theory long of
+             SOME thy => thy
+           | NONE => resolve_theory context long)
 
 fun store_theory_hash thy =
   let
