@@ -160,6 +160,11 @@ val key_of          : thm_uk_cache option -> Context.generic -> entity -> univer
    Use when computing keys for many entities from the same context. *)
 val key_of''        : thm_uk_cache option -> Context.generic -> entity -> universal_key
 
+(* Shared wording for "fact name resolves, but the requested member index is
+   past the end".  `tail` is spliced inside the parenthesis, after "theorems",
+   so a caller working in a proof context can append " here". *)
+val out_of_range_msg : string -> int -> int -> string -> string
+
 (* The 15-byte entity payload of theorem keys (tag 0x02), as a standalone
    content fingerprint: thm_digest15 computes it for an arbitrary thm (no name
    hint or theory resolution involved), theorem_key_digest extracts it back
@@ -817,6 +822,10 @@ fun key_of_method context =
 
 (* --- Theorems --- *)
 
+fun out_of_range_msg display_name i total tail =
+  "Theorem index " ^ Int.toString i ^ " out of range for " ^ display_name ^
+  " (has " ^ Int.toString total ^ " theorems" ^ tail ^ ")"
+
 local
   fun parse_thm_xname xname =
     let val len = size xname
@@ -858,9 +867,7 @@ fun key_of_theorem cache context =
         | (_ :: _, SOME i) =>
             if i >= 1 andalso i <= length thms
             then nth thms (i - 1)
-            else error ("Theorem index " ^ Int.toString i ^
-                        " out of range for " ^ full_name ^
-                        " (has " ^ Int.toString (length thms) ^ " theorems)")
+            else error (out_of_range_msg full_name i (length thms) "")
         | (_ :: _ :: _, NONE) =>
             error ("Fact " ^ full_name ^ " has " ^
                    Int.toString (length thms) ^
@@ -900,9 +907,7 @@ fun key_of_theorems_tagged tag cache context =
         SOME i =>
           if i >= 1 andalso i <= n
           then (1, [(key_of_one (nth thms (i - 1)), ref_at i)])
-          else error ("Theorem index " ^ Int.toString i ^
-                      " out of range for " ^ full_name ^
-                      " (has " ^ Int.toString n ^ " theorems)")
+          else error (out_of_range_msg full_name i n "")
       | NONE =>
           if n = 0 then error ("No theorems in fact " ^ full_name)
           else
