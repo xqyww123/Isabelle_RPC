@@ -2,8 +2,10 @@
   Theory Hash: 16-byte content hashing for Isabelle theories.
 
   For theories from saved heap images:
-    xxhash128 of the .thy file content combined with parent hashes,
-    computed via Python RPC. LSB of byte 0 is cleared (= 0).
+    xxhash128 of the long theory name, a NUL, the .thy file content and the
+    parent hashes, computed via Python RPC. LSB of byte 0 is cleared (= 0).
+    The name is in the digest so that two theories sharing a base name -- or
+    one .thy file loaded under two long names -- do not share an identity.
 
   For non-loaded theories (e.g., being processed in jEdit):
     FNV-1a 128-bit hash of the long theory name, computed locally.
@@ -56,12 +58,13 @@ type hash = Word8Vector.vector
 
 exception Cannot_Hash of theory
 
-(* RPC command: (file_path, parent_hashes) -> hash *)
+(* RPC command: (long_name, file_path, parent_hashes) -> hash.
+   Python folds the name into the digest and clears the LSB. *)
 local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 
-val xxhash128_cmd : (string * hash list, hash) Remote_Procedure_Calling.command = {
+val xxhash128_cmd : (string * string * hash list, hash) Remote_Procedure_Calling.command = {
   name = "xxhash128_theory",
-  arg_schema = packPair (packString, packList packBytes),
+  arg_schema = packTuple3 (packString, packString, packList packBytes),
   ret_schema = unpackBytes,
   callback = [],
   timeout = SOME (Time.fromSeconds 60)
@@ -176,18 +179,16 @@ fun hash_of thy =
                 (* Recursively hash parent theories *)
                 val parent_hashes = map hash_of (Theory.parents_of thy)
 
-                (* RPC call to Python *)
+                (* RPC call to Python.  Python clears byte 0's LSB (the heap-image
+                   marker) so that the migration script, which imports the same
+                   function, cannot disagree with the live code by a byte. *)
                 val h = Remote_Procedure_Calling.call_command xxhash128_cmd
-                          (file_path, parent_hashes)
+                          (name, file_path, parent_hashes)
 
                 val _ =
                   if Word8Vector.length h = 16 then ()
                   else raise Cannot_Hash thy
-              in
-                (* Clear LSB of byte 0 to mark as heap-image hash *)
-                Word8Vector.update (h, 0,
-                  Word8.andb (Word8Vector.sub (h, 0), 0wxFE))
-              end
+              in h end
             else
               let
                 (* FNV-1a 128-bit hash of theory name, set LSB.

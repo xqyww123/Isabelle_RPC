@@ -16,18 +16,37 @@ def is_persistent(h: bytes) -> bool:
     return h[0] & 1 == 0
 
 
-def theory_xxhash128(file_path: str, parent_hashes: list[bytes]) -> theory_hash:
-    """Compute xxhash128 of a theory file combined with parent theory hashes.
+def theory_xxhash128(
+    long_name: str, file_path: str, parent_hashes: list[bytes]
+) -> theory_hash:
+    """Compute xxhash128 of a theory's long name and file, combined with parent hashes.
+
+    The long name is in the digest so that two theories sharing a base name --
+    and, when one .thy is loaded under two long names, sharing the file itself --
+    get distinct identities.  The NUL separator makes the name/file boundary
+    unambiguous: a theory long name cannot contain one.
+
+    Parents contribute their own hashes under this same scheme, so the name
+    propagates down the ancestor DAG.
+
+    Clearing byte 0's LSB (the "from a heap image" marker) happens HERE and
+    nowhere else: the store-migration script imports this function, and a
+    one-byte disagreement between it and the live code would silently mis-key
+    the whole store.
 
     Returns:
         16-byte xxhash128 digest
     """
     h = xxhash.xxh128()
+    h.update(long_name.encode("utf-8"))
+    h.update(b"\0")
     with open(file_path, "rb") as f:
         h.update(f.read())
     for ph in parent_hashes:
         h.update(ph)
-    return h.digest()
+    d = bytearray(h.digest())
+    d[0] &= 0xFE
+    return bytes(d)
 
 
 async def theory_name_of(connection: Connection, h: theory_hash) -> str | None:
@@ -84,7 +103,9 @@ async def _store_theory_hashes(arg: Any, connection: Connection) -> None:
 
 @isabelle_remote_procedure("xxhash128_theory")
 async def _theory_xxhash128(arg: Any, connection: Connection) -> theory_hash:
-    (file_path, parent_hashes) = arg
+    (long_name, file_path, parent_hashes) = arg
+    if isinstance(long_name, bytes):
+        long_name = long_name.decode("utf-8")
     if isinstance(file_path, bytes):
         file_path = file_path.decode("utf-8")
-    return theory_xxhash128(file_path, parent_hashes)
+    return theory_xxhash128(long_name, file_path, parent_hashes)

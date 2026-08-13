@@ -18,7 +18,7 @@ Two vocabularies, opposite directions:
 | `generate_uuids` | `rpc.py:429` | `int → bytes list` (16-byte each). |
 | `run_python` | `run_python.py:22` | `string → string option`. Unsandboxed `exec`. |
 | `Theory_Hash.store` | `theory_hash.py:66` | `(hash * string) list → unit`. Persists to LMDB. |
-| `xxhash128_theory` | `theory_hash.py:77` | `(string * hash list) → hash`. xxhash128 of file bytes + parent hashes. |
+| `xxhash128_theory` | `theory_hash.py:77` | `(string * string * hash list) → hash`. xxhash128 of long name ++ NUL ++ file bytes ++ parent hashes, LSB of byte 0 cleared. |
 | `position.offset_to_line_column` | `position.py:537` | `(file, symbol_offset) → (line, ascii_column)` |
 | `position.line_column_to_offset` | `position.py:548` | `(file, line, column) → symbol_offset` |
 

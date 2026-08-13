@@ -98,7 +98,7 @@ Two schemes, distinguished by the **LSB of byte 0**:
 
 | bit | scheme | meaning |
 | --- | --- | --- |
-| `0` | xxhash128 of `.thy` bytes + parent hashes, computed in Python over RPC | persistent (from a heap image) |
+| `0` | xxhash128 of long name ++ NUL ++ `.thy` bytes + parent hashes, computed in Python over RPC | persistent (from a heap image) |
 | `1` | FNV-1a-128 of the long theory name, computed locally | transient (live in jEdit) |
 
 - **`hash_of` may block on RPC** for the persistent branch. Never call it while holding a lock.
