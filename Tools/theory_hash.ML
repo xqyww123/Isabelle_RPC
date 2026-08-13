@@ -73,6 +73,12 @@ signature THEORY_HASH = sig
      would be computed at heap-build time and frozen into the heap, giving
      every process that loads the heap the SAME identity. *)
   val process_id : unit -> string
+  (* The theory's own .thy file, as a Path.T (see the comment at the definition for
+     why the conversion to a string is left to the caller).  Exposed because it is
+     what the hash above is taken over, so a caller that must name the same file --
+     the entity dump's per-theory source path,
+     BUG_UNIVERSAL_KEY_SHORT_NAME_FIX_PLAN.md §B.3 -- names it identically. *)
+  val get_theory_path : theory -> Path.T
 end
 
 structure Theory_Hash : THEORY_HASH = struct
