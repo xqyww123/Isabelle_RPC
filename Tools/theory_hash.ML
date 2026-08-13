@@ -13,6 +13,40 @@
 
   The LSB convention allows downstream code to distinguish which
   hash scheme produced the value.
+
+  What a long name does and does not identify
+  -------------------------------------------
+
+  hash_of takes a theory VALUE and memoizes on Context.theory_identifier, the only
+  per-process identity a theory has, so it is a function: same value, same hash.
+
+  Callers key caches on the theory's LONG NAME instead -- Universal_Key.cache on
+  (entity, long name), a constituent list on (long name, hash) pairs.  That is sound
+  only while a long name determines a content hash within one process.  It usually
+  does.  Three situations break it; all three are reachable and MEASURED (probed
+  2026-08-13), and NONE is handled.  Their preconditions are things a normal
+  workflow does not do, and the requirement is that they are not done.
+
+  1. A theory of the session being built, loaded twice with different content.
+     Thy_Info.remove errors only for a name Thy_Info's graph holds as finished
+     (Pure/Thy/thy_info.ML:183-192), while the branch above is chosen by
+     Resources.loaded_theory alone -- and a session's own theories are in that name
+     list from the first instant yet never enter the graph, because the build path
+     never calls Thy_Info.register_thy.  A plain Thy_Info.use_theories then reloads
+     one, and the old theory value and the new one both live on, with different
+     hashes.  Theories from a heap image are NOT exposed: they are in the graph, so
+     register_thy and remove both refuse.
+
+  2. A second theory begun under a name already loaded.  Nothing checks for it:
+     Resources.begin_theory -> Theory.begin_theory -> Context.begin_thy verify a
+     non-empty name, non-empty imports, and ancestors with distinct base names, and
+     no more.  Isa-REPL builds theories this way and swallows the register_thy error
+     (Isa-REPL/library/REPL.ML:442, :686-690), so a collision there is silent.
+
+  3. A source file edited after the heap was built.  hash_of reads the file at
+     get_theory_path from DISK, not the content of the theory value handed to it, so
+     a process on a stale heap hashes the new file while working with the old theory.
+     This one needs no coincidence; the remedy is the ordinary one, rebuild the heap.
 *)
 
 signature THEORY_HASH = sig
