@@ -2,6 +2,7 @@ from enum import IntEnum
 from typing import Any, NamedTuple
 from .rpc import Connection, IsabelleError
 from .theory_hash import theory_hash
+from .unicode import ascii_of_unicode
 
 type universal_key = bytes
 type theorem_digest = bytes
@@ -187,9 +188,13 @@ async def universal_key_and_name_of(
     and the fully-qualified name. Callers that need the canonical full name
     (e.g. to avoid using a user-provided short name as an entity identifier)
     should prefer this over ``universal_key_of``.
+
+    ``name`` is normalized via ``ascii_of_unicode``, so it may be given in either
+    Isabelle's ASCII notation or the Unicode display form.
     """
     try:
-        uk, full_name = await connection.callback("universal_key_of", (ctxt, (int(kind), name)))
+        uk, full_name = await connection.callback(
+            "universal_key_of", (ctxt, (int(kind), ascii_of_unicode(name))))
         return (bytes(uk), full_name)
     except IsabelleError as e:
         msg = e.errors[0] if e.errors else str(e)
@@ -221,10 +226,13 @@ async def key_of_theorems(
     interned/qualified name with index. Raises ``UndefinedEntity`` if ``name`` is
     not a fact; re-raises ``IsabelleError`` for other failures (e.g. an
     out-of-range index).
+
+    ``name`` is normalized via ``ascii_of_unicode``, so it may be given in either
+    Isabelle's ASCII notation or the Unicode display form.
     """
     try:
         total, members = await connection.callback(
-            "key_of_theorems", (ctxt, (int(kind), name, limit)))
+            "key_of_theorems", (ctxt, (int(kind), ascii_of_unicode(name), limit)))
     except IsabelleError as e:
         msg = e.errors[0] if e.errors else str(e)
         if msg.startswith("Undefined "):

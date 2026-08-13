@@ -33,6 +33,7 @@ from typing import Any
 
 from .rpc import Connection
 from .position import IsabellePosition
+from .unicode import ascii_of_unicode
 from .universal_key import (EntityKind, universal_key,
                             RULE_ONLY_KINDS, RULE_ONLY_TAG_BYTES, theorem_sibling_key)
 
@@ -67,11 +68,14 @@ async def _call(connection: Connection, callback_name: str,
     """Returns (entries, warnings). limit<0 means no limit.
     Each entry is (universal_key, IsabellePosition | None).
     target_type: only honoured by induction/case-split rule callbacks; "" = no filter.
+    Each ``name_contains`` pattern is normalized via ``ascii_of_unicode`` (the ML
+    filter compares bytes against ASCII-notation names), so patterns may be given
+    in either form.
     """
     entries_raw, warnings = await connection.callback(callback_name,
                 (ctxt, (theory, the_theory_only, exclude,
                  term_patterns, type_patterns, theories_include,
-                 name_contains, limit, target_type)))
+                 [ascii_of_unicode(p) for p in name_contains], limit, target_type)))
     entries: list[entity_entry] = []
     for k_raw, name, (file, line, offset) in entries_raw:
         entries.append((bytes(k_raw), name, _mk_pos(file, line, offset)))
@@ -129,11 +133,11 @@ async def _call_thm(connection: Connection, callback_name: str,
     """Like _call but for the theorem-like callbacks (Context.theorems and the four
     rule kinds), whose entries carry a 4th element is_local (true = proof-context-
     local). Returns (entries, is_local, warnings), where is_local maps each uk -> bool.
-    limit<0 means no limit."""
+    limit<0 means no limit.  ``name_contains`` is normalized as in ``_call``."""
     entries_raw, warnings = await connection.callback(callback_name,
                 (ctxt, (theory, the_theory_only, exclude,
                  term_patterns, type_patterns, theories_include,
-                 name_contains, limit, target_type)))
+                 [ascii_of_unicode(p) for p in name_contains], limit, target_type)))
     entries: list[entity_entry] = []
     is_local: dict[universal_key, bool] = {}
     for k_raw, name, (file, line, offset), loc in entries_raw:
