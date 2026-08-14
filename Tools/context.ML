@@ -120,7 +120,9 @@ signature CONTEXT_CALLBACKS = sig
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* Experience memory: goal_patterns -> minimal-antichain constituent theories
-     [(theory long name, 16-byte theory hash)].  See experience_constituents. *)
+     [(theory long name, 16-byte theory hash)].  Raises on any unparseable
+     pattern; batch callers wanting per-record reporting wrap it in Exn.capture. *)
+  val experience_constituents : Context.generic -> string list -> (string * Theory_Hash.hash) list
   val make_experience_constituents_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* Experience memory: (query patterns, [(uk, experience patterns)]) ->
      [(uk, hit_rate)] for experiences with a positive relaxed bidirectional
