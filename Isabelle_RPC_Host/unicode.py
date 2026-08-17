@@ -1,7 +1,7 @@
 import os
 import re
 
-from .paths import resolve_isabelle_var
+from .paths import resolve_isabelle_var, resolve_isabelle_path_list
 
 
 def _load_symbols(path, symbols={}, reverse_symbols={}, groups={}):
@@ -60,40 +60,49 @@ def _load_symbols(path, symbols={}, reverse_symbols={}, groups={}):
     return symbols, reverse_symbols, groups
 
 SYMBOLS_CACHE = None
+SYMBOL_FILES_CACHE = ()   # empty until the table is loaded; never None, so callers may len() it
 
 def get_SYMBOLS_AND_REVERSED():
-    global SYMBOLS_CACHE
+    global SYMBOLS_CACHE, SYMBOL_FILES_CACHE
     if SYMBOLS_CACHE is not None:
         return SYMBOLS_CACHE
-    isabelle_home = resolve_isabelle_var("ISABELLE_HOME")
-    isabelle_home_user = resolve_isabelle_var("ISABELLE_HOME_USER")
-    if not isabelle_home:
-        raise RuntimeError(
-            "Cannot locate Isabelle: ISABELLE_HOME is not set in the environment "
-            "and the `isabelle` executable is unavailable (not on PATH, or it "
-            "failed to start). The Isabelle symbol table is required for unicode "
-            "conversion, so refusing to silently fall back to identity.")
-    system_symbols = os.path.join(isabelle_home, "etc", "symbols")
-    # An unset ISABELLE_HOME_USER must not turn into the *relative* path "etc/symbols"
-    # — which is what os.path.join("", ...) yields — or we would read whatever stray
-    # file happens to sit under the working directory. The user overlay is optional.
-    user_symbols = os.path.join(isabelle_home_user, "etc", "symbols") if isabelle_home_user else None
+    # ISABELLE_SYMBOLS is the authority: Isabelle assembles it from the distribution's
+    # etc/symbols, the user overlay, and one entry per component that declares extra
+    # symbols (phi-System appends its `symbols` and `symbols-words`). Rebuilding the
+    # list from ISABELLE_HOME instead — which this used to do — silently drops every
+    # component file, so a component symbol stays literal text and is never converted.
+    symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")
+    if not symbol_files:
+        # No settings environment to ask: ISABELLE_SYMBOLS is unset and `isabelle` is
+        # unavailable. Fall back to the two files Isabelle always puts first, so that a
+        # bare ISABELLE_HOME still yields the distribution's table.
+        isabelle_home = resolve_isabelle_var("ISABELLE_HOME")
+        if not isabelle_home:
+            raise RuntimeError(
+                "Cannot locate Isabelle: neither ISABELLE_SYMBOLS nor ISABELLE_HOME is "
+                "set in the environment, and the `isabelle` executable is unavailable "
+                "(not on PATH, or it failed to start). The Isabelle symbol table is "
+                "required for unicode conversion, so refusing to silently fall back to "
+                "identity.")
+        symbol_files = [os.path.join(isabelle_home, "etc", "symbols")]
+        # An unset ISABELLE_HOME_USER must not turn into the *relative* path
+        # "etc/symbols" — which is what os.path.join("", ...) yields — or we would read
+        # whatever stray file happens to sit under the working directory. It is optional.
+        isabelle_home_user = resolve_isabelle_var("ISABELLE_HOME_USER")
+        if isabelle_home_user:
+            symbol_files.append(os.path.join(isabelle_home_user, "etc", "symbols"))
     SYMBOLS, REVERSE_SYMBOLS, GROUPS = {}, {}, {}
-    for file in [p for p in (system_symbols, user_symbols) if p]:
-        # System file first, user file second: the user file layers on top, so
-        # a symbol (or its group) redefined in the user file overrides the system.
+    for file in symbol_files:
+        # In ISABELLE_SYMBOLS order, each file layering on top of the ones before it:
+        # the user overlay overrides the distribution, and a component overrides both.
         SYMBOLS, REVERSE_SYMBOLS, GROUPS = _load_symbols(file, SYMBOLS, REVERSE_SYMBOLS, GROUPS)
     if not SYMBOLS:
-        # ISABELLE_HOME resolved to a path, but its etc/symbols was missing,
-        # unreadable, or empty (e.g. a relocated/partial install or a stale
-        # exported value). Loading yielded an empty table, which would make
-        # pretty_unicode silently degrade to identity — the exact regression we
-        # refuse. Note: only the system table (ISABELLE_HOME) is required; a
-        # missing user overlay (ISABELLE_HOME_USER) is fine and does not trip
-        # this, since the system file alone already populates SYMBOLS.
+        # The paths resolved but nothing loaded: files missing, unreadable, or empty
+        # (a relocated/partial install, or a stale exported value). That would make
+        # pretty_unicode silently degrade to identity — the exact regression we refuse.
         raise RuntimeError(
-            f"Isabelle symbol table is empty: no symbols loaded from "
-            f"{system_symbols} (file missing, unreadable, or empty). "
+            f"Isabelle symbol table is empty: no symbols loaded from any of "
+            f"{symbol_files} (missing, unreadable, or empty). "
             "Refusing to silently fall back to identity conversion.")
     # Isabelle's identifier "letter" class (Symbol.is_letter_symbol, a hardcoded
     # list in Pure/General/symbol.ML) is a SUBSET of the symbols whose file group
@@ -103,6 +112,7 @@ def get_SYMBOLS_AND_REVERSED():
     # its only extras (blackboard-bold letters, \<lambda>) merely fail to flag a
     # would-be proposition, which the ML fact parser catches anyway.
     LETTER_SYMBOLS = frozenset(s for s, g in GROUPS.items() if g in ('letter', 'greek'))
+    SYMBOL_FILES_CACHE = tuple(symbol_files)
     SYMBOLS_CACHE = (SYMBOLS, REVERSE_SYMBOLS, str.maketrans(REVERSE_SYMBOLS), LETTER_SYMBOLS)
     return SYMBOLS_CACHE
 
@@ -117,6 +127,18 @@ def get_LETTER_SYMBOLS():
     as a *letter* inside an identifier / fact name — a safe over-approximation
     of Symbol.is_letter_symbol (the file's `letter` and `greek` groups)."""
     return get_SYMBOLS_AND_REVERSED()[3]
+
+def get_SYMBOL_FILES():
+    """The symbol files the loaded table was actually built from, in load order.
+
+    Provenance, for anything that ships a compiled copy of the table: the set of files
+    depends on which components are registered, so two machines can load different
+    tables from identical code. A consumer that bakes the table into an artefact must
+    record this list and refuse a mismatch, or the artefact and the data derived from
+    it will disagree with no error anywhere. Kept out of get_SYMBOLS_AND_REVERSED()'s
+    tuple on purpose — callers unpack that by arity."""
+    get_SYMBOLS_AND_REVERSED()   # populate the cache if it is cold
+    return SYMBOL_FILES_CACHE
 
 SUBSUP_TRANS_TABLE = {
     "⇩0": "₀", "⇩1": "₁", "⇩2": "₂", "⇩3": "₃", "⇩4": "₄",
@@ -182,17 +204,36 @@ SUBSUP_RESTORE_TABLE = {
 SUBSUP_RESTORE_TABLE_trans = str.maketrans(SUBSUP_RESTORE_TABLE)
 
 
+def is_private_use(ch):
+    """Whether a character sits in one of Unicode's three Private Use Areas.
+
+    Such a code point has no meaning of its own: it means whatever the font drawing it
+    says, and nothing at all to anything else."""
+    c = ord(ch)
+    return 0xE000 <= c <= 0xF8FF or 0xF0000 <= c <= 0xFFFFD or 0x100000 <= c <= 0x10FFFD
+
+
 def pretty_unicode(src):
     """
     Argument src: Any script that uses Isabelle's ASCII notation like `\\<Rightarrow>`
     Return: unicode version of `src`
+
+    A symbol whose code point is private-use is left as its `\\<name>` escape. Its glyph
+    exists only in the font that declares it (phi-System draws 135 keywords that way, at
+    U+E000 upwards), so the code point would render as a blank box everywhere else,
+    while the escape at least still spells the word. Note the asymmetry with
+    `ascii_of_unicode`, which does convert such a character back to its name: text
+    dragged out of jEdit carries the raw code point, and naming it is a repair.
     """
     pattern = r'\\<[^>]+>'
     subscript_pattern = r'⇩.|⇧.|❙.'
 
     def replace_symbol(match):
         symbol = match.group(0)
-        return get_SYMBOLS().get(symbol, symbol)
+        char = get_SYMBOLS().get(symbol)
+        if char is None or (len(char) == 1 and is_private_use(char)):
+            return symbol
+        return char
 
     def replace_subsupscript(match):
         symbol = match.group(0)

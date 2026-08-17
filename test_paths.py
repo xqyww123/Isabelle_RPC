@@ -9,7 +9,7 @@ why it survives a non-ASCII user name, and why it is reachable from a Linux test
 import os
 import sys
 
-from Isabelle_RPC_Host.paths import platform_path
+from Isabelle_RPC_Host.paths import platform_path, resolve_isabelle_path_list
 
 FAILURES = []
 
@@ -78,6 +78,34 @@ def main():
             check_idempotent(f"win {label}", value)
     finally:
         os.name = real_name
+
+    print("== resolve_isabelle_path_list ==")
+    # ISABELLE_SYMBOLS is the case this exists for: Isabelle appends to it, so the
+    # list carries the distribution's file, an optional user overlay marked "?", and
+    # one entry per component that declares extra symbols.
+    VAR = "TEST_ISABELLE_PATH_LIST"
+    # Every case sets the variable to a non-empty value: unset or empty falls through
+    # to `isabelle getenv` (empty means "not really set", as elsewhere in this module),
+    # which is slow and asks about a variable Isabelle does not define. What these
+    # exercise is the splitting.
+    LIST_CASES = [
+        ("single", "/isa/etc/symbols", ["/isa/etc/symbols"]),
+        ("optional stripped", "/isa/etc/symbols:/home/u/.isabelle/etc/symbols?",
+         ["/isa/etc/symbols", "/home/u/.isabelle/etc/symbols"]),
+        ("component appended", "/isa/etc/symbols:/home/u/.isabelle/etc/symbols?:/c/symbols:/c/symbols-words",
+         ["/isa/etc/symbols", "/home/u/.isabelle/etc/symbols", "/c/symbols", "/c/symbols-words"]),
+        ("bare ? dropped", "/isa/etc/symbols:?", ["/isa/etc/symbols"]),
+        ("empty segments dropped", ":/isa/etc/symbols::", ["/isa/etc/symbols"]),
+    ]
+    saved = os.environ.pop(VAR, None)
+    try:
+        for label, value, expected in LIST_CASES:
+            os.environ[VAR] = value
+            check(label, resolve_isabelle_path_list(VAR), expected)
+    finally:
+        os.environ.pop(VAR, None)
+        if saved is not None:
+            os.environ[VAR] = saved
 
     print()
     if FAILURES:

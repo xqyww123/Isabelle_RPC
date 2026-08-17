@@ -67,26 +67,17 @@ def platform_path(path: str) -> str:
     return path
 
 
-def resolve_isabelle_var(name: str) -> str:
-    """Resolve an Isabelle settings variable, in this platform's native path form.
+def _raw_isabelle_var(name: str) -> str:
+    """The settings value as Isabelle exports it, with no path conversion applied.
 
     Prefer the process environment (which the ML launcher exports when it starts the
     RPC host), and only fall back to querying the `isabelle` executable — which is
     slow and, more importantly, silently yields "" when Isabelle failed to start or
     is not on PATH. Returns "" if neither source has a value.
     """
-    if os.name == "nt" and name == "ISABELLE_HOME":
-        # Isabelle exports the native form of ISABELLE_HOME under this name already
-        # (getsettings: ISABELLE_ROOT="$(platform_path "$ISABELLE_HOME")"), and it is
-        # authoritative about its own mount table. ISABELLE_HOME_USER has no such
-        # counterpart, which is why the general path above exists.
-        native_home = os.environ.get("ISABELLE_ROOT")
-        if native_home:
-            return native_home
-
     value = os.environ.get(name)
     if value:
-        return platform_path(value)
+        return value
     try:
         # Read the output as bytes and decode it ourselves. `os.popen` would hand back
         # a text-mode pipe decoded with the locale encoding — the ANSI code page on
@@ -95,6 +86,44 @@ def resolve_isabelle_var(name: str) -> str:
         # not on the native PATH there; shipping an isabelle.bat would make it live.
         # `shell=True` stays: on Windows only cmd resolves a .bat.
         completed = subprocess.run(f"isabelle getenv -b {name}", shell=True, capture_output=True)
-        return platform_path(os.fsdecode(completed.stdout).strip())
+        return os.fsdecode(completed.stdout).strip()
     except (OSError, ValueError):
         return ""
+
+
+def resolve_isabelle_var(name: str) -> str:
+    """Resolve an Isabelle settings variable, in this platform's native path form."""
+    if os.name == "nt" and name == "ISABELLE_HOME":
+        # Isabelle exports the native form of ISABELLE_HOME under this name already
+        # (getsettings: ISABELLE_ROOT="$(platform_path "$ISABELLE_HOME")"), and it is
+        # authoritative about its own mount table. ISABELLE_HOME_USER has no such
+        # counterpart, which is why the general path above exists.
+        native_home = os.environ.get("ISABELLE_ROOT")
+        if native_home:
+            return native_home
+    return platform_path(_raw_isabelle_var(name))
+
+
+def resolve_isabelle_path_list(name: str) -> list:
+    """Resolve a colon-separated Isabelle settings path list, in native path form.
+
+    Isabelle builds such lists by appending, so that a component's `etc/settings` can
+    extend one: ISABELLE_SYMBOLS is how phi-System adds its own symbol files to the
+    distribution's. Reading the variable is therefore the only way to see the symbol
+    table Isabelle itself presents; reconstructing it from ISABELLE_HOME sees the
+    distribution alone.
+
+    A trailing "?" marks an entry Isabelle treats as optional (the user overlay
+    carries one). It is stripped here, because a caller skips a missing file anyway.
+
+    Split before converting: `platform_path` takes ONE path. On Windows every element
+    arrives in POSIX form — the list is computed inside the bundled Cygwin — so the
+    ":" separator is unambiguous there and no native "C:\\..." can be cut in half.
+    """
+    out = []
+    for entry in _raw_isabelle_var(name).split(":"):
+        if entry.endswith("?"):
+            entry = entry[:-1]
+        if entry:
+            out.append(platform_path(entry))
+    return out
