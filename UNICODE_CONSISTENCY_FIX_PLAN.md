@@ -3,6 +3,61 @@
 Status: proposal, not applied. Written 2026-08-18 after a review of commits `eab47d6`
 and `8b7325e` found a live regression.
 
+## 0. Where things are, and how to run them
+
+Everything here is in the `contrib/Isabelle_RPC` submodule, its own git repository, on
+branch `master`. Read this section before §1 if you are picking the work up cold.
+
+**Already committed, and the baseline this plan builds on:**
+
+```
+eab47d6  load the table Isabelle actually presents (ISABELLE_SYMBOLS, not a list
+         rebuilt from ISABELLE_HOME); D44, a private-use code point is not
+         substituted; get_SYMBOL_FILES()
+8b7325e  recognise an escape by Isabelle's rule rather than scanning to the next '>'
+f9e139c  make test_unicode.py able to fail, and prove it with a mutation self-check
+```
+
+**The files, and the lines that matter:**
+
+```
+Isabelle_RPC_Host/unicode.py     pretty_unicode and its two passes; the escape pattern;
+                                 is_private_use; SUBSUP_TRANS_TABLE (142 hand-written
+                                 entries -- no symbols file carries folding data)
+Isabelle_RPC_Host/position.py    symbol_explode; FileIndex.__init__ (the duplicate
+                                 rendering logic, roughly :95-155, with the two bare
+                                 lookups at :110 and :120); the six conversions at :176+
+test_unicode.py                  the suite, and `--self-check`, whose MUTANTS list
+                                 currently hardcodes unicode.py as its target
+```
+
+**Running things:**
+
+```bash
+cd contrib/Isabelle_RPC
+python3 test_unicode.py                # the suite
+python3 test_unicode.py --self-check   # mutation check: every mutant must be killed
+python3 test_paths.py
+```
+
+For an ad-hoc check, the package needs `ISABELLE_HOME` and nothing else:
+
+```python
+import sys, os
+sys.path.insert(0, "contrib/Isabelle_RPC")
+os.environ.setdefault("ISABELLE_HOME", os.path.abspath("contrib/Isabelle2025-2"))
+from Isabelle_RPC_Host.unicode import pretty_unicode
+from Isabelle_RPC_Host.position import FileIndex, symbol_explode
+```
+
+**Corpora used by the measurements in this document:** `contrib/phi-system` (323 `.thy`
+and `.ML`, the only tree with private-use escapes), `contrib/Isabelle2025-2/src` (2,601),
+and a 1,500-file sample of `contrib/afp-2026-05-13/thys`.
+
+**The review evidence** — including the reference indexed renderer the §3 invariant needs,
+and the symbol-driven prototype this plan is to be built from — is in
+`review-2026-08-18/`, with a README saying what each script established.
+
 ## 1. The defect
 
 `Isabelle_RPC_Host/position.py`'s `FileIndex` computes, for every Isabelle symbol in a
@@ -371,3 +426,66 @@ calls. Fix together, with a test per item.
 `Isabelle-MCP/.../isabelle_symbols.py` (whose docstring claims it reads
 `ISABELLE_SYMBOLS` and does not), `AutoCorrode/ir/repl.py`, and `tokens.py`'s hardcoded
 letter list. Not caused by these commits; now divergent because of them.
+
+
+## 8. Build order
+
+Each step is finished when its acceptance holds, not before. Steps 1 and 2 are the fix;
+3 through 7 are what stop it rotting.
+
+**1. `pretty_unicode_indexed` in `unicode.py`.** One pass over `symbol_explode`'s output,
+rendering each symbol and recording where it lands. Seed it from
+`review-2026-08-18/remedy/sweep.py`, whose `rendered_symbol` is the per-symbol decision
+already written and already diffed. Define `pretty_unicode(src)` as its first component
+so that only one implementation exists. Add the fast-path guard for text containing no
+`\\<` and no marker, and put the benchmark next to it in a comment.
+
+*Accepted when* the 4,424-file byte-identity diff against the pre-change renderer passes
+with 0 content differences, and the benchmark is recorded. Keep the pre-change renderer
+around for the duration of this step — you cannot diff against something you have
+already deleted.
+
+**2. The two behaviour changes, decided and written down.** `\\<^sub>\\<^sub>1` starts
+rendering `\u21e9\u2081`, which is what Isabelle does (§1b). Line endings: decide whether the
+renderer inherits `symbol_explode`'s CR folding, and make `FileIndex.source` and the
+`.unicode.thy` mirror agree either way — they do not today.
+
+*Accepted when* both are stated in the commit message and covered by a hand-written case.
+
+**3. Strip `FileIndex`.** It consumes the offsets and implements nothing.
+
+*Accepted when* `position.py` references neither `SYMBOLS` nor `SUBSUP_TRANS_TABLE` nor
+any fold condition, and `grep` says so.
+
+**4. The invariant test.** §3's form, per line, against `idx.source`. With the positive-count
+assertions of §6.5 and the seeded synthetic table of §6.5, so it neither passes on empty
+data nor depends on which components are registered.
+
+*Accepted when* it fails against the code as it stood before step 1 — check this by
+running it against the parent commit, not by reasoning about it.
+
+**5. Extend `self_check`.** Give `MUTANTS` a per-file field, then add the mutants of
+§6.4. The one that decides whether this work succeeded is `FileIndex` restored to
+computing its own offsets.
+
+*Accepted when* every mutant is killed and the suite still passes unmutated.
+
+**6. Scope cleanup.** Delete `contrib/Isabelle_RPC/build/lib/`, which holds a complete
+pre-D44 copy of this package. Rename `premise_selection.py:173`'s shadowing
+`pretty_unicode`.
+
+*Accepted when* nothing outside `Isabelle_RPC_Host` performs the table lookup or the D44
+rule, and no module has two functions of that name in scope.
+
+**7. Re-verify the consumer.** `hover.py`'s two call sites against a real phi-System
+file: the column handed to the model addresses the symbol it names.
+
+*Accepted when* a location string produced end to end points at the right token.
+
+### Not in this order, and why
+
+The `get_SYMBOL_FILES` provenance record wants a content digest rather than a path list
+(§7). It is deliberately not here: the same digest is what the search site's D45 needs
+for its namespace name, and settling it twice would produce two answers. `.unicode.thy`
+mirror staleness is dismissed and is not to be fixed. The remaining §7 items are latent,
+zero-instance, and separable; do them together, with a test each, whenever convenient.
