@@ -225,7 +225,11 @@ def pretty_unicode(src):
     `ascii_of_unicode`, which does convert such a character back to its name: text
     dragged out of jEdit carries the raw code point, and naming it is a repair.
     """
-    pattern = r'\\<[^>]+>'
+    # Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a
+    # letter, then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the
+    # next `>` wherever it falls, so one malformed escape swallows the next valid
+    # one -- `\\<alpha \\<beta>` converts nothing. Identical on well-formed input.
+    pattern = r"\\<\^?[A-Za-z][A-Za-z0-9_']*>"
     subscript_pattern = r'⇩.|⇧.|❙.'
 
     def replace_symbol(match):
