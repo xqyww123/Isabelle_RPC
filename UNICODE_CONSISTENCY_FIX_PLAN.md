@@ -193,7 +193,7 @@ The strongest cheap form of the invariant is `sym_unicode_offsets[-1] ==
 len(pretty_unicode(idx.source))`: well-posed everywhere, and sufficient to catch both
 classes of §1.
 
-## 4. Three ways to fix it
+## 4. Four ways to fix it
 
 ### Option A — add the private-use rule to `FileIndex`
 
@@ -265,7 +265,7 @@ rendering rule reaches `FileIndex` for free.
   `FileIndex.source` is CR-folded while the `.unicode.thy` mirror is not, so deciding it
   makes the two agree for the first time. Zero CRLF files in the 4,424 measured.
 
-### Option C-instrumented — considered and rejected
+### Option D — instrument the existing regex, and keep it
 
 A cheaper variant: keep both `re.sub` passes and have their callbacks record where each
 input offset lands, using `match.start()` and `match.end()`. Prototyped, about 25 lines,
@@ -273,7 +273,9 @@ output byte-identical to `pretty_unicode` by construction, and it removes the
 duplication just as completely.
 
 Rejected because it removes the duplication while **preserving §1b's divergence from the
-prover**. It would leave two pieces of code agreeing precisely on a rendering that
+prover**. It is numbered separately rather than called a variant of C because the two
+reach opposite conclusions, and a name one word away from the chosen option is a trap
+for whoever reads this next. It would leave two pieces of code agreeing precisely on a rendering that
 Isabelle does not produce. If the point of unifying is to have one right answer rather
 than two consistent ones, this is the wrong half to keep.
 
@@ -291,8 +293,8 @@ the most widely called function in this module". The equivalence turned out to b
 measurable rather than inspectable — 4,424 files, 0 content differences — so the risk
 was priced from ignorance.
 
-The second reached for C-instrumented, which is genuinely zero-risk, and would have
-frozen a rendering the prover does not produce.
+The second reached for Option D, which is genuinely zero-risk, and would have frozen a
+rendering the prover does not produce.
 
 What decides it is the history in §1b: this duplication has drifted three times and none
 of the three was caught by a test. One was found by a review, one was closed by
@@ -380,6 +382,42 @@ an argument for why it stays at zero instances.
     `FileIndex` only queries symbol boundaries, so it never meets the convention, but an
     unwary caller could.
 
+## 6b. Hygiene on the lines this fix touches
+
+Four defects sit on or beside the code being rewritten. They are listed here rather than
+in §7 because doing them separately means editing the same lines twice, and because the
+first exists only to prop up an API this fix is already changing.
+
+**The provenance getter is shaped around a caller that is scheduled for deletion.**
+`get_SYMBOLS_AND_REVERSED()` returns a 4-tuple that every caller indexes positionally,
+and `get_SYMBOL_FILES()` therefore reads from a *second* module global, with a docstring
+that says why: "Kept out of get_SYMBOLS_AND_REVERSED()'s tuple on purpose — callers
+unpack that by arity." Exactly one caller in the tree unpacks by arity —
+`Semantic_Embedding/site/prototype/tokenize_prototype.py:13` — and the search-site plan
+has already ruled that file superseded (D43). So an internal API is contorted, and a
+parallel cache global exists, to accommodate a file that is on its way out. Give the
+loader one return value with named fields and let `get_SYMBOLS`, `get_REVERSE_SYMBOLS`,
+`get_LETTER_SYMBOLS` and `get_SYMBOL_FILES` read from it.
+
+**A guard that cannot fail, reading as though it defends something.** In
+`pretty_unicode`'s `replace_symbol`, `len(char) == 1 and is_private_use(char)`. Every
+value in the table comes from `chr()`, so the length is always 1 — measured, the set of
+distinct value lengths is exactly `{1}`. Drop the guard, and if the property is worth
+relying on, assert it once where the table is built rather than re-testing it per
+substitution.
+
+**Mutable default arguments in `_load_symbols`.** `def _load_symbols(path, symbols={},
+reverse_symbols={}, groups={})`. Measured: two successive calls without explicit
+dictionaries return the *same* object, holding both files' symbols — 489 entries after
+loading two files of 50 and 439. Latent only because the one in-tree caller always
+passes explicit dictionaries.
+
+**The fallback consults the environment last.** When `ISABELLE_SYMBOLS` is not in the
+environment, `resolve_isabelle_path_list` shells out to whichever `isabelle` is first on
+`PATH` before anything looks at `ISABELLE_HOME`, so an explicitly set `ISABELLE_HOME` is
+ignored. Harmless today — both distributions' tables are identical — and wrong in
+ordering. The environment's explicit value should win over a subprocess's opinion.
+
 ## 7. The other findings, and what each needs
 
 Reported by the same review; none is this urgent, and each is separable.
@@ -440,6 +478,10 @@ already written and already diffed. Define `pretty_unicode(src)` as its first co
 so that only one implementation exists. Add the fast-path guard for text containing no
 `\\<` and no marker, and put the benchmark next to it in a comment.
 
+Clear §6b's first two defects in the same edit, since both sit on these lines: give the
+loader one return value with named fields so the parallel `SYMBOL_FILES_CACHE` global can
+go, and drop the `len(char) == 1` guard.
+
 *Accepted when* the 4,424-file byte-identity diff against the pre-change renderer passes
 with 0 content differences, and the benchmark is recorded. Keep the pre-change renderer
 around for the duration of this step — you cannot diff against something you have
@@ -472,7 +514,8 @@ computing its own offsets.
 
 **6. Scope cleanup.** Delete `contrib/Isabelle_RPC/build/lib/`, which holds a complete
 pre-D44 copy of this package. Rename `premise_selection.py:173`'s shadowing
-`pretty_unicode`.
+`pretty_unicode`. Clear §6b's remaining two: the mutable defaults in `_load_symbols`,
+and the fallback's consultation order.
 
 *Accepted when* nothing outside `Isabelle_RPC_Host` performs the table lookup or the D44
 rule, and no module has two functions of that name in scope.
