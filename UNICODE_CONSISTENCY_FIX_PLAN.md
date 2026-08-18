@@ -40,7 +40,26 @@ python3 test_unicode.py --self-check   # mutation check: every mutant must be ki
 python3 test_paths.py
 ```
 
-For an ad-hoc check, the package needs `ISABELLE_HOME` and nothing else:
+**The prerequisite §1's whole defect depends on.** The 135 private-use symbols come from
+`contrib/phi-system/symbols-words`, which reaches `ISABELLE_SYMBOLS` only because
+`contrib/phi-system` is registered as an Isabelle component — on this machine, by a line
+in `~/.isabelle/Isabelle2025-2/etc/components`. Without that registration the table loads
+439 entries instead of 624, holds no private-use symbol, and **the defect is invisible**:
+`pretty_unicode(r'\<proc>')` returns the escape for the wrong reason (the symbol is
+simply absent, the pre-`eab47d6` accident of §1), and the suite reports three checks as
+NO DATA and exits 0. That is exactly the vacuous pass §6.5 warns about, reached by
+following this section. Check what you have before trusting a green run:
+
+```bash
+contrib/Isabelle2025-2/bin/isabelle getenv ISABELLE_SYMBOLS   # must name phi-system
+python3 -c "import sys; sys.path.insert(0,'contrib/Isabelle_RPC'); \
+  from Isabelle_RPC_Host.unicode import get_SYMBOLS; print(len(get_SYMBOLS()))"   # 624
+```
+
+For an ad-hoc check, run from the **repository root**, not from `contrib/Isabelle_RPC`
+(the paths below are relative to the root, and the `cd` in the block above is not in
+force). `watchdog` must be importable — `position.py` imports it — which the editable
+install in `.venv` provides here:
 
 ```python
 import sys, os
@@ -50,9 +69,14 @@ from Isabelle_RPC_Host.unicode import pretty_unicode
 from Isabelle_RPC_Host.position import FileIndex, symbol_explode
 ```
 
-**Corpora used by the measurements in this document:** `contrib/phi-system` (323 `.thy`
-and `.ML`, the only tree with private-use escapes), `contrib/Isabelle2025-2/src` (2,601),
-and a 1,500-file sample of `contrib/afp-2026-05-13/thys`.
+**Corpora used by the measurements in this document**, stated precisely enough to
+rebuild, because §8 step 1's acceptance names a file count. `.thy` and `.ML`, **excluding
+`*.unicode.thy`** — that exclusion is what turns the raw counts into the ones quoted:
+`contrib/phi-system` 352 raw, 323 after; `contrib/Isabelle2025-2/src` 3,024 raw, 2,601
+after; plus the first 1,500 of `contrib/afp-2026-05-13/thys` **in `os.walk` order**,
+which is filesystem-dependent and therefore not reproducible elsewhere. 323 + 2,601 +
+1,500 = 4,424. If you cannot reproduce the AFP slice, say so and quote your own number
+rather than this one; the diff's value is that it is 0, not that it is over 4,424 files.
 
 **The review evidence** — including the reference indexed renderer the §3 invariant needs,
 and the symbol-driven prototype this plan is to be built from — is in
@@ -86,22 +110,21 @@ Six columns per preceding private-use symbol on the line.
 `:231-233` (`mk_definition_tool` → `to_unicode_position`), both reached from the
 deformalization loop at `semantic_interpretation.py:1160-1161` with `unicode=True`.
 The interpreting model is handed `<file>.unicode.thy:line:column`, where the file is
-rendered by `pretty_unicode` and the column by `FileIndex`. The inbound direction
-(`UnicodePosition.to_isabelle_position`, `position.py:519-527`) is worse: a column read
-off the file resolves to the wrong symbol, silently.
+rendered by `pretty_unicode` and the column by `FileIndex`.
 
 **Blast radius.** 100 of 55,772 `.thy` sources carry a private-use escape: 94 in
 phi-System, and — worth noting, because it shows the leak is not confined to
-phi-System's own tree — 2 in the distribution's own `src/Doc`, affected only because
-phi-System's `symbols-words` is registered on this machine. The ASCII-coordinate
+phi-System's own tree — and 2 in the `src/Doc` of each of the three distribution trees
+present here (`Isabelle2025-2`, `Isabelle2024`, `Isabelle2024_bak`), affected only
+because phi-System's `symbols-words` is registered on this machine. The ASCII-coordinate
 procedures (`position.py:537-555`) are unaffected, and structurally so: the merge
 branch's ASCII bookkeeping is byte-identical to the fall-through path.
 
-One claim in an earlier draft was overstated. It said the inbound direction — a column
-read off the file resolving to the wrong symbol — is worse than the outbound one.
-`unicode_to_isabelle`, `unicode_to_ascii` and `UnicodePosition.to_isabelle_position`
-have **no caller anywhere in the tree**; the hover and definition tools take
-`{file, line, symbol}` and no column at all. The live damage is outbound only.
+The damage is **outbound only**. `unicode_to_isabelle`, `unicode_to_ascii` and
+`UnicodePosition.to_isabelle_position` have no caller anywhere in the tree, and the hover
+and definition tools take `{file, line, symbol}` with no column at all. An earlier draft
+said the inbound direction was the worse of the two; there is no inbound direction in
+use.
 
 ### 1b. A second divergence class — and our rendering is wrong against Isabelle
 
@@ -190,8 +213,8 @@ is O(n^2) and times out at 120 s on one tree, where the per-line form costs 0.01
 100 lines.
 
 The strongest cheap form of the invariant is `sym_unicode_offsets[-1] ==
-len(pretty_unicode(idx.source))`: well-posed everywhere, and sufficient to catch both
-classes of §1.
+len(pretty_unicode(idx.source))`: well-posed everywhere, and sufficient to catch the
+class of §1 and the class of §1b.
 
 ## 4. Four ways to fix it
 
@@ -227,8 +250,15 @@ Replace `pretty_unicode`'s two `re.sub` passes with a single pass over
 
 ```python
 def pretty_unicode_indexed(src) -> tuple[str, list[int]]:
-    """The rendering, and where each input offset lands in it."""
+    """The rendering, and where each symbol of `src` begins in it."""
 ```
+
+**Indexed by symbol, one entry per symbol** — `offsets[i]` is where the rendering of
+`symbol_explode(src)[i]` begins in the returned string. Not by character offset: an
+earlier draft's wording ("where each input offset lands") implied a per-character map,
+and the prototype this is seeded from (`review-2026-08-18/remedy/sweep.py`) builds it per
+symbol. `FileIndex` wants per symbol, so does §3's invariant. Say in the docstring
+whether a trailing sentinel is appended; `position.py:149-150` appends two today.
 
 `pretty_unicode(src)` becomes its first component, so there is exactly one
 implementation. `FileIndex` reads the offsets and decides nothing: the table lookup, the
@@ -242,7 +272,7 @@ markers, which occurs in no file in the tree, and there the symbol-driven form i
 one that agrees with Isabelle.
 
 The escape pass is *provably* equivalent, not merely equal on a sample: all 624 table
-keys match the strict pattern of §5.1, every pattern match is exactly one
+keys match `unicode.py`'s escape pattern (§0), every match is exactly one
 `symbol_explode` token, and every `\\<`-initial token that is not a match (`\\<`, `\\<>`,
 `\\<^>`, `\\<alph`) is not a table key, so both leave it alone.
 
@@ -302,7 +332,7 @@ accident, and one is still latent. Option B leaves the mechanism in place and ap
 test as its guard; the evidence is that a test has never been what guards it. Option A
 repairs the symptom only.
 
-Option B remains the fallback if any of §6's five preconditions cannot be met — but then
+Option B remains the fallback if §6 cannot be satisfied — but then
 §6 must be repaired as it stands, its proposed mutant replaced (it is inert, see §6.4),
 and §1b either fixed separately or recorded as an accepted divergence from Isabelle with
 an argument for why it stays at zero instances.
@@ -366,13 +396,16 @@ an argument for why it stays at zero instances.
    no fold available, malformed escape, adjacent fold markers of length two and three,
    and CRLF.
 
-8. **Scope corrections to §6.1's wording.** "The only place the table lookup and the D44
-   rule appear" is false as stated unless two more things happen:
-   `contrib/Isabelle_RPC/build/lib/` holds a complete **pre-D44** copy of the package
-   (`unicode.py:195` is still the bare lookup) — it is not on `sys.path` today but it is
-   what a build artefact ships, so delete it; and
-   `Semantic_Embedding/premise_selection.py:173` defines its own function **named**
-   `pretty_unicode` that shadows the import and post-processes differently, so rename it.
+8. **Scope correction to item 1.** Item 1 asks that `position.py` stop deciding what a
+   symbol renders as. Read as "the only place in the tree", it is false for one further
+   reason: `contrib/Isabelle_RPC/build/lib/` holds a complete **pre-D44** copy of this
+   package (`unicode.py:195` is still the bare lookup). It is not on `sys.path` today, but
+   it is what a build artefact ships. Delete it.
+
+   An earlier draft added a second item here, that
+   `Semantic_Embedding/premise_selection.py:173` shadows the imported `pretty_unicode`.
+   It does not: `:45` imports it as `_pretty_unicode`, and `:174` calls that as the
+   wrapper's first line. A deliberate alias-and-wrap. Nothing to do.
 
 9. **`hover.py`'s two call sites re-verified** against a real phi-System file: the column
    handed to the model addresses the symbol it names.
@@ -388,16 +421,20 @@ Four defects sit on or beside the code being rewritten. They are listed here rat
 in §7 because doing them separately means editing the same lines twice, and because the
 first exists only to prop up an API this fix is already changing.
 
-**The provenance getter is shaped around a caller that is scheduled for deletion.**
-`get_SYMBOLS_AND_REVERSED()` returns a 4-tuple that every caller indexes positionally,
-and `get_SYMBOL_FILES()` therefore reads from a *second* module global, with a docstring
-that says why: "Kept out of get_SYMBOLS_AND_REVERSED()'s tuple on purpose — callers
-unpack that by arity." Exactly one caller in the tree unpacks by arity —
-`Semantic_Embedding/site/prototype/tokenize_prototype.py:13` — and the search-site plan
-has already ruled that file superseded (D43). So an internal API is contorted, and a
-parallel cache global exists, to accommodate a file that is on its way out. Give the
-loader one return value with named fields and let `get_SYMBOLS`, `get_REVERSE_SYMBOLS`,
-`get_LETTER_SYMBOLS` and `get_SYMBOL_FILES` read from it.
+**Two module globals cache one thing.** `get_SYMBOLS_AND_REVERSED()` returns a 4-tuple,
+and `get_SYMBOL_FILES()` reads from a *second* global, `SYMBOL_FILES_CACHE`, whose
+docstring explains that the tuple could not grow because "callers unpack that by arity".
+Two callers do: `Semantic_Embedding/site/prototype/tokenize_prototype.py:13` and
+`test_unicode.py:78`. An earlier draft of this section claimed there was one, and that it
+was the prototype D43 has superseded — that argument does not survive the second caller,
+which is inside this package and is the suite §8 step 5 extends.
+
+The defect is real anyway: one load produces one state, cached in two places that nothing
+keeps in step. The remedy that breaks no caller is to cache **one** record internally —
+symbols, reverse, translation table, letter symbols, files — and let
+`get_SYMBOLS_AND_REVERSED()` project the existing 4-tuple out of it. Positional access
+and arity-unpacking keep working, `get_SYMBOL_FILES()` reads the same record as everyone
+else, and the parallel global goes.
 
 **A guard that cannot fail, reading as though it defends something.** In
 `pretty_unicode`'s `replace_symbol`, `len(char) == 1 and is_private_use(char)`. Every
@@ -478,9 +515,15 @@ already written and already diffed. Define `pretty_unicode(src)` as its first co
 so that only one implementation exists. Add the fast-path guard for text containing no
 `\\<` and no marker, and put the benchmark next to it in a comment.
 
-Clear §6b's first two defects in the same edit, since both sit on these lines: give the
-loader one return value with named fields so the parallel `SYMBOL_FILES_CACHE` global can
-go, and drop the `len(char) == 1` guard.
+Clear §6b's first two defects in the same edit, since both sit on these lines: cache one
+record so the parallel `SYMBOL_FILES_CACHE` global can go, and drop the `len(char) == 1`
+guard.
+
+**Dropping that guard breaks an existing mutant.** `test_unicode.py`'s MUTANTS list
+anchors "the private-use rule is deleted" on the exact source line
+`if char is None or (len(char) == 1 and is_private_use(char)):`. Once the guard goes the
+anchor no longer matches, `self_check` prints "mutation site not found — this self-check
+is stale" and counts that mutant as **survived**. Re-anchor it in the same commit.
 
 *Accepted when* the 4,424-file byte-identity diff against the pre-change renderer passes
 with 0 content differences, and the benchmark is recorded. Keep the pre-change renderer
@@ -499,9 +542,12 @@ renderer inherits `symbol_explode`'s CR folding, and make `FileIndex.source` and
 *Accepted when* `position.py` references neither `SYMBOLS` nor `SUBSUP_TRANS_TABLE` nor
 any fold condition, and `grep` says so.
 
-**4. The invariant test.** §3's form, per line, against `idx.source`. With the positive-count
-assertions of §6.5 and the seeded synthetic table of §6.5, so it neither passes on empty
-data nor depends on which components are registered.
+**4. The invariant test.** §3's form, per line, against `idx.source`. Carry **all three**
+of §6.5's anti-vacuity devices, not two: the positive-count assertions, the seeded
+synthetic table, and making an empty sweep fatal — `check_all` records `EMPTY` and
+`main()` still returns 0 today, which is how a machine with no component registered goes
+green. Add §6.7's eleven hand-written rendering classes here; no corpus supplies them
+all. Document §6.10's interior-offset convention on the function while you are in it.
 
 *Accepted when* it fails against the code as it stood before step 1 — check this by
 running it against the parent commit, not by reasoning about it.
@@ -513,12 +559,11 @@ computing its own offsets.
 *Accepted when* every mutant is killed and the suite still passes unmutated.
 
 **6. Scope cleanup.** Delete `contrib/Isabelle_RPC/build/lib/`, which holds a complete
-pre-D44 copy of this package. Rename `premise_selection.py:173`'s shadowing
-`pretty_unicode`. Clear §6b's remaining two: the mutable defaults in `_load_symbols`,
-and the fallback's consultation order.
+pre-D44 copy of this package. Clear §6b's remaining two: the mutable defaults in
+`_load_symbols`, and the fallback's consultation order.
 
-*Accepted when* nothing outside `Isabelle_RPC_Host` performs the table lookup or the D44
-rule, and no module has two functions of that name in scope.
+*Accepted when* no copy of this package survives outside the source tree, and
+`_load_symbols` and the fallback each have a test.
 
 **7. Re-verify the consumer.** `hover.py`'s two call sites against a real phi-System
 file: the column handed to the model addresses the symbol it names.
