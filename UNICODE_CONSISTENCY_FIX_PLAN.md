@@ -126,45 +126,52 @@ and definition tools take `{file, line, symbol}` with no column at all. An earli
 said the inbound direction was the worse of the two; there is no inbound direction in
 use.
 
-### 1b. A second divergence class — and our rendering is wrong against Isabelle
+### 1b. A second divergence class, recorded and not fixed
 
-`pretty_unicode`'s fold pass is `re.sub('\u21e9.|\u21e7.|\u2759.', ...)`. Two markers in a row
-**match**, are returned unchanged, and the scan resumes past **both**, so the second
-marker never folds with what follows: `\\<^sub>\\<^sub>1` renders `\u21e9\u21e91`. `FileIndex`'s
-loop, on a failed merge, advances by **one** symbol and retries. The two therefore
-disagree on any run of adjacent markers, and the regex's answer depends on the run's
-parity, which is an artefact of non-overlapping matching rather than a rule.
+`pretty_unicode`'s fold pass is `re.sub('\u21e9.|\u21e7.|\u2759.', ...)`. The `.` is *any* character,
+and a second marker is a character, so two markers in a row match as a pair, fail to
+appear in the fold table, are returned unchanged — and `re.sub` resumes **past both**, so
+the second marker never folds with what follows. Traced:
 
-**Isabelle renders it the other way, and we are the ones who are wrong.** Two independent
-renderers in the distribution implement "the latest control wins, and the one it
-displaced is emitted literally":
+```
+x\\<^sub>1            pass 1 -> 'x\u21e91'    regex matches ['\u21e91']         -> 'x\u2081'
+x\\<^sub>\\<^sub>1    pass 1 -> 'x\u21e9\u21e91'   regex matches ['\u21e9\u21e9']         -> 'x\u21e9\u21e91'
+x\\<^sub>\\<^sub>\\<^sub>1     -> 'x\u21e9\u21e9\u21e91'  matches ['\u21e9\u21e9', '\u21e91'] -> 'x\u21e9\u21e9\u2081'
+```
+
+One marker folds, two do not, three fold the last — a parity artefact of non-overlapping
+matching rather than a rule. `FileIndex`, walking symbol by symbol and advancing by one
+on a failed merge, retries the second marker and gets a different answer. That is the
+second way the two implementations disagree, and it predates both commits under review.
+
+**Isabelle renders it the other way.** Two renderers in the distribution implement "the
+latest control wins, and the one it displaced is emitted literally":
 
 ```scala
 // src/Tools/jEdit/src/syntax_style.scala:133
 if (control_style(sym).isDefined) control_sym = sym      // displaced control is never hidden
-
 // src/Pure/General/html.scala:239
 if (is_control(sym)) { output_symbol(ctrl); ctrl = sym } // displaced control is emitted
 ```
 
-So Isabelle gives `\u21e9` + `\u2081` — two cells — where we give three. This is zero-instance
-(a tree-wide search for two adjacent markers over every `.thy` and `.ML` returns 0
-files), and it predates both commits under review. It matters here because it decides
-the shape of the fix: a remedy that preserves our current behaviour hard-codes a
-divergence from the prover, and one that removes the duplication by rebuilding the fold
-on Isabelle's own rule repairs it for free.
+So Isabelle gives `\u21e9` + `\u2081` where we give `\u21e9\u21e91`.
+
+**This is recorded, not fixed, and it does not decide the shape of the fix.** Three
+reasons, in order of weight. It is **lossless**: measured, `pretty_unicode` then
+`ascii_of_unicode` returns `x\\<^sub>\\<^sub>1` exactly, and the rendering is a fixed
+point — nothing is destroyed, one fold is merely not applied. It occurs **nowhere**: a
+tree-wide search for two adjacent markers over every `.thy` and `.ML` returns 0 files.
+And it is a different kind of thing from §1: §1 is *two of our implementations
+disagreeing with each other*, which misdirects 94 files' worth of positions today, where
+this is *our one implementation differing from the prover* on a construction that never
+arises. An earlier draft used this to reject the remedy §5 now recommends. That was
+wrong, and §5 says why.
 
 Two rules Isabelle applies that neither of our implementations models, recorded so they
 are not mistaken for new: jEdit declines to style an operand carrying its own `font:`
 declaration — which all 135 phi-System private-use symbols do — and declines
 non-`is_controllable` operands. Our fold coincides only because `SUBSUP_TRANS_TABLE`'s
 alphabet happens to avoid both cases.
-
-**The duplication has drifted three times, not once.** Before `8b7325e`,
-`pretty_unicode`'s loose `\\<[^>]+>` disagreed with `symbol_explode` on malformed
-escapes — `\\<alpha \\<beta>` rendered to 15 characters where `FileIndex` counted 9.
-That commit closed the gap **incidentally**, from `FileIndex`'s point of view by luck.
-So: one divergence opened by `eab47d6`, one closed by accident, one latent throughout.
 
 ## 2. The root cause, which is not the private-use rule
 
@@ -243,99 +250,130 @@ sub/superscript fold stays duplicated, but is pinned by the §3 invariant test.
 `pretty_unicode`'s scanning or folding behaviour.
 *Against*: the fold remains duplicated; only a test keeps it honest.
 
-### Option C — one symbol-driven renderer, reporting its own alignment
+### Option C — rewrite the renderer to walk symbol by symbol
 
-Replace `pretty_unicode`'s two `re.sub` passes with a single pass over
-`symbol_explode`'s output that renders each symbol and records where it lands:
+Replace the two `re.sub` passes with one pass over `symbol_explode`'s output, rendering
+each symbol and recording where it lands. Considered at length and rejected; kept here
+because it is the shape everyone reaches for and its costs are not obvious.
+
+Two behaviour changes come with it, both consequences of walking rather than matching:
+§1b's fold is repaired (`\\<^sub>\\<^sub>1` starts rendering `\u21e9\u2081`), and the renderer
+inherits `symbol_explode`'s normalisation of `\r\n` to `\n`.
+
+*Against, and this is what decides it*:
+
+- **It needs an equivalence argument, where Option D needs none.** Measured 0 content
+  differences over 4,424 files, which is good evidence and still only evidence.
+- **Cost.** Walking every character in Python where a regex engine walked them in C:
+  measured 18.7x on symbol-free ASCII, and — the case that matters — **18.6x on realistic
+  goal text**, 220 characters with one `\\<And>` in it. `pretty_unicode` runs per hover
+  message, per error string and per goal in the AoA loop.
+- **A fast-path guard does not rescue it.** Skipping the slow path for text with no `\\<`
+  and no marker sounds sufficient and is not: the strings this function sees in the agent
+  loop contain escapes *by construction* — that is why they are being converted. Measured
+  on the realistic goal above, the guard changes nothing at all (76.7 us either way).
+  Over 40,000 real source lines it turns a 7x average regression into 3.5x. A performance
+  special case in the middle of a correctness fix, buying half of a problem it created.
+- **It makes `FileIndex` slower than the code it replaces**, because the source is
+  exploded twice — once by the renderer, once by `FileIndex` for its ASCII offsets.
+  Measured on a 44k-character file: 11.1 ms today, 14.2 ms at best, 18.2 ms as worded.
+
+A fourth shape was measured during review and is recorded for completeness: find the
+interesting positions with a regex and walk only those, passing the plain text between
+them through untouched. It is faster than the code we have (`FileIndex` construction 5.3
+ms against 11.1 ms) and needs no guard, because symbol-free text is simply the case with
+no interesting positions. It costs about 45 lines against Option D's 25, most of it a
+marker/operand state machine, and it still needs the equivalence argument. Worth
+reopening only if the renderer ever has to change behaviour for another reason.
+
+### Option D — record positions while the existing substitution runs
+
+**The recommendation.** `re.sub` calls its replacement function once per match with a
+match object, which carries `start()` and `end()` — where the match was in the input —
+and the function's return value has a known length. So each pass can record, per match,
+"input from here to here became output of this length at this position", and from those
+records compute where every input offset lands in the output.
+
+The substitution logic is untouched. The replacement function returns exactly what it
+returned before; one line is added beside it that writes down what happened.
 
 ```python
 def pretty_unicode_indexed(src) -> tuple[str, list[int]]:
     """The rendering, and where each symbol of `src` begins in it."""
 ```
 
+`pretty_unicode(src)` becomes its first component. `FileIndex` reads the offsets and
+decides nothing: the table lookup, the D44 rule and the whole fold loop leave
+`position.py`.
+
 **Indexed by symbol, one entry per symbol** — `offsets[i]` is where the rendering of
-`symbol_explode(src)[i]` begins in the returned string. Not by character offset: an
-earlier draft's wording ("where each input offset lands") implied a per-character map,
-and the prototype this is seeded from (`review-2026-08-18/remedy/sweep.py`) builds it per
-symbol. `FileIndex` wants per symbol, so does §3's invariant. Say in the docstring
-whether a trailing sentinel is appended; `position.py:149-150` appends two today.
+`symbol_explode(src)[i]` begins in the returned string. Feed it the same string
+`FileIndex` holds (`idx.source`, which `symbol_explode` has already CR-folded), or the
+two disagree about line endings.
 
-`pretty_unicode(src)` becomes its first component, so there is exactly one
-implementation. `FileIndex` reads the offsets and decides nothing: the table lookup, the
-D44 rule and the entire fold loop leave `position.py`.
+Prototyped, about 25 lines. Verified output byte-identical to `pretty_unicode` on every
+case tried, and **necessarily so** — it is the same code path with a recording step
+beside it, not a reimplementation:
 
-**Measured byte-identical to the current renderer on every real file.** A prototype was
-diffed against `pretty_unicode` over **4,424 files** — 323 phi-System, 2,601
-`Isabelle2025-2/src`, a 1,500-file AFP sample, `.thy` and `.ML`: **0 content
-differences**. The only construction on which the two disagree is §1b's adjacent
-markers, which occurs in no file in the tree, and there the symbol-driven form is the
-one that agrees with Isabelle.
+```
+'x\\<^sub>i'        symbol offsets [0, 1, 1]
+'a\\<proc>b'        symbol offsets [0, 1, 8]
+'\\<^bold>x y'      symbol offsets [0, 0, 1, 2]
+'\\< \\<alpha>'     symbol offsets [0, 2, 3]
+```
 
-The escape pass is *provably* equivalent, not merely equal on a sample: all 624 table
-keys match `unicode.py`'s escape pattern (§0), every match is exactly one
-`symbol_explode` token, and every `\\<`-initial token that is not a match (`\\<`, `\\<>`,
-`\\<^>`, `\\<alph`) is not a table key, so both leave it alone.
+The second line is §1's defect: the private-use symbol keeps its seven characters, so `b`
+is at offset 8 where `FileIndex` says 2. The mechanism is right about it without being
+told D44 exists, because it records what the substitution did rather than deciding again
+what it should have done.
 
-*For*: divergence stops being something a test must catch and becomes something that
-cannot be expressed. §1b dissolves, and dissolves in Isabelle's favour. Any future
-rendering rule reaches `FileIndex` for free.
+*For*: no behaviour change, so no equivalence argument and no corpus diff to keep
+forever. No performance change, so no guard and no benchmark. The duplication is removed
+as completely as by Option C.
 
-*Against*, and both are real:
+*Against*: it preserves §1b's difference from Isabelle. §1b explains why that is
+acceptable — lossless, round-trips exactly, zero instances — and §5 explains why an
+earlier draft was wrong to reject Option D over it.
 
-- **Cost.** Symbol-driven rendering is 21x slower than the regex on symbol-free ASCII
-  and 10x on a whole file. `pretty_unicode` runs per hover message, per error string and
-  per goal in the AoA loop, so this is not academic. A one-line fast-path guard for text
-  containing no `\\<` and no marker brings ASCII back to 1.6x; the whole-file case stays
-  at 10x (0.8 ms to 8.6 ms), which lands only on `.unicode.thy` generation — a few
-  hundred files, once — and on `FileIndex` construction, which already pays for
-  `symbol_explode`.
-- **Line endings.** `symbol_explode` normalises `\\r\\n` and `\\r` to `\\n`; the regex
-  renderer does not. Building on `symbol_explode` therefore changes line endings, and
-  that must be **decided**, not inherited. Note it is already a live inconsistency:
-  `FileIndex.source` is CR-folded while the `.unicode.thy` mirror is not, so deciding it
-  makes the two agree for the first time. Zero CRLF files in the 4,424 measured.
-
-### Option D — instrument the existing regex, and keep it
-
-A cheaper variant: keep both `re.sub` passes and have their callbacks record where each
-input offset lands, using `match.start()` and `match.end()`. Prototyped, about 25 lines,
-output byte-identical to `pretty_unicode` by construction, and it removes the
-duplication just as completely.
-
-Rejected because it removes the duplication while **preserving §1b's divergence from the
-prover**. It is numbered separately rather than called a variant of C because the two
-reach opposite conclusions, and a name one word away from the chosen option is a trap
-for whoever reads this next. It would leave two pieces of code agreeing precisely on a rendering that
-Isabelle does not produce. If the point of unifying is to have one right answer rather
-than two consistent ones, this is the wrong half to keep.
+*One convention to write down*: when a match is replaced by text of a different length,
+input offsets strictly **inside** that match have no exact image and map to the match's
+start. `FileIndex` only queries symbol boundaries, which are match starts and ends, so it
+never meets the convention; an unwary later caller could.
 
 ## 5. Recommendation
 
-**Option C.**
+**Option D.**
 
-Two drafts got here by different wrong roads, and both are worth recording because both
-are the natural thing to reach for again.
+Three drafts reached three different answers, and the wrong turns are worth recording
+because each is the natural thing to reach for again.
 
-The first rejected C outright, on the assumption that reporting offsets required
-replacing the regex passes with a symbol-driven loop whose equivalence could not be
-inspected. That framed the choice as "structural safety, bought with a risky rewrite of
-the most widely called function in this module". The equivalence turned out to be
-measurable rather than inspectable — 4,424 files, 0 content differences — so the risk
-was priced from ignorance.
+The first rejected any change to `pretty_unicode` on the assumption that reporting
+offsets required rewriting it, and priced a risk it had not measured.
 
-The second reached for Option D, which is genuinely zero-risk, and would have frozen a
-rendering the prover does not produce.
+The second chose Option D, then abandoned it on discovering §1b — our fold differs from
+Isabelle's on adjacent markers — reasoning that unifying on a rendering the prover does
+not produce keeps the wrong half.
 
-What decides it is the history in §1b: this duplication has drifted three times and none
-of the three was caught by a test. One was found by a review, one was closed by
-accident, and one is still latent. Option B leaves the mechanism in place and appoints a
-test as its guard; the evidence is that a test has never been what guards it. Option A
-repairs the symptom only.
+The third chose Option C, and would have paid an 18x regression on the traffic this
+function actually sees, plus a guard that measurement shows buys nothing on that traffic,
+plus a `FileIndex` slower than the one it replaces, plus a permanent corpus diff in the
+tree to stand in for an equivalence it cannot have structurally.
 
-Option B remains the fallback if §6 cannot be satisfied — but then
-§6 must be repaired as it stands, its proposed mutant replaced (it is inert, see §6.4),
-and §1b either fixed separately or recorded as an accepted divergence from Isabelle with
-an argument for why it stays at zero instances.
+What settles it is that the second draft's objection compares two different magnitudes.
+The defect being fixed is **two of our implementations disagreeing with each other**,
+which sends the interpreting model to the wrong column in 94 files today. §1b is **our
+one implementation differing from the prover** on a construction that occurs in no file,
+loses no information, and round-trips exactly. Trading a real, zero-cost fix for the
+second is trading a measured regression for a difference nobody can observe.
+
+Option D also has a property none of the others do: **its equivalence is structural, not
+measured.** Options B and C must argue that a reimplementation matches; D returns the
+same bytes because it runs the same code. Every acceptance criterion below is lighter for
+that reason.
+
+Option C remains the fallback if implementation shows the recording step cannot be made
+to work — and if it is ever taken, §1b's fold repair and the CR normalisation come with
+it and must be stated, not discovered.
 
 ## 6. What must be true before this is called done
 
@@ -345,18 +383,17 @@ an argument for why it stays at zero instances.
    construction rather than by test — which is what makes the vacuity problem below
    shrink instead of needing to be defended against.
 
-2. **Equivalence is measured, and the measurement is committed.** The 4,424-file diff
-   against the current renderer is a test in the tree, not a number in this document. It
-   costs about three minutes and it is the only thing that turns "equivalent rewrite"
-   into a checked claim.
+2. **Equivalence is structural, and one line checks it.** `pretty_unicode(src)` must be
+   literally `pretty_unicode_indexed(src)[0]`, so there is one code path and no second
+   renderer to keep in step. Assert it once over the corpus and the hand cases; do not
+   commit a diff against a frozen copy of the old renderer, which would put a second
+   implementation of the rendering decision in the test suite forever — the structure
+   this fix exists to abolish.
 
-3. **Two behaviour changes are stated as changes, not discovered later.**
-   - `\\<^sub>\\<^sub>1` starts rendering `\u21e9\u2081` instead of `\u21e9\u21e91`. That is what Isabelle
-     does (§1b); test it, and record that it is zero-instance in 4,424 files so no
-     stored artefact moves.
-   - Line endings: decide explicitly whether the renderer inherits `symbol_explode`'s
-     CR folding. Whichever way, `FileIndex.source` and the `.unicode.thy` mirror must
-     end up agreeing, which they do not today.
+3. **No behaviour change, and that is checkable.** `pretty_unicode`'s output must be
+   byte-identical before and after, on the corpus and on §6.6's hand cases. §1b's fold
+   and the existing CR handling both stay exactly as they are; if either moves, the
+   recording step has been written as a reimplementation and step 1 is not done.
 
 4. **Mutants that actually exercise the new test.** `self_check()` currently hardcodes
    its target as `unicode.py` and needs a per-mutant file field, because the mutants
@@ -387,16 +424,13 @@ an argument for why it stays at zero instances.
      and the real-corpus sweep becomes corroboration rather than the only source of the
      case. About eight lines, verified to work.
 
-6. **A fast-path guard**, with the benchmark recorded beside it, so the next reader does
-   not rediscover the 21x on symbol-free text.
-
-7. **Hand-written cases for every rendering class**, since no corpus supplies them all:
+6. **Hand-written cases for every rendering class**, since no corpus supplies them all:
    private-use symbol, private-use symbol as a fold operand, ordinary component symbol,
    foldable subscript in escape and raw form, unfoldable subscript, bold fold, bold with
    no fold available, malformed escape, adjacent fold markers of length two and three,
    and CRLF.
 
-8. **Scope correction to item 1.** Item 1 asks that `position.py` stop deciding what a
+7. **Scope correction to item 1.** Item 1 asks that `position.py` stop deciding what a
    symbol renders as. Read as "the only place in the tree", it is false for one further
    reason: `contrib/Isabelle_RPC/build/lib/` holds a complete **pre-D44** copy of this
    package (`unicode.py:195` is still the bare lookup). It is not on `sys.path` today, but
@@ -407,10 +441,10 @@ an argument for why it stays at zero instances.
    It does not: `:45` imports it as `_pretty_unicode`, and `:174` calls that as the
    wrapper's first line. A deliberate alias-and-wrap. Nothing to do.
 
-9. **`hover.py`'s two call sites re-verified** against a real phi-System file: the column
+8. **`hover.py`'s two call sites re-verified** against a real phi-System file: the column
    handed to the model addresses the symbol it names.
 
-10. **The interior-offset convention documented on the function**, not only here: when a
+9. **The interior-offset convention documented on the function**, not only here: when a
     symbol renders to a different length, offsets strictly inside it map to its start.
     `FileIndex` only queries symbol boundaries, so it never meets the convention, but an
     unwary caller could.
@@ -508,12 +542,12 @@ letter list. Not caused by these commits; now divergent because of them.
 Each step is finished when its acceptance holds, not before. Steps 1 and 2 are the fix;
 3 through 7 are what stop it rotting.
 
-**1. `pretty_unicode_indexed` in `unicode.py`.** One pass over `symbol_explode`'s output,
-rendering each symbol and recording where it lands. Seed it from
-`review-2026-08-18/remedy/sweep.py`, whose `rendered_symbol` is the per-symbol decision
-already written and already diffed. Define `pretty_unicode(src)` as its first component
-so that only one implementation exists. Add the fast-path guard for text containing no
-`\\<` and no marker, and put the benchmark next to it in a comment.
+**1. `pretty_unicode_indexed` in `unicode.py`.** Keep both `re.sub` passes exactly as
+they are. In each replacement function, beside the `return`, record the match's
+`start()`, `end()`, the position the replacement lands at, and its length; afterwards
+turn those records into an offset per symbol. Compose the two passes' maps. Define
+`pretty_unicode(src)` as the first component, so one code path exists. Seed from the
+prototype behind §4's Option D — about 25 lines.
 
 Clear §6b's first two defects in the same edit, since both sit on these lines: cache one
 record so the parallel `SYMBOL_FILES_CACHE` global can go, and drop the `len(char) == 1`
@@ -523,19 +557,17 @@ guard.
 anchors "the private-use rule is deleted" on the exact source line
 `if char is None or (len(char) == 1 and is_private_use(char)):`. Once the guard goes the
 anchor no longer matches, `self_check` prints "mutation site not found — this self-check
-is stale" and counts that mutant as **survived**. Re-anchor it in the same commit.
+is stale" and counts that mutant as **survived**. Re-anchor it in the same commit. The
+one-record refactor also breaks `test_unicode.py:78`, which unpacks the 4-tuple by arity.
 
-*Accepted when* the 4,424-file byte-identity diff against the pre-change renderer passes
-with 0 content differences, and the benchmark is recorded. Keep the pre-change renderer
-around for the duration of this step — you cannot diff against something you have
-already deleted.
+*Accepted when* `pretty_unicode`'s output is byte-identical before and after over the
+corpora of §0 and §6.6's hand cases — not as evidence of an equivalent rewrite, which is
+not what this is, but as a check that the recording step was not accidentally written as
+one.
 
-**2. The two behaviour changes, decided and written down.** `\\<^sub>\\<^sub>1` starts
-rendering `\u21e9\u2081`, which is what Isabelle does (§1b). Line endings: decide whether the
-renderer inherits `symbol_explode`'s CR folding, and make `FileIndex.source` and the
-`.unicode.thy` mirror agree either way — they do not today.
-
-*Accepted when* both are stated in the commit message and covered by a hand-written case.
+**2. Nothing to decide about behaviour.** Option D changes none. §1b's fold and the
+existing CR handling stay as they are. Feed `pretty_unicode_indexed` the same string
+`FileIndex` holds, `idx.source`, so the two cannot disagree about line endings.
 
 **3. Strip `FileIndex`.** It consumes the offsets and implements nothing.
 
@@ -546,8 +578,8 @@ any fold condition, and `grep` says so.
 of §6.5's anti-vacuity devices, not two: the positive-count assertions, the seeded
 synthetic table, and making an empty sweep fatal — `check_all` records `EMPTY` and
 `main()` still returns 0 today, which is how a machine with no component registered goes
-green. Add §6.7's eleven hand-written rendering classes here; no corpus supplies them
-all. Document §6.10's interior-offset convention on the function while you are in it.
+green. Add §6.6's hand-written rendering classes here; no corpus supplies them
+all. Document §6.9's interior-offset convention on the function while you are in it.
 
 *Accepted when* it fails against the code as it stood before step 1 — check this by
 running it against the parent commit, not by reasoning about it.
