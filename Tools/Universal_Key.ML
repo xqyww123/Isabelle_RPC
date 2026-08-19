@@ -135,8 +135,15 @@ val key_of_theory   : Context.generic -> xstring -> universal_key * string
 val key_of_constant : Context.generic -> xstring -> universal_key * string
 type thm_uk_cache
 val new_thm_uk_cache : unit -> thm_uk_cache
+(* The fifth component is the DISPLAY name: full_name with the selected
+   member's index appended for a multi-theorem fact, the bare full_name for a
+   singleton -- the same rule key_of_theorems_tagged renders.  It is what the
+   by-name query paths hand Python as the live name
+   (DYNAMIC_MEMBER_NAMING_PLAN.md §2.1); full_name (the fourth component)
+   stays the bare interned name, which is what is_global must be computed
+   from and what the other consumers key on. *)
 val key_of_theorem  : thm_uk_cache option -> Context.generic -> xstring
-                    -> universal_key * thm * bool * string
+                    -> universal_key * thm * bool * string * string
 val key_of_theorem' : thm_uk_cache option -> Context.generic -> thm -> universal_key
 val key_of_type     : Context.generic -> xstring -> universal_key * string
 val key_of_class    : Context.generic -> xstring -> universal_key * string
@@ -877,7 +884,15 @@ fun key_of_theorem cache context =
       val thm = Thm.transfer thy thm
       val uk = build_thm_key cache context 0wx02 thm
       val is_global = Facts.defined global_facts full_name
-    in (uk, thm, is_global, full_name) end
+      (* display name: key_of_theorems_tagged's rule (index for a multi-thm
+         fact, bare name for a singleton).  A singleton's display name is
+         index-free ON PURPOSE: Python's apply_live_name_if_member must reject
+         it for a member record (§2.1's second site). *)
+      val disp_name =
+        case (thms, idx_opt) of
+          (_ :: _ :: _, SOME i) => full_name ^ "(" ^ Int.toString i ^ ")"
+        | _ => full_name
+    in (uk, thm, is_global, full_name, disp_name) end
   end
 
 (* Resolve a fact name to the universal keys of its member theorems.  A bare
@@ -937,21 +952,26 @@ val key_of_induction_rule'    = key_of_rule 0wx32
 val key_of_case_split_rule'   = key_of_rule 0wx42
 end
 
+(* The (uk, name) pairs return the DISPLAY name, not full_name: a member's
+   rule faces are the store's dominant member population, and an index-free
+   full_name is exactly what apply_live_name_if_member must reject -- the
+   stale stored coll(i) would keep being shown for precisely the records
+   DYNAMIC_MEMBER_NAMING_PLAN.md §1 calls the defect. *)
 fun key_of_introduction_rule cache context xname =
-  let val (_, thm, _, full_name) = key_of_theorem cache context xname
-  in (key_of_introduction_rule' cache context thm, full_name) end
+  let val (_, thm, _, _, disp_name) = key_of_theorem cache context xname
+  in (key_of_introduction_rule' cache context thm, disp_name) end
 
 fun key_of_elimination_rule cache context xname =
-  let val (_, thm, _, full_name) = key_of_theorem cache context xname
-  in (key_of_elimination_rule' cache context thm, full_name) end
+  let val (_, thm, _, _, disp_name) = key_of_theorem cache context xname
+  in (key_of_elimination_rule' cache context thm, disp_name) end
 
 fun key_of_induction_rule cache context xname =
-  let val (_, thm, _, full_name) = key_of_theorem cache context xname
-  in (key_of_induction_rule' cache context thm, full_name) end
+  let val (_, thm, _, _, disp_name) = key_of_theorem cache context xname
+  in (key_of_induction_rule' cache context thm, disp_name) end
 
 fun key_of_case_split_rule cache context xname =
-  let val (_, thm, _, full_name) = key_of_theorem cache context xname
-  in (key_of_case_split_rule' cache context thm, full_name) end
+  let val (_, thm, _, _, disp_name) = key_of_theorem cache context xname
+  in (key_of_case_split_rule' cache context thm, disp_name) end
 
 fun key_of _     context (Constant name) = #1 (key_of_constant context name)
   | key_of cache context (Theorem thm) = key_of_theorem' cache context thm
@@ -1023,8 +1043,8 @@ fun make_universal_key_callback' (cache : thm_uk_cache option)
       case kind of
         0 => key_of_theory context name
       | 1 => key_of_constant context name
-      | 2 => let val (uk, _, _, full_name) = key_of_theorem cache context name
-             in (uk, full_name) end
+      | 2 => let val (uk, _, _, _, disp_name) = key_of_theorem cache context name
+             in (uk, disp_name) end
       | 3 => key_of_type context name
       | 4 => key_of_class context name
       | 5 => key_of_locale context name
