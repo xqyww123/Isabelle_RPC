@@ -106,7 +106,8 @@ Two schemes, distinguished by the **LSB of byte 0**:
   `theory_of` only knows theories hashed in the current process, so Python's
   `theory_name_of` can legitimately return `None`.
 - Python: `theory_hash.py` — `is_persistent`, `theory_xxhash128`, `async theory_name_of`,
-  and a 1 GiB LMDB store at `platformdirs.user_cache_dir("Isabelle_Theory_Hash", "Qiyuan")`.
+  and a 1 GiB LMDB store at `paths.semantic_DB_dir()/theory_hash.lmdb` — the same
+  directory the semantic-embedding databases live in, honouring `SEMANTIC_DB_DIR`.
 
 ## `Tools/UUID.ML` — `UUID : UUID`
 

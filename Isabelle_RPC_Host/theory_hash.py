@@ -5,9 +5,9 @@ from typing import Any
 
 import lmdb
 import msgpack
-import platformdirs
 import xxhash
 from Isabelle_RPC_Host import Connection, isabelle_remote_procedure
+from Isabelle_RPC_Host.paths import semantic_DB_dir
 
 type theory_hash = bytes
 
@@ -68,7 +68,7 @@ def open_theory_hash_store() -> lmdb.Environment:
     if _theory_hash_env is None:
         with _theory_hash_lock:
             if _theory_hash_env is None:
-                cache_dir = platformdirs.user_cache_dir("Isabelle_Theory_Hash", "Qiyuan")
+                cache_dir = semantic_DB_dir()
                 os.makedirs(cache_dir, exist_ok=True)
                 _theory_hash_env = lmdb.open(os.path.join(cache_dir, "theory_hash.lmdb"), map_size=1 << 30)
                 try:

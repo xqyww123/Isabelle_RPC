@@ -1,4 +1,6 @@
-"""Isabelle settings paths, in the form the platform Python actually runs on wants.
+"""Filesystem paths for the RPC host: Isabelle settings paths in the form the
+platform Python actually runs on wants, and the directory holding the semantic
+databases (`semantic_DB_dir`).
 
 On Windows, Isabelle's settings layer runs inside a bundled Cygwin, so the values it
 exports are a mix of forms::
@@ -11,15 +13,38 @@ exports are a mix of forms::
 A *native* Windows Python — which is what the ML launcher spawns — cannot hand the
 POSIX ones to ``open`` or ``os.path``: they silently resolve to nothing, so RPC
 components fail to register and the symbol table comes up empty.  Turning such a
-value into ``C:\\isa\\Isabelle2025-2`` is all this module does.
+value into ``C:\\isa\\Isabelle2025-2`` is all the conversion functions do.
 
-On Linux and macOS every function here is a no-op.
+On Linux and macOS the conversion functions are no-ops.
 """
 
 import os
 import subprocess
 
+import platformdirs
+
 _CYGDRIVE = "/cygdrive/"
+
+_SEMANTIC_DB_ENV_VAR = "SEMANTIC_DB_DIR"
+
+
+def semantic_DB_dir() -> str:
+    """The directory holding the semantic databases, honouring ``SEMANTIC_DB_DIR``.
+
+    `semantics.lmdb`, the `vector_*.lmdb` stores, `experience_index.lmdb` and this
+    package's `theory_hash.lmdb` all live under it, so the environment override
+    moves the whole database set together. The override must name a LOCAL disk:
+    LMDB's mmap-plus-file-locking is unreliable on networked filesystems (NFS /
+    lustre) and can silently corrupt a store.
+
+    Returns the override verbatim when set (callers `os.makedirs(..., exist_ok=True)`
+    before writing), else platformdirs' per-user cache dir
+    (`~/.cache/Isabelle_Semantic_Embedding`).
+    """
+    override = os.getenv(_SEMANTIC_DB_ENV_VAR)
+    if override:
+        return override
+    return platformdirs.user_cache_dir("Isabelle_Semantic_Embedding", "Qiyuan")
 
 
 def platform_path(path: str) -> str:
