@@ -63,6 +63,8 @@ import threading
 _theory_hash_env: lmdb.Environment | None = None
 _theory_hash_lock = threading.Lock()
 
+THEORY_HASH_MAP_SIZE = 1 << 30
+
 def open_theory_hash_store() -> lmdb.Environment:
     global _theory_hash_env
     if _theory_hash_env is None:
@@ -70,7 +72,8 @@ def open_theory_hash_store() -> lmdb.Environment:
             if _theory_hash_env is None:
                 cache_dir = semantic_DB_dir()
                 os.makedirs(cache_dir, exist_ok=True)
-                _theory_hash_env = lmdb.open(os.path.join(cache_dir, "theory_hash.lmdb"), map_size=1 << 30)
+                _theory_hash_env = lmdb.open(os.path.join(cache_dir, "theory_hash.lmdb"),
+                                             map_size=THEORY_HASH_MAP_SIZE)
                 try:
                     # Attached RPC hosts die by os._exit/SIGKILL as a matter of design,
                     # leaving stale reader-table slots (default 126) behind; each new
