@@ -66,8 +66,12 @@ signature CONTEXT_CALLBACKS = sig
     theories: string list
   }
 
-  (* The DB-storable name of an entry (no live index): `Fixed` -> its stable
-     "name(i)" form; `Member_of_Dynamic` -> the bare collection name. *)
+  (* The entry's name as one plain string, with no live index resolution:
+     `Fixed` -> its stable "name(i)" form; `Member_of_Dynamic` -> the bare
+     collection name.  Its roles are the live name-filter key (the cached KNN
+     pass filters on it) and a display fallback -- records are NOT stored
+     through it (Semantic_Store.entity_name owns the stored name,
+     DYNAMIC_MEMBER_NAMING_PLAN.md §2.2). *)
   val bare_name : entry_name -> string
 
   (* A msgpack unpacker that produces a Context.generic from the argument stream.
@@ -76,8 +80,20 @@ signature CONTEXT_CALLBACKS = sig
   val static_context_unpacker : Context.generic -> context_unpacker
 
   (* Exported utilities for building caches externally *)
-  val entry_def_pos : {pos: Position.T, serial: serial, group: serial,
-    suppress: bool list, theory_long_name: string, concealed: bool} -> def_pos
+  (* A Name_Space entry, spelled out because `Name_Space.entry` is not an
+     exported type: the NAME_SPACE signature declares the_entry's result
+     inline.  Declared ONCE here so the record is not hand-copied per val and
+     kept in step with Pure by hand. *)
+  type name_space_entry = {pos: Position.T, serial: serial, group: serial,
+    suppress: bool list, theory_long_name: string, concealed: bool}
+  val entry_def_pos : name_space_entry -> def_pos
+  (* THE shared spelling of "fetch the fact space's name-space entry" (NONE if
+     absent).  The fact space is derived from the Facts.T PARAMETER -- which
+     space a caller passes is its whole scoping decision (e.g. the global
+     space rejects proof-local labels with no test written anywhere).  No
+     guards live here: concealed/hidden tests stay at the call sites, or
+     inside is_infra_thm, which already carries them. *)
+  val entry_of_fact : Facts.T -> string -> name_space_entry option
   val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
   val mk_name_filter : string list -> string -> bool
   (* First arg = the expensive-match budget (caps full-prop subterm matching to bound
@@ -183,7 +199,8 @@ type cached_thm_entry = {
   theories: string list
 }
 
-(* DB-storable name (no live index). *)
+(* One plain string, no live index resolution: the live name-filter key and a
+   display fallback.  Records are NOT stored through it -- see the signature. *)
 fun bare_name (Fixed nm)               = Thm_Name.print nm
   | bare_name (Member_of_Dynamic coll) = coll
 
@@ -213,6 +230,16 @@ fun resolve_name _ _ (Fixed nm) _ = SOME (Thm_Name.print nm)
         | i => SOME (coll ^ "(" ^ string_of_int (i + 1) ^ ")")
       end
 
+
+(* See the signature: Name_Space.entry spelled out once, because Pure does not
+   export the type. *)
+type name_space_entry = {pos: Position.T, serial: serial, group: serial,
+  suppress: bool list, theory_long_name: string, concealed: bool}
+
+(* THE shared spelling of "fetch the fact space's name-space entry"; the fact
+   space passed in is the caller's whole scoping decision (signature comment). *)
+fun entry_of_fact facts name : name_space_entry option =
+  try (Name_Space.the_entry (Facts.space_of facts)) name
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry.
    File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
@@ -1316,7 +1343,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                NONE => Facts.dest_static false [] facts
              | SOME cf => Facts.dest_static false [cf] facts
        in maps (fn (name, thms) =>
-            case try (Name_Space.the_entry fact_space) name of
+            case entry_of_fact facts name of
               NONE => []
             | SOME e =>
                 if #concealed e
@@ -1535,7 +1562,7 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
                    in if Strhashtab.defined seen name_str then NONE
                       else
                         (Strhashtab.update seen (name_str, ());
-                         let val epos = case try (Name_Space.the_entry fact_space) (#1 nm) of
+                         let val epos = case entry_of_fact facts (#1 nm) of
                                SOME e => entry_def_pos e | NONE => ("", 0, 0)
                          in SOME (name_str, name_str, thm, epos, false) end)
                    end
@@ -1547,7 +1574,7 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
          val src2 = delta
            |> maps (fn (name, thms) =>
                if not (name_pred name) then []
-               else case try (Name_Space.the_entry fact_space) name of
+               else case entry_of_fact facts name of
                  NONE => []
                | SOME e =>
                    if #concealed e
