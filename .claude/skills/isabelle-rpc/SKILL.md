@@ -8,7 +8,7 @@ description: How to use Isabelle_RPC — call async Python procedures from Isabe
 Isabelle/ML calls Python procedures; Python may call back into ML *during* a call.
 For the opposite direction (Python drives Isabelle) use **Isa-REPL** instead.
 
-**Location:** repository root · **Protocol:** MessagePack over TCP · **Default address:** `127.0.0.1:27182`
+**Location:** repository root · **Protocol:** MessagePack over TCP
 
 > **The Python side is fully `async`.** Every procedure is an `async def`; every
 > `connection.*` call must be `await`ed. A plain `def` procedure will not work.
@@ -25,7 +25,9 @@ begin
 The MessagePack library (`mlmsgpack`) lives in the **base** session, at
 [`Performant_Isabelle_ML/contrib/mlmsgpack/mlmsgpack.sml`](https://github.com/xqyww123/Performant_Isabelle_ML/blob/main/contrib/mlmsgpack/mlmsgpack.sml) — not under this project.
 
-After editing any `.ML` file here, just restart the RPC/REPL server; no `isabelle build` needed.
+Edited an `.ML` file? Restart **Isabelle**; no `isabelle build` needed (an ephemeral
+host is replaced with it). Edited a `.py` procedure? Restart the **host** — `load` calls
+`importlib.import_module`, which does nothing for an already-imported module.
 
 ## Starting the host
 
@@ -34,21 +36,24 @@ Since 0.4.0, whoever launches the host owns its lifetime — two modes:
 - **`RPC_Host` unset (default)**: on the first `call_command`, ML launches a private
   **ephemeral host** on an OS-assigned port as an *attached* child of this Isabelle
   process. It dies with the process on every exit path (TCP lifeline + JVM reap + 300 s
-  leak guard); a fresh session always gets a fresh host running fresh code.
+  leak guard covering only the pre-lifeline launch window); a fresh session always gets
+  a fresh host running fresh code.
 - **`RPC_Host` set** (e.g. `export RPC_Host=127.0.0.1:9999`): external-only. ML just
   connects, and **errors if nothing is listening — it never launches** at a configured
-  address. Pre-launch yourself: `isabelle-rpc-host`, `python launcher.py [addr] [log]`,
-  or `python -c 'import Isabelle_RPC_Host; Isabelle_RPC_Host.fork_and_launch__()'
-  <host:port> <log>`. This is the mode for several Isabelle processes sharing one host.
+  address. Pre-launch yourself, passing `host:port` and a log path:
+  `isabelle-rpc-host` (console script from the installed package), `python launcher.py`
+  (project root), or `python -c 'import Isabelle_RPC_Host; Isabelle_RPC_Host.fork_and_launch__()'`
+  (reads them from `sys.argv`). Use it when the operator must own the lifetime (batch
+  builds, slurm), or when several Isabelle processes must share one host.
 
 | Knob | Effect |
 | --- | --- |
-| `RPC_Host` | Set = external-only mode at that address; unset = per-session ephemeral host. (The old `127.0.0.1:27182` default is gone.) |
-| `AUTO_START_RPC_SERVER` | **Retired, ignored** (a leftover `=0` export is a harmless no-op). |
-| `ISABELLE_RPC_DEBUG=1` \| `true` \| `yes` | Debug mode: capture the byte stream and dump it on an unpack error. Honoured on any launch path that inherits it. |
+| `RPC_Host` | Set = external-only mode at that address; unset = per-session ephemeral host. There is no default address. |
+| `ISABELLE_RPC_DEBUG=1` \| `true` \| `yes` | Debug mode: dump the byte stream on an unpack error, and re-raise handler exceptions. Read by the ephemeral launch and by `fork_and_launch__` — **not** by `isabelle-rpc-host` / `launcher.py`. |
+| `ISABELLE_RPC_PYTHON` | Interpreter that runs the ephemeral host; wins outright, else `command -v python3` under Isabelle's bash. Must be a NATIVE interpreter on Windows. Read lazily — no rebuild needed. |
 
 Ephemeral host logs land in `$ISABELLE_HOME_USER/log/RPC_attached_<token>.log`
-(the token starts with the launching ML process's pid). There are no pid files.
+(the token starts with the launching ML process's pid).
 
 ## Writing a procedure (Python)
 
@@ -105,9 +110,14 @@ val my_callback : (string, int) Remote_Procedure_Calling.callback = {
   arg_schema = unpackString,   (* Python -> ML: an UNpacker *)
   ret_schema = packInt,        (* ML -> Python: a packer   *)
   function   = String.size,
-  timeout    = NONE
+  timeout    = NONE   (* dead field: mk_callback never applies it *)
 }
 ```
+
+**The schema fields are inverted between the two records.** A *command*'s `arg_schema`
+packs ML→Python and its `ret_schema` unpacks Python→ML; a *callback*'s `arg_schema`
+unpacks Python→ML and its `ret_schema` packs ML→Python. Same field names, opposite
+directions.
 
 Two registration scopes:
 
@@ -137,8 +147,8 @@ Callbacks may be in flight concurrently — each gets its own channel tag.
 | --- | --- |
 | `await conn.writeln/warning/tracing(msg)` | `log` (global) |
 | `await conn.callback(name, arg)` | any registered callback |
-| `await conn.dialogue(question, options) -> str` | `dialogue` (global) — **blocks on a PIDE click; hangs headless** |
-| `await conn.config_lookup(name, ctxt=None)` | `Config.lookup` (**per-command only**) |
+| `await conn.dialogue(question, options) -> str \| None` | `dialogue` (global) — blocks on a PIDE click, but only if a responder is attached; headless it returns `None` |
+| `await conn.config_lookup(name, ctxt=None)` | `Config.lookup` — **per-command only**: fails unless the command's `callback` list contains it |
 | `Connection.current()` | the current task's connection, or `None` |
 
 `conn.server.logger` writes to the host log file, not to Isabelle.
@@ -161,11 +171,9 @@ Packers (ML → Python) and unpackers (Python → ML) mirror each other:
 | ML | meaning |
 | --- | --- |
 | `Remote_Calling_Failure of {func_name, message}` | Python raised, or protocol error |
-| `Read_Timeout` | `timeout` in the command elapsed while reading |
+| `Timeout.TIMEOUT` | the command's `timeout` elapsed while reading. (`Read_Timeout` is declared but dead — its ref is never set.) |
 
 Python sees ML errors as `IsabelleError(errors: list[str], obj)`.
-(`exception RPC_Fail` exists in `RPC.ML` but is not exported and never raised — ignore it.)
-
 ## Gotchas
 
 - **`callback` is a `callback' list`.** `callback = NONE` does not typecheck; use `[]`.
@@ -178,7 +186,7 @@ Python sees ML errors as `IsabelleError(errors: list[str], obj)`.
   `callback` list. Anything calling `conn.config_lookup` from a command that omits it will
   fail — including `run_python`, which passes `[]` by default.
 - **`run_python` is an unsandboxed `exec`** of ML-supplied source in the host process.
-- **`dialogue` blocks** on an interactive PIDE click; never use it in batch runs.
+- **`dialogue` returns `None`** when no frontend can answer (Isa-REPL, `isabelle build`, VSCode, headless PIDE, bare ML) — distinct from the user declining. It blocks only with a responder attached, or under the `present` policy.
 - **The pooled connection is heartbeated** before reuse; a dead one purges the whole pool.
 
 ## Where to look next
@@ -192,6 +200,3 @@ Python sees ML errors as `IsabelleError(errors: list[str], obj)`.
 Real call sites to imitate: [`semantic_store.ML`](https://github.com/xqyww123/Premise_Embedding/blob/master/Tools/semantic_store.ML) (ML side),
 [`premise_selection.py`](https://github.com/xqyww123/Premise_Embedding/blob/master/Isabelle_Semantic_Embedding/premise_selection.py) (Python side),
 [`agent_server.ML`](https://github.com/xqyww123/Isa-Mini/blob/main/Agent/agent_server.ML).
-
-The top-level `test_*.py` / `test_*.ML` / `*.md` files in the repository root are
-untracked scratch and may be stale — prefer the sources above.
