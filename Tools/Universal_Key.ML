@@ -232,6 +232,11 @@ val compute_constituents : Context.generic -> term
    shape, or a thm/rule key not yet built in this session. *)
 val constituents_of : universal_key -> constituent list option
 
+(* Resolve an xname that may already be a declared full internal name (whose
+   accesses are all shadowed): prefer it verbatim; otherwise intern normally.
+   See the comment at the definition. *)
+val intern_declared : Name_Space.T -> xstring -> string
+
 val make_universal_key_callback  : context_unpacker -> Remote_Procedure_Calling.callback'
 val make_universal_key_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
 val make_key_of_theorems_callback' : thm_uk_cache option -> context_unpacker -> Remote_Procedure_Calling.callback'
