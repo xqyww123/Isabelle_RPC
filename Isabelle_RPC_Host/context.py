@@ -1,7 +1,16 @@
-"""Context entity enumeration — cached universal key lists per connection.
+"""Context entity enumeration over RPC.
 
 Each function enumerates entities from the Isabelle context where the RPC
 was initiated, or from a specific theory if ``theory`` is given.
+
+Every call enumerates the LIVE context — there is no caching layer.  One
+existed here (per-connection, keyed on "no filters, no ctxt") and was retired
+2026-08-26 by owner ruling: it had no invalidation while the ML side
+enumerates a name space that changes with every proved lemma, so a hit could
+only return stale entities — and the retrieval path never hit it anyway (it
+always passes an exclusion list and usually a ctxt).  See
+Semantic_Embedding/INFRA_FILTER_REWORK_PLAN.md §18.  A future cache needs a
+staleness token designed first.
 
 Args common to all entity functions:
     theory: Long theory name (e.g. ``'HOL.List'``) to target. If ``None``,
@@ -82,44 +91,6 @@ async def _call(connection: Connection, callback_name: str,
     return entries, list(warnings)
 
 
-def _is_default(theory: str | None, the_theory_only: bool, exclude: list[str],
-                term_patterns: list[str], type_patterns: list[str],
-                theories_include: list[str],
-                name_contains: list[str] = [],
-                limit: int = -1,
-                target_type: str = "",
-                ctxt: Any = None) -> bool:
-    return (theory is None and not the_theory_only and not exclude
-            and not term_patterns and not type_patterns and not theories_include
-            and not name_contains and limit < 0 and not target_type
-            and ctxt is None)
-
-
-async def _cached_or_call(connection: Connection, attr: str, callback_name: str,
-                    theory: str | None, the_theory_only: bool,
-                    exclude: list[str],
-                    term_patterns: list[str] = [],
-                    type_patterns: list[str] = [],
-                    theories_include: list[str] = [],
-                    name_contains: list[str] = [],
-                    limit: int = -1,
-                    target_type: str = "",
-                    ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Returns (entries, warnings)."""
-    if _is_default(theory, the_theory_only, exclude,
-                   term_patterns, type_patterns, theories_include,
-                   name_contains, limit, target_type, ctxt=ctxt):
-        cached = getattr(connection, attr, None)
-        if cached is None:
-            entries, _ = await _call(connection, callback_name, None, False, [])
-            setattr(connection, attr, entries)
-            return entries, []
-        return cached, []
-    return await _call(connection, callback_name, theory, the_theory_only, exclude,
-                 term_patterns, type_patterns, theories_include,
-                 name_contains, limit, target_type, ctxt=ctxt)
-
-
 async def _call_thm(connection: Connection, callback_name: str,
           theory: str | None, the_theory_only: bool,
           exclude: list[str],
@@ -147,35 +118,6 @@ async def _call_thm(connection: Connection, callback_name: str,
     return entries, is_local, list(warnings)
 
 
-async def _cached_or_call_thm(connection: Connection, attr: str, callback_name: str,
-                    theory: str | None, the_theory_only: bool,
-                    exclude: list[str],
-                    term_patterns: list[str] = [],
-                    type_patterns: list[str] = [],
-                    theories_include: list[str] = [],
-                    name_contains: list[str] = [],
-                    limit: int = -1,
-                    target_type: str = "",
-                    ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Theorem-like variant of _cached_or_call. Caches the (entries, is_local) pair
-    under connection.<attr> on the default query (no filters, no ctxt).  Dedicated
-    helper so the shared _cached_or_call (which stores bare entry lists for the
-    pattern-less kinds) stays untouched."""
-    if _is_default(theory, the_theory_only, exclude,
-                   term_patterns, type_patterns, theories_include,
-                   name_contains, limit, target_type, ctxt=ctxt):
-        cached = getattr(connection, attr, None)
-        if cached is None:
-            entries, is_local, _ = await _call_thm(connection, callback_name, None, False, [])
-            setattr(connection, attr, (entries, is_local))
-            return entries, is_local, []
-        entries, is_local = cached
-        return entries, is_local, []
-    return await _call_thm(connection, callback_name, theory, the_theory_only, exclude,
-                 term_patterns, type_patterns, theories_include,
-                 name_contains, limit, target_type, ctxt=ctxt)
-
-
 async def constants(connection: Connection, theory: str | None = None,
               the_theory_only: bool = False,
               theories_not_include: list[str] = [],
@@ -187,7 +129,7 @@ async def constants(connection: Connection, theory: str | None = None,
     """Return (entries, warnings) for all constants.
     Only type_patterns apply (constants have no proposition; term patterns are ignored).
     """
-    return await _cached_or_call(connection, "_ctx_constants", "Context.constants",
+    return await _call(connection, "Context.constants",
                            theory, the_theory_only, theories_not_include,
                            [], type_patterns, theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -205,7 +147,7 @@ async def theorems(connection: Connection, theory: str | None = None,
     """Return (entries, is_local, warnings) for all theorems. is_local maps each
     uk -> whether the theorem is proof-context-local (drives the no-embedding
     default score downstream)."""
-    return await _cached_or_call_thm(connection, "_ctx_theorems", "Context.theorems",
+    return await _call_thm(connection, "Context.theorems",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -221,7 +163,7 @@ async def types(connection: Connection, theory: str | None = None,
     """Return (entries, warnings) for all types.
     Pattern parameters are not applicable to types.
     """
-    return await _cached_or_call(connection, "_ctx_types", "Context.types",
+    return await _call(connection, "Context.types",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -237,7 +179,7 @@ async def classes(connection: Connection, theory: str | None = None,
     """Return (entries, warnings) for all type classes.
     Pattern parameters are not applicable to classes.
     """
-    return await _cached_or_call(connection, "_ctx_classes", "Context.classes",
+    return await _call(connection, "Context.classes",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -253,7 +195,7 @@ async def locales(connection: Connection, theory: str | None = None,
     """Return (entries, warnings) for all locales.
     Pattern parameters are not applicable to locales.
     """
-    return await _cached_or_call(connection, "_ctx_locales", "Context.locales",
+    return await _call(connection, "Context.locales",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -274,7 +216,7 @@ async def theorem_collection(connection: Connection, theory: str | None = None,
     members have a proposition matching the pattern (ML-side, see
     make_theorem_collection_callback); empty patterns are a no-op.
     """
-    return await _cached_or_call(connection, "_ctx_theorem_collection", "Context.theorem_collection",
+    return await _call(connection, "Context.theorem_collection",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -290,7 +232,7 @@ async def methods(connection: Connection, theory: str | None = None,
     """Return (entries, warnings) for all proof methods.
     Pattern parameters are not applicable to methods.
     """
-    return await _cached_or_call(connection, "_ctx_methods", "Context.methods",
+    return await _call(connection, "Context.methods",
                            theory, the_theory_only, theories_not_include,
                            [], [], theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -308,7 +250,7 @@ async def introduction_rules(connection: Connection, theory: str | None = None,
     """Return (entries, is_local, warnings) for all introduction rules. is_local maps
     each uk -> whether the rule is proof-context-local (drives the no-embedding
     default score downstream)."""
-    return await _cached_or_call_thm(connection, "_ctx_intro_rules", "Context.introduction_rules",
+    return await _call_thm(connection, "Context.introduction_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -325,7 +267,7 @@ async def elimination_rules(connection: Connection, theory: str | None = None,
                       ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
     """Return (entries, is_local, warnings) for all elimination rules. is_local maps
     each uk -> whether the rule is proof-context-local."""
-    return await _cached_or_call_thm(connection, "_ctx_elim_rules", "Context.elimination_rules",
+    return await _call_thm(connection, "Context.elimination_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit, ctxt=ctxt)
@@ -345,7 +287,7 @@ async def induction_rules(connection: Connection, theory: str | None = None,
     each uk -> whether the rule is proof-context-local.
     target_type: if non-empty, restrict to rules whose target type unifies with it
     (bidirectional Sign.typ_instance; wildcards allowed)."""
-    return await _cached_or_call_thm(connection, "_ctx_induct_rules", "Context.induction_rules",
+    return await _call_thm(connection, "Context.induction_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit, target_type, ctxt=ctxt)
@@ -365,7 +307,7 @@ async def case_split_rules(connection: Connection, theory: str | None = None,
     each uk -> whether the rule is proof-context-local.
     target_type: if non-empty, restrict to rules whose target type unifies with it
     (bidirectional Sign.typ_instance; wildcards allowed)."""
-    return await _cached_or_call_thm(connection, "_ctx_case_split_rules", "Context.case_split_rules",
+    return await _call_thm(connection, "Context.case_split_rules",
                            theory, the_theory_only, theories_not_include,
                            term_patterns, type_patterns, theories_include,
                            name_contains, limit, target_type, ctxt=ctxt)
