@@ -34,6 +34,76 @@ val thm_packer : pp_name -> Context.generic -> thm MessagePackBinIO.Pack.packer
 
 end
 
+(*The constructor-tagged structural codec of types and terms, over any MessagePack
+  instantiation.  A runtime symbol (Performant_Isabelle_ML/HOL/SSymb.thy) travels as
+  its identifier (tag 9) and is re-interned by the decoder: its numeral is allocated
+  per process, so shipping the numeral would make a recorded term differ from the same
+  term built in another session.*)
+functor RPC_Term_Codec (MP : MESSAGE_PACK) : sig
+  val pack_raw_typ : typ MP.Pack.packer
+  val unpack_raw_typ : typ MP.Unpack.unpacker
+  val pack_raw_term : term MP.Pack.packer
+  val unpack_raw_term : term MP.Unpack.unpacker
+end = struct
+
+open MP.Pack MP.Unpack
+
+fun pack_raw_typ (Type data) =
+      packPair (packInt, packPair (packString, packList pack_raw_typ)) (0, data)
+  | pack_raw_typ (TFree data) =
+      packPair (packInt, packPair (packString, packList packString)) (1, data)
+  | pack_raw_typ (TVar ((n,i),s)) =
+      packPair (packInt, packTuple3 (packString, packInt, packList packString)) (2, (n,i,s))
+
+fun unpack_raw_typ s =
+      unpackPair_dep' unpackInt (
+        fn 0 => unpackPair (unpackString, unpackList unpack_raw_typ)
+             #> apfst Type
+         | 1 => unpackPair (unpackString, unpackList unpackString)
+             #> apfst TFree
+         | 2 => unpackTuple3 (unpackString, unpackInt, unpackList unpackString)
+             #> apfst (fn (n,i,s) => TVar ((n,i),s))
+         | _ => raise Unpack) s
+
+fun pack_raw_term t =
+  case Phi_Tool_Symbol.dest_symbol t of
+    SOME id => packPair (packInt, packString) (9, id)
+  | NONE => pack_raw_term' t
+and pack_raw_term' (Const data) =
+      packPair (packInt, packPair (packString, pack_raw_typ)) (3, data)
+  | pack_raw_term' (Free data) =
+      packPair (packInt, packPair (packString, pack_raw_typ)) (4, data)
+  | pack_raw_term' (Var ((n,i),t)) =
+      packPair (packInt, packTuple3 (packString, packInt, pack_raw_typ)) (5, (n,i,t))
+  | pack_raw_term' (Bound data) =
+      packPair (packInt, packInt) (6, data)
+  | pack_raw_term' (Abs data) =
+      packPair (packInt, packTuple3 (packString, pack_raw_typ, pack_raw_term)) (7, data)
+  | pack_raw_term' (A $ B) =
+      packPair (packInt, packPair (pack_raw_term, pack_raw_term)) (8, (A,B))
+
+fun unpack_raw_term s =
+      unpackPair_dep' unpackInt (
+        fn 3 => unpackPair (unpackString, unpack_raw_typ)
+             #> apfst Const
+         | 4 => unpackPair (unpackString, unpack_raw_typ)
+             #> apfst Free
+         | 5 => unpackTuple3 (unpackString, unpackInt, unpack_raw_typ)
+             #> apfst (fn (n,i,s) => Var ((n,i),s))
+         | 6 => unpackInt #> apfst Bound
+         | 7 => unpackTuple3 (unpackString, unpack_raw_typ, unpack_raw_term)
+             #> apfst Abs
+         | 8 => unpackPair (unpack_raw_term, unpack_raw_term)
+             #> apfst (fn (A,B) => A $ B)
+         | 9 => unpackString #> apfst Phi_Tool_Symbol.mk_symbol
+         | _ => raise Unpack) s
+
+end
+
+(*The BytesIO twin, for a payload held in memory (BinIO's instream cannot be fed
+  from a string).*)
+structure RPC_Pretty_Bytes = RPC_Term_Codec(MessagePackBytesIO)
+
 structure RPC_Pretty : RPC_PRETTY = struct
 
 type printing_config = {
@@ -318,54 +388,9 @@ fun print_typ cfg ctxt =
 
 type pp_name = string
 
-local open MessagePackBinIO.Pack  MessagePackBinIO.Unpack in
-
-fun pack_raw_typ (Type data) =
-      packPair (packInt, packPair (packString, packList pack_raw_typ)) (0, data)
-  | pack_raw_typ (TFree data) =
-      packPair (packInt, packPair (packString, packList packString)) (1, data)
-  | pack_raw_typ (TVar ((n,i),s)) =
-      packPair (packInt, packTuple3 (packString, packInt, packList packString)) (2, (n,i,s))
-
-fun unpack_raw_typ s =
-      unpackPair_dep' unpackInt (
-        fn 0 => unpackPair (unpackString, unpackList unpack_raw_typ)
-             #> apfst Type
-         | 1 => unpackPair (unpackString, unpackList unpackString)
-             #> apfst TFree
-         | 2 => unpackTuple3 (unpackString, unpackInt, unpackList unpackString)
-             #> apfst (fn (n,i,s) => TVar ((n,i),s))
-         | _ => raise Unpack) s
-
-fun pack_raw_term (Const data) =
-      packPair (packInt, packPair (packString, pack_raw_typ)) (3, data)
-  | pack_raw_term (Free data) =
-      packPair (packInt, packPair (packString, pack_raw_typ)) (4, data)
-  | pack_raw_term (Var ((n,i),t)) =
-      packPair (packInt, packTuple3 (packString, packInt, pack_raw_typ)) (5, (n,i,t))
-  | pack_raw_term (Bound data) =
-      packPair (packInt, packInt) (6, data)
-  | pack_raw_term (Abs data) =
-      packPair (packInt, packTuple3 (packString, pack_raw_typ, pack_raw_term)) (7, data)
-  | pack_raw_term (A $ B) =
-      packPair (packInt, packPair (pack_raw_term, pack_raw_term)) (8, (A,B))
-
-fun unpack_raw_term s =
-      unpackPair_dep' unpackInt (
-        fn 3 => unpackPair (unpackString, unpack_raw_typ)
-             #> apfst Const
-         | 4 => unpackPair (unpackString, unpack_raw_typ)
-             #> apfst Free
-         | 5 => unpackTuple3 (unpackString, unpackInt, unpack_raw_typ)
-             #> apfst (fn (n,i,s) => Var ((n,i),s))
-         | 6 => unpackInt #> apfst Bound
-         | 7 => unpackTuple3 (unpackString, unpack_raw_typ, unpack_raw_term)
-             #> apfst Abs
-         | 8 => unpackPair (unpack_raw_term, unpack_raw_term)
-             #> apfst (fn (A,B) => A $ B)
-         | _ => raise Unpack) s
-
-end
+(*The raw term codec, once, for every MessagePack instantiation: see RPC_Term_Codec.*)
+structure Codec = RPC_Term_Codec(MessagePackBinIO)
+open Codec
 
 local open MessagePackBinIO.Pack in
 
