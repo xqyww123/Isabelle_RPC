@@ -59,7 +59,8 @@ fun dialogue_capable () = #1 (frontend_identity ())
 
 (* No caching anywhere: dialogue fires only on the rare ask path, one
    millisecond-scale Scala round trip per call -- and a cache would be frozen
-   into session heaps (the RPC.ML:237 bug class). *)
+   into session heaps (the heap-inheritance bug class documented in RPC.ML's
+   attached-host state comment). *)
 fun responder_attached () =
   case try Options.default_string "isabelle_rpc_dialogue" of
     SOME "present" => true
@@ -76,6 +77,7 @@ local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 val _ = Theory.setup (Context.theory_map (
   Remote_Procedure_Calling.register_global_callback {
     name = "dialogue",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (unpackString, unpackList unpackString),
     ret_schema = packOption packString,
     function = fn (question, options) =>
@@ -109,7 +111,7 @@ val _ = Theory.setup (Context.theory_map (
                  NONE)
             end
       end,
-    timeout = NONE  (* NB dead field: mk_callback never applies it (RPC.ML:440) *)
+    timeout = NONE  (* NB dead field: mk_callback never applies it (RPC.ML) *)
   }))
 
 end

@@ -1036,6 +1036,7 @@ fun make_universal_key_callback' (cache : thm_uk_cache option)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "universal_key_of",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = MessagePackBinIO.Unpack.unpackPair
                    (ctxt_unpack,
                     MessagePackBinIO.Unpack.unpackPair
@@ -1070,6 +1071,7 @@ fun make_key_of_theorems_callback' (cache : thm_uk_cache option)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "key_of_theorems",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = MessagePackBinIO.Unpack.unpackPair
                    (ctxt_unpack,
                     MessagePackBinIO.Unpack.unpackTuple3

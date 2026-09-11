@@ -306,6 +306,7 @@ end
 val _ = Theory.setup (Context.theory_map (
   Remote_Procedure_Calling.register_global_callback {
     name = "Theory_Hash.theory_name_of",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = MessagePackBinIO.Unpack.unpackBytes,
     ret_schema = MessagePackBinIO.Pack.packOption MessagePackBinIO.Pack.packString,
     function = fn h =>
@@ -322,6 +323,7 @@ val _ = Theory.setup (Context.theory_map (
        callers do not use this callback at all -- they read the serial off the
        theory value already in hand. *)
     name = "Theory_Hash.process_serial_of",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = MessagePackBinIO.Unpack.unpackBytes,
     ret_schema = MessagePackBinIO.Pack.packOption
       (MessagePackBinIO.Pack.packPair

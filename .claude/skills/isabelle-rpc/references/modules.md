@@ -23,7 +23,9 @@ type connection = BinIO.StreamIO.instream Unsynchronized.ref
 exception Read_Timeout
 exception Remote_Calling_Failure of {func_name: string option, message: string}
 
+datatype on_interrupt = Reraise | Swallow   (* after answering an interrupt to Python: unwind, or keep serving *)
 type ('a,'b) callback = { name: string,
+                          on_interrupt: on_interrupt,
                           arg_schema: 'a MessagePackBinIO.Unpack.unpacker,
                           ret_schema: 'b MessagePackBinIO.Pack.packer,
                           function: 'a -> 'b,

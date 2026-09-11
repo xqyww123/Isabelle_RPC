@@ -24,6 +24,7 @@ val unpack_log_type : log_type unpacker = fn ins =>
 val _ = Theory.setup (Context.theory_map (
   Remote_Procedure_Calling.register_global_callback {
     name = "log",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (unpack_log_type, unpackString),
     ret_schema = packUnit,
     function = fn (level, msg) =>

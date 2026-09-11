@@ -45,6 +45,21 @@ class IsabelleError(Exception):
         super().__init__(self.errors)
 
 
+class IsabelleInterrupt(IsabelleError):
+    """The callback was interrupted on the Isabelle side.  Whether Isabelle
+    keeps serving afterwards is the callback's `on_interrupt` choice (RPC.ML):
+    under Reraise the RPC call unwinds and the connection closes, so nothing
+    may call back afterwards (a later callback fails with
+    ConnectionResetError while the reader loop still runs, and never
+    completes once it has seen the close); under Swallow the procedure may
+    go on.
+
+    Being an IsabelleError, it is caught by every `except IsabelleError`
+    already written anywhere: a handler that must not treat a cancellation as
+    a failure puts `except IsabelleInterrupt: raise` above it (the audit is a
+    tree-wide grep of IsabelleError handlers)."""
+
+
 class Connection:
     @staticmethod
     def current() -> 'Connection | None':
@@ -85,6 +100,11 @@ class Connection:
         self._user_channel: asyncio.Queue[tuple[int, Any]] = asyncio.Queue()  # (tag, payload)
         self._reader_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()  # serialize writes to the socket
+        # Run by close(), once, before the socket goes: what this connection
+        # owns for as long as it lives (an interpretation lock, say) is released
+        # here, whichever of the two close paths is taken first.
+        self.on_close: list[Callable[[], None]] = []
+        self._closed = False
 
     async def _feed_and_unpack(self) -> Any:
         """Read bytes from StreamReader, feed to Unpacker, return next msgpack object."""
@@ -164,6 +184,10 @@ class Connection:
         then immediately reads phase 2, so they must be adjacent in the
         byte stream.  The await for the phase-1 ack is safe inside the
         lock because responses arrive via the independent _reader_loop.
+
+        Raises:
+            IsabelleInterrupt: the callback was interrupted on the Isabelle side.
+            IsabelleError: no callback bears the name, or it raised.
         """
         loop = asyncio.get_running_loop()
         cb_id = self._next_callback_id
@@ -188,6 +212,8 @@ class Connection:
 
         (result, error) = await phase2_future
 
+        if error == "Interrupt":                  # mk_callback's answer to an interrupt
+            raise IsabelleInterrupt([error], None)
         if error is not None:
             raise IsabelleError([error], None)
 
@@ -224,6 +250,15 @@ class Connection:
         await self.callback("log", (int(self.LogType.WRITELN), msg))
 
     def close(self):
+        """Idempotent: reached from handle_client's `finally` and from __aexit__."""
+        if self._closed:
+            return
+        self._closed = True
+        for release in self.on_close:
+            try:
+                release()
+            except Exception:
+                self.server.logger.exception("on_close callback failed")
         try:
             self.writer.close()
         except:

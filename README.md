@@ -110,6 +110,7 @@ open MessagePackBinIO.Pack MessagePackBinIO.Unpack
 
 val my_callback : (string, int) Remote_Procedure_Calling.callback = {
   name = "my_callback",           (* callback identifier *)
+  on_interrupt = Remote_Procedure_Calling.Reraise,  (* an interrupt unwinds the call *)
   arg_schema = unpackString,      (* Python → ML schema *)
   ret_schema = packInt,           (* ML → Python schema *)
   function = (fn msg => String.size msg),  (* callback logic *)
@@ -145,7 +146,7 @@ def my_rpc(arg, connection: Connection):
 
 **Advanced:** For custom bidirectional protocols, define ML callbacks using `callback'` type directly (bypassing structured schemas) and invoke with `connection.raw_callback(name, action)` where `action` is a function receiving the connection for arbitrary I/O operations.
 
-The built-in `isabelle_heartbeat` callback (RPC.ML:328) provides a working example. See `contrib/Isabelle_RPC/test_callback.py` for complete examples.
+The built-in `isabelle_heartbeat` callback (RPC.ML:328) provides a working example. See `contrib/Isabelle_RPC/ai-artifacts/archives/test_callback.py` for complete examples.
 
 ## Common MessagePack Schemas
 

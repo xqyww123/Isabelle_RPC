@@ -1134,6 +1134,7 @@ fun make_experience_constituents_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Experience.constituents",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, unpackList unpackString),
     ret_schema = packList (packPair (packString, packBytes)),
     function = fn (context, pattern_strs) => experience_constituents context pattern_strs,
@@ -1176,6 +1177,7 @@ fun make_experiences_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.experiences",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack,
                    unpackPair (unpackList unpackString,
                      unpackList (unpackPair (Universal_Key.unpack_universal_key,
@@ -1199,6 +1201,7 @@ fun make_loaded_theory_hashes_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.loaded_theory_hashes",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = ctxt_unpack,
     ret_schema = packList packBytes,
     function = fn context => loaded_theory_hashes context,
@@ -1209,6 +1212,7 @@ fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.constants",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude,
@@ -1245,6 +1249,7 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
     (ctxt_unpack : context_unpacker) : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = cb_name,
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema_thm,
     function = fn (context, (target_thy_opt, the_theory_only, exclude,
@@ -1359,6 +1364,7 @@ fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.types",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
@@ -1378,6 +1384,7 @@ fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.classes",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
@@ -1397,6 +1404,7 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.locales",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
@@ -1417,6 +1425,7 @@ fun make_theorem_collection_callback collection_member_thms filter_opt
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theorem_collection",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude,
@@ -1486,6 +1495,7 @@ fun make_methods_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.methods",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, arg_schema),
     ret_schema = ret_schema,
     function = fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _)) =>
@@ -1505,6 +1515,7 @@ fun make_theory_long_name_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.the_theory_long_name",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = ctxt_unpack,
     ret_schema = packString,
     function = fn context =>
@@ -1516,6 +1527,7 @@ fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
     name = "Context.theory_long_name_and_path",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, unpackString),
     ret_schema = packPair (packString, packString),
     function = fn (context, name) =>

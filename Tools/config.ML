@@ -36,6 +36,7 @@ structure Config : CONFIG = struct
       : Remote_Procedure_Calling.callback' =
     Remote_Procedure_Calling.mk_callback {
       name = "Config.lookup",
+      on_interrupt = Remote_Procedure_Calling.Reraise,
       arg_schema = MessagePackBinIO.Unpack.unpackPair (ctxt_unpack,
                      MessagePackBinIO.Unpack.unpackString),
       ret_schema = pack_value,

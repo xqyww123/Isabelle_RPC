@@ -107,6 +107,7 @@ The host only knows procedures whose module has been imported. Two ways:
 ```sml
 val my_callback : (string, int) Remote_Procedure_Calling.callback = {
   name       = "my_callback",
+  on_interrupt = Remote_Procedure_Calling.Reraise,  (* an interrupt unwinds the call; Swallow keeps serving, see CALLBACK_MECHANISM.md *)
   arg_schema = unpackString,   (* Python -> ML: an UNpacker *)
   ret_schema = packInt,        (* ML -> Python: a packer   *)
   function   = String.size,
@@ -173,7 +174,10 @@ Packers (ML → Python) and unpackers (Python → ML) mirror each other:
 | `Remote_Calling_Failure of {func_name, message}` | Python raised, or protocol error |
 | `Timeout.TIMEOUT` | the command's `timeout` elapsed while reading. (`Read_Timeout` is declared but dead — its ref is never set.) |
 
-Python sees ML errors as `IsabelleError(errors: list[str], obj)`.
+Python sees ML errors as `IsabelleError(errors: list[str], obj)` — except an interrupt of a
+callback, which arrives as its subclass `IsabelleInterrupt` and so is also caught by every
+`except IsabelleError`; put `except IsabelleInterrupt: raise` above a handler that must not
+treat a cancellation as a failure (CALLBACK_MECHANISM.md, Error Handling).
 ## Gotchas
 
 - **`callback` is a `callback' list`.** `callback = NONE` does not typecheck; use `[]`.

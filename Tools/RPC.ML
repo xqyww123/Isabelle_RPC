@@ -12,8 +12,26 @@ val write : connection -> 'a MessagePackBinIO.Pack.packer -> 'a -> unit
 val write_error : connection -> exn -> unit
 val write_error': connection -> 'a MessagePackBinIO.Pack.packer -> {message: string list, errobj: 'a} -> unit
 
+(*What a callback does with an interrupt, after answering it to Python as the
+  error message "Interrupt".  Reraise lets it unwind the whole RPC call, which
+  is right whenever the interrupt cancels the command hosting the call; prefer
+  it.  Swallow keeps serving Python, and is sound only when all of these hold:
+  - the interrupt is a one-shot Isabelle_Thread.interrupt_thread on a thread no
+    cancelled task group owns: cancelling the group re-interrupts the thread
+    every scheduler round, so Swallow buys one reply and the call unwinds anyway;
+  - no Timeout.apply governs the calling thread: swallowing consumes its one
+    interrupt and clears its break flag, so the deadline never fires;
+  - the Python procedure handles IsabelleInterrupt by returning or by raising
+    an ordinary exception: otherwise the cancellation comes back as a
+    Remote_Calling_Failure carrying a Python traceback, and a BaseException
+    (asyncio.CancelledError) writes no reply at all;
+  - the hosting command's timeout is acceptable as the per-message deadline the
+    dispatch loop's next read then runs under.*)
+datatype on_interrupt = Reraise | Swallow
+
 type ('a,'b) callback = {
   name: string,
+  on_interrupt: on_interrupt,
   arg_schema: 'a MessagePackBinIO.Unpack.unpacker,
   ret_schema: 'b MessagePackBinIO.Pack.packer,
   function: 'a -> 'b,
@@ -49,6 +67,9 @@ val call_heartbeat_callback_cmd : (unit, string) command
 (*Auxiliary*)
 val get_connection : unit -> connection
 val release_connection : connection -> unit
+(*Close instead of releasing to the pool: what the host tied to this connection
+  (its on_close callbacks) is released by the close.*)
+val close_connection : connection -> unit
 end
 
 structure Remote_Procedure_Calling : REMOTE_PROCEDURE_CALLING = struct
@@ -415,8 +436,11 @@ fun write_error conn exn =
 
 (** Callback Registry **)
 
+datatype on_interrupt = Reraise | Swallow
+
 type ('a,'b) callback = {
   name: string,
+  on_interrupt: on_interrupt,
   arg_schema: 'a MessagePackBinIO.Unpack.unpacker,
   ret_schema: 'b MessagePackBinIO.Pack.packer,
   function: 'a -> 'b,
@@ -437,27 +461,53 @@ fun get_global_callback (name : string) : callback' option =
   Synchronized.change_result global_callbacks_lock (fn () =>
     (Strhashtab.lookup global_callbacks name, ()))
 
-fun mk_callback ({name, arg_schema, ret_schema, function, timeout} : ('a,'b) callback) : callback' =
+(*Reading the argument and applying the function run interruptibly; the reply
+  is written uninterruptibly (a blocking write, deferred interrupts included --
+  a peer that stops draining the socket holds the thread with no deadline), so
+  a callback that was entered answers exactly once.  An interrupt is answered
+  with the error message "Interrupt" (Python raises IsabelleInterrupt); the
+  interrupt the function's own capture catches is the one on_interrupt
+  governs, any other re-raises.  The answer to an interrupt that lands before
+  Python has opened the phase-2 slot is best-effort: Python opens the slot
+  only as it sends the request, and its reader drops a reply for a slot that
+  is not open, so the procedure may learn of the cancellation as the closing
+  connection instead.  An interrupt to re-raise outranks a failed reply write
+  (the final case below), the peer being possibly gone for the same reason.*)
+fun mk_callback ({name, on_interrupt, arg_schema, ret_schema, function, ...} : ('a,'b) callback) : callback' =
   {name = name,
-   action = fn conn => fn cb_id => \<^try>\<open>
-     let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
-         val (cin, cout, _) = conn
-         (* Phase 2: Read (cb_id, arg) pair *)
-         val ((_, cb_arg), cin') = doUnpack (unpackPair (unpackInt, arg_schema)) (!cin)
-                           handle Unpack => error "Failed to unpack callback argument"
-         val _ = cin := cin'
-         val result = function cb_arg
-         (* Send (cb_id, (Some result, None)) *)
-      in doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
-                (cb_id, (SOME result, NONE)) cout
-       ; BinIO.StreamIO.flushOut cout
-     end catch exn =>
-       let open MessagePackBinIO.Pack
-           val (_, cout, _) = conn
-        in doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
-                  (cb_id, (NONE, SOME (String.concatWith "\n" (map trim_markup (Runtime.exn_message_list exn))))) cout
-         ; BinIO.StreamIO.flushOut cout
-       end\<close>}
+   action = fn conn => fn cb_id =>
+     Thread_Attributes.uninterruptible_body (fn run =>
+       let open MessagePackBinIO.Pack MessagePackBinIO.Unpack
+           val (cin, cout, _) = conn
+           val interrupted = (NONE, SOME "Interrupt")
+           fun failed exn =
+             (NONE, SOME (String.concatWith "\n" (map trim_markup (Runtime.exn_message_list exn))))
+           fun read_argument () =   (* Phase 2: the (cb_id, arg) pair *)
+             doUnpack (unpackPair (unpackInt, arg_schema)) (!cin)
+             handle Unpack => error "Failed to unpack callback argument"
+           (*one interruptible region: the argument read, then the function under
+             its own capture.  Nothing that escapes the region has advanced the
+             stream, so the phase-2 message is still pending there and an
+             interrupt must re-raise, whatever on_interrupt says.*)
+           val (answer, interrupt) =
+             (case Exn.capture_body (run (fn () =>
+                     let val ((_, cb_arg), cin') = read_argument ()
+                      in (cin', Exn.capture_body (fn () => function cb_arg)) end)) of
+                Exn.Exn exn =>
+                  if Exn.is_interrupt exn then (interrupted, SOME exn) else (failed exn, NONE)
+              | Exn.Res (cin', outcome) =>
+                  (cin := cin';
+                   case outcome of
+                     Exn.Res result => ((SOME result, NONE), NONE)
+                   | Exn.Exn exn =>
+                       if Exn.is_interrupt exn
+                       then (interrupted, case on_interrupt of Swallow => NONE | Reraise => SOME exn)
+                       else (failed exn, NONE)))
+           val written = Exn.capture_body (fn () =>
+             (doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
+                     (cb_id, answer) cout;
+              BinIO.StreamIO.flushOut cout))
+        in (case interrupt of SOME exn => Exn.reraise exn | NONE => Exn.release written) end)}
 
 fun register_global_callback (callback : ('a,'b) callback) : Context.generic -> Context.generic =
   register_global_callback' (mk_callback callback)
@@ -468,6 +518,7 @@ local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 
 val heartbeat_callback : (unit, string) callback = {
   name = "isabelle_heartbeat",
+  on_interrupt = Reraise,
   arg_schema = unpackUnit,
   ret_schema = packString,
   function = (fn () => "Isabelle heartbeat: " ^ Time.toString (Time.now ())),
@@ -476,6 +527,7 @@ val heartbeat_callback : (unit, string) callback = {
 
 val symbol_explode_callback : (string, string list) callback = {
   name = "position.symbol_explode",
+  on_interrupt = Reraise,
   arg_schema = unpackString,
   ret_schema = packList packString,
   function = fn text => Symbol_Pos.explode (text, Position.none) |> map fst,

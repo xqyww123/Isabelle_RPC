@@ -37,6 +37,8 @@ Phase 1   Py → ML   (cb_id, callback_name)          "does this callback exist?
 Phase 2   Py → ML   (cb_id, arg)
           ML → Py   (cb_id, (Some result, None))
           ML → Py   (cb_id, (None, error_string))
+          ML → Py   (cb_id, (None, "Interrupt"))    interrupted; Python raises IsabelleInterrupt,
+                                                    then ML re-raises or swallows per on_interrupt
 ```
 
 Why two phases: ML must know *which* callback's `arg_schema` to unpack the argument with
@@ -67,7 +69,7 @@ same name (`lookup_callback`, `RPC.ML:446-449`).
 | unknown procedure | `write_error("Unknown procedure …")`, connection stays open |
 | bad MessagePack from ML | logged, `write_error("Invalid RPC request")`, connection closed |
 
-`trim_markup` (`RPC.ML:57-62`) strips text between `\005` (ENQ) control markers before an ML
+`trim_markup` (`RPC.ML`) strips text between `\005` (ENQ) control markers before an ML
 error crosses the wire.
 
 `Read_Timeout` is raised by the ML socket reader when the command's `timeout` elapses; the
