@@ -1,7 +1,18 @@
 # Fixing the FileIndex / pretty_unicode divergence
 
-Status: proposal, not applied. Written 2026-08-18 after a review of commits `eab47d6`
-and `8b7325e` found a live regression.
+Status: design ruled by the author, implementation not yet started. Written 2026-08-18
+after a review of commits `eab47d6` and `8b7325e` found a live regression; the shape
+(Option D, §5: keep the regex substitution and record positions while it runs) was
+chosen by the author that day ("我强烈建议走法一，原始的方案", "很好。请改方案"). On
+2026-09-21 the author put this plan first among the items queued after the guard cache
+work ("是的，我们先看这个"), kept the shape ("好"), and asked for one read-only light
+re-check by an Opus agent before any code ("要的"). The citations below were re-checked
+against the tree on 2026-09-21: the code has not changed since `f9e139c`, and the defect
+is still live (whole-file check on `Resource_Template.thy`: `FileIndex` ends at 35,187
+where the rendering has 35,857 characters; 57 of its 835 lines are off). For the
+record: on 2026-09-14 the drafter described the shape to the author as a symbol-by-symbol
+renderer, which is Option C, rejected in §4; that was a departure from the ruling above,
+reported to the author on 2026-09-21; the ruling stands.
 
 ## 0. Where things are, and how to run them
 
@@ -24,12 +35,18 @@ f9e139c  make test_unicode.py able to fail, and prove it with a mutation self-ch
 Isabelle_RPC_Host/unicode.py     pretty_unicode and its two passes; the escape pattern;
                                  is_private_use; SUBSUP_TRANS_TABLE (142 hand-written
                                  entries -- no symbols file carries folding data)
-Isabelle_RPC_Host/position.py    symbol_explode; FileIndex.__init__ (the duplicate
-                                 rendering logic, roughly :95-155, with the two bare
-                                 lookups at :110 and :120); the six conversions at :176+
+Isabelle_RPC_Host/position.py    symbol_explode; FileIndex.__init__ (:82-155, the
+                                 duplicate rendering logic, with the two bare lookups
+                                 at :110 and :120 and the fold branch at :115-146);
+                                 the six conversions at :178+
 test_unicode.py                  the suite, and `--self-check`, whose MUTANTS list
                                  currently hardcodes unicode.py as its target
+../Semantic_Embedding/Isabelle_Semantic_Embedding/hover.py
+                                 the live consumer (:232 and :321), see §1
 ```
+
+Line numbers in this document were re-checked on 2026-09-21 (the Semantic_Embedding
+package had moved into its `Isabelle_Semantic_Embedding/` directory since 2026-08-18).
 
 **Running things:**
 
@@ -89,8 +106,8 @@ source file, the column it occupies **in the Unicode rendering of that file**. T
 Unicode rendering is produced by `pretty_unicode`. The two must agree exactly, or a
 position computed from one addresses the wrong character in the other.
 
-They no longer agree. `FileIndex.__init__` (`position.py:105-129`) decides what a
-symbol renders as with a bare `SYMBOLS.get(sym, sym)`. `pretty_unicode` now applies
+They no longer agree. `FileIndex.__init__` (`position.py:82-155`) decides what a
+symbol renders as with a bare `SYMBOLS.get(sym, sym)` (`:110`, `:120`). `pretty_unicode` now applies
 D44: a symbol whose code point is private-use is left as its literal `\<name>`. Before
 `eab47d6` the 135 private-use symbols were not in the loaded table at all, so both
 sides left `\<proc>` as seven characters and agreed by accident. Now `FileIndex`
@@ -106,16 +123,18 @@ Measured on `contrib/phi-system/Phi_System/Resource_Template.thy:156`:
 
 Six columns per preceding private-use symbol on the line.
 
-**Live consumer.** `Semantic_Embedding/hover.py:321` (`idx.isabelle_to_unicode`) and
-`:231-233` (`mk_definition_tool` → `to_unicode_position`), both reached from the
-deformalization loop at `semantic_interpretation.py:1160-1161` with `unicode=True`.
+**Live consumer.** `Semantic_Embedding/Isabelle_Semantic_Embedding/hover.py:321`
+(`idx.isabelle_to_unicode`) and `:232` (`mk_definition_tool` → `to_unicode_position`),
+both reached from the deformalization loop at `semantic_interpretation.py:1844-1845`
+with `unicode=True` (paths and lines as of 2026-09-21).
 The interpreting model is handed `<file>.unicode.thy:line:column`, where the file is
 rendered by `pretty_unicode` and the column by `FileIndex`.
 
 **Blast radius.** 100 of 55,772 `.thy` sources carry a private-use escape: 94 in
 phi-System, and — worth noting, because it shows the leak is not confined to
 phi-System's own tree — and 2 in the `src/Doc` of each of the three distribution trees
-present here (`Isabelle2025-2`, `Isabelle2024`, `Isabelle2024_bak`), affected only
+present on 2026-08-18 (`Isabelle2025-2`, `Isabelle2024`, `Isabelle2024_bak`; the last is
+no longer present under that name), affected only
 because phi-System's `symbols-words` is registered on this machine. The ASCII-coordinate
 procedures (`position.py:537-555`) are unaffected, and structurally so: the merge
 branch's ASCII bookkeeping is byte-identical to the fall-through path.
@@ -179,7 +198,7 @@ alphabet happens to avoid both cases.
 
 - `unicode.py:pretty_unicode` — two regex passes over the whole string.
 - `position.py:FileIndex.__init__` — a symbol-by-symbol loop that reimplements both the
-  table lookup *and* the sub/superscript fold (`position.py:116-129`).
+  table lookup *and* the sub/superscript fold (`position.py:115-146`).
 
 D44 was added to the first and not the second. Any future change to rendering will
 break the same way. A fix that only adds the private-use rule to `FileIndex` repairs
@@ -458,10 +477,10 @@ first exists only to prop up an API this fix is already changing.
 **Two module globals cache one thing.** `get_SYMBOLS_AND_REVERSED()` returns a 4-tuple,
 and `get_SYMBOL_FILES()` reads from a *second* global, `SYMBOL_FILES_CACHE`, whose
 docstring explains that the tuple could not grow because "callers unpack that by arity".
-Two callers do: `Semantic_Embedding/site/prototype/tokenize_prototype.py:13` and
-`test_unicode.py:78`. An earlier draft of this section claimed there was one, and that it
-was the prototype D43 has superseded — that argument does not survive the second caller,
-which is inside this package and is the suite §8 step 5 extends.
+One caller does today: `test_unicode.py:78`, inside this package and in the suite §8
+step 5 extends. (On 2026-08-18 there was a second,
+`Semantic_Embedding/site/prototype/tokenize_prototype.py:13`; that file is gone from the
+tree as of 2026-09-21.)
 
 The defect is real anyway: one load produces one state, cached in two places that nothing
 keeps in step. The remedy that breaks no caller is to cache **one** record internally —
@@ -505,7 +524,7 @@ D45 regardless.
 **`.unicode.thy` mirror staleness — dismissed by the user, 2026-08-18, do not re-raise.**
 The measurement stands: 21 phi-System mirrors differ from what `pretty_unicode` produces
 today, and 4 of them (`Phi_BI/{Algebras,Arrow_st,Len_Intvl,Map_of_Tree}`) will never
-self-correct, because `theory_structure.py:25-36` regenerates only when the `.thy` is
+self-correct, because `theory_structure.py:28-29` regenerates only when the `.thy` is
 newer and the symbol table is not part of that test. It is recorded here so that the
 next review does not report it as new. It is not to be fixed.
 
@@ -514,8 +533,9 @@ applies `pretty_unicode` to stored ASCII `goal_patterns` at read time, so the em
 text can change while the stored bytes do not. 180 records, 0 affected today. Fix
 belongs with whatever handles asset versioning; record it, do not chase it now.
 
-**`【 】` is no longer symbol-free.** `Tools/inner_syntax_error.ML:78` uses U+3010/U+3011
-as an in-band marker, and `\<lblbrace>`/`\<rblbrace>` now map to them. Latent: the ML
+**`【 】` is no longer symbol-free.** `Tools/inner_syntax_error.ML:78-79` (in this
+repository) uses U+3010/U+3011 as an in-band marker, and `\<lblbrace>`/`\<rblbrace>`
+(`contrib/phi-system/symbols:20-21`) now map to them. Latent: the ML
 side works on ASCII before Python sees it. Needs a different marker eventually, or a
 documented reason it cannot collide.
 
@@ -532,9 +552,9 @@ Isabelle errors; and the function's mutable default arguments would accumulate a
 calls. Fix together, with a test per item.
 
 **Three other symbol tables in the tree stayed at 439** while this one moved to 624:
-`Isabelle-MCP/.../isabelle_symbols.py` (whose docstring claims it reads
-`ISABELLE_SYMBOLS` and does not), `AutoCorrode/ir/repl.py`, and `tokens.py`'s hardcoded
-letter list. Not caused by these commits; now divergent because of them.
+`Isabelle-MCP/src/isabelle_mcp/utils/isabelle_symbols.py` (whose docstring claims it
+reads `ISABELLE_SYMBOLS` and does not), `AutoCorrode/ir/repl.py`, and
+`Isabelle_RPC_Host/tokens.py`'s hardcoded letter list. Not caused by these commits; now divergent because of them.
 
 
 ## 8. Build order
