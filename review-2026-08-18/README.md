@@ -7,10 +7,12 @@ not the code to build from. The fix records positions inside the existing substi
 `diagnosis/ref.py` is the instrument closest to it.)
 
 They hardcode `/home/qiyuan/Current/MLML/contrib/Isabelle_RPC` on `sys.path`; fix that
-before running them elsewhere. They are throwaway review code, not maintained, and since
-the fix landed (`3360162` renamed the cache `remedy/seed.py` assigns and changed
-`_load_symbols`'s signature) some no longer run or no longer probe anything. They are
-kept as the record of what was measured on 2026-08-18, not repaired.
+before running them elsewhere. They are throwaway review code, not maintained, and the
+fix has moved the ground under them: the cache `remedy/seed.py` seeds has been renamed,
+`_load_symbols` now takes only the path, and `diagnosis/ref.py` replays the fold as it
+stood before the plan's §1b was fixed — so some no longer run and some no longer probe
+what they probed. They are kept as the record of what was measured on 2026-08-18, not
+repaired.
 
 ## diagnosis/ — is the bug what the plan says it is
 

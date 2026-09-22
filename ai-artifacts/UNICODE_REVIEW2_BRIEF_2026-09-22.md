@@ -43,7 +43,7 @@ ruled design, the run instructions and the hard rules there still bind.
 | C17 | two different seed files; sorted(second) == [\<gamma>] | 615cb01 |
 | C20 | accumulate/extend in FileIndex.__init__; whole-file ASCII sentinel and ascii_line reassembly; mutant "line starts are not recorded" | 615cb01 |
 | C21 | CRLF ascii_line check; mutant | 615cb01 |
-| C22 | DEFERRED to plan §7 (drafter's decision) | 615cb01 plan |
+| C22 | DEFERRED to plan §7 (drafter's decision) | d544b0c plan |
 | C24 | citations by statement | 615cb01 plan |
 | C25 | plan §6.5; README frozen note | 615cb01 |
 | C26 | _load_symbols pure; _load_table layers with update(); test kept | 615cb01 |
@@ -65,7 +65,9 @@ pretty_unicode byte-identical over the 4,506-file corpus after every commit incl
 2ad1f09 (no adjacent markers in the corpus); the suite passes with the phi-system sweep
 (68,148 lines) and without it; `--self-check` kills all fourteen mutants in about six
 seconds; the suite fails against the parent commit's FileIndex with no corpus present
-(three seeded cases and the seed-corpus sweep); every import order of the package is
+(two seeded cases, both private-use, and the seed-corpus sweep — the second judge
+corrected the drafter's "three": the adjacent-marker case changed its expectation with
+§1b); every import order of the package is
 cycle-free; test_paths.py passes.
 
 ## What this round must answer

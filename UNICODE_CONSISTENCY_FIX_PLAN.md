@@ -25,7 +25,7 @@ everything about acceptance, is the drafter's ("只有对设计的改变需要�
 §7, §8 step 6) and the `build/lib` deletion (§6.7, §8 step 6), and applied the re-check's
 citation and wording corrections.
 
-**IMPLEMENTED 2026-09-22** (the commit carrying this paragraph), §8 steps 1–7, with these
+**IMPLEMENTED 2026-09-22** (`3360162`; the figures are that commit's suite), §8 steps 1–7, with these
 acceptances observed: `pretty_unicode` byte-identical over the 4,506 files of §0 (per-file
 digests before and after); `pretty_unicode(''.join(symbols)) ==
 pretty_unicode_indexed(symbols)[0]`, the whole-file sentinel and `FileIndex`'s agreement
@@ -35,8 +35,10 @@ rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with 
 §6.5 counts — private-use escapes, folds, symbols rendered differently — all positive;
 run against the parent commit's `FileIndex`, that suite fails (three seeded cases, 107 of
 the 160 files and 7,464 of the 68,148 lines); `--self-check` kills all nine mutants,
-including `FileIndex` restored to its own computation and to the bare table lookup, every
-kill coming from the seeded cases (the sweep runs outside the mutant copies); on
+including `FileIndex` restored to its own computation and to the bare table lookup; the
+phi-system sweep runs outside the mutant copies, so no kill depends on which corpora a
+machine has (one mutant, the distribution-only symbol file, is killed by the file-list
+check rather than by a seeded case); on
 `Resource_Template.thy:156` both hover routes now place `Itself`, `Rel` and `Normal` at
 columns 21 (and 40), 66 and 71, where the rendered line has them.
 
@@ -50,12 +52,31 @@ conversions and `FileIndex`'s ASCII bookkeeping had no test. The author granted 
 proposals put to him ("赞同你的建议", 2026-09-22): the recording keeps only the matches a
 replacement rewrote, so the convention of §4 D has two cases instead of three; and §1b is
 fixed in a follow-up commit — the fold pattern becomes a marker followed by a non-marker,
-Isabelle's own rule, with no rendering in 14,500 sources and 9,913 checked-in mirrors
-changing. The judge's conditions and 30 of the 31 items he assigned to the drafter are
-applied in the four commits that follow `3360162` (`615cb01` the conditions and the
-shape; `601df27` the derived restore table; `6c1ee40` `symbol_explode` moved beside the
-escape pattern; `2ad1f09` §1b); the 31st, C22, is deferred to §7; the 13 he dismissed are
-not to be re-raised. The review's own record says which is which.
+Isabelle's own rule, with no rendering in the tree changing (§1b names the corpora). The
+judge's conditions and 30 of the 31 items he assigned to the drafter are applied in the
+four commits that follow `3360162` (`615cb01` the conditions and the shape; `601df27`
+the derived restore table; `6c1ee40` `symbol_explode` moved beside the escape pattern;
+`2ad1f09` §1b); the 31st, C22, is deferred to §7; the 13 he dismissed are not to be
+re-raised. The review's own record says which is which.
+
+**REVIEWED AGAIN 2026-09-22** (a second two-round adversarial review of those commits, 53
+agents; the record is `ai-artifacts/UNICODE_REVIEW2_2026-09-22.md`): MET_ON_CONDITION
+again — the code right, 26 of the 33 first-round items resolved, 6 partly, C22 deferred;
+what was owed was unfinished halves of the first judge's own fix plans (the plan text of
+§0/§6.5/§8 step 4, a NO DATA report for a sweep that checked nothing, two conversion
+mutants, two docstring clauses), sentences of this document that had gone false, and
+lines the follow-up commits authored without a guard (the fold's inverse, the table's
+accessors, the layering direction, the fold pattern itself). The author ruled on the two
+items put to him: the six coordinate conversions stay, all of them — "强烈反对！这是非常重要
+的为未来留存的接口！这是库函数的最终产品！不是内部代码！" — so the two without a caller are
+tested rather than deleted; and a position whose offset is below 1, Isabelle's "unknown",
+gets no column instead of an end-of-file answer ("赞同"). Applied in the commits that
+follow `7810570`, with the plan's figures as they stand today: `--self-check` kills all 23
+mutants; against the parent commit's `FileIndex` the suite fails two seeded cases (both
+private-use; the adjacent-marker case changed its expectation with §1b), the seed-corpus
+sweep, 107 of the 160 phi-system files and 7,464 of their 68,148 lines; the seed corpus
+is swept inside every mutant copy, and it alone kills the mutant that makes the unicode
+line start the ASCII one.
 
 Everything below this paragraph, from §0 on, describes the tree as it stood before the
 fix (`f9e139c`): its line numbers and names — `FileIndex.__init__` at `position.py:82-154`,
@@ -111,9 +132,10 @@ python3 test_paths.py
 in `~/.isabelle/Isabelle2025-2/etc/components`. Without that registration the table loads
 439 entries instead of 624, holds no private-use symbol, and **the defect is invisible**:
 `pretty_unicode(r'\<proc>')` returns the escape for the wrong reason (the symbol is
-simply absent, the pre-`eab47d6` accident of §1), and the suite reports three checks as
-NO DATA and exits 0. That is exactly the vacuous pass §6.5 warns about, reached by
-following this section. Check what you have before trusting a green run:
+simply absent, the pre-`eab47d6` accident of §1), and the suite's checks against the real
+table report NO DATA for the private-use class and the run exits 0 — saying so out loud,
+and still exercising that class through the seed table and the seed corpus it sweeps on
+every machine (§6.5). Check what you have before trusting a green run:
 
 ```bash
 contrib/Isabelle2025-2/bin/isabelle getenv ISABELLE_SYMBOLS   # must name phi-system
@@ -234,11 +256,13 @@ So Isabelle gives `\u21e9` + `\u2081` where we give `\u21e9\u21e91`.
 author's grant ("赞同你的建议"): the fold pattern is a marker followed by a non-marker (and
 never a line break), so of two adjacent markers the later one applies and the displaced
 one is emitted literally, as Isabelle renders them — `x\<^sub>\<^sub>1` renders `x⇩₁`.
-Measured before the change: no rendering in 14,500 sources of this tree and 9,913
-checked-in `.unicode.thy` mirrors contains two adjacent markers, so nothing observable
-moved, and §6 item 3's byte-identity holds with that one stated exception. The fix is a
-two-character change inside Option D; the 2026-08-18 belief that it needed Option C was
-what kept it out. **Until then it was recorded, not fixed**, for three reasons that were
+Measured on 2026-09-22 over the `.thy` and `.ML` files under `contrib/phi-system` (486),
+`contrib/Isabelle2025-2/src` (3,768) and `contrib/afp-2026-05-13/thys` (19,420), the
+`.unicode.thy` mirrors among them, and over the 436 checked-in mirrors elsewhere under
+`contrib`: no rendering contains two adjacent markers, so nothing observable moved, and
+§6 item 3's byte-identity holds with that one stated exception. The fix is one change to
+the fold pattern inside Option D — its `.` becomes `[^{_MARKERS}\n]`; the 2026-08-18
+belief that it needed Option C was what kept it out. **Until then it was recorded, not fixed**, for three reasons that were
 sound at the time, in order of weight. It is **lossless**: measured, `pretty_unicode` then
 `ascii_of_unicode` returns `x\\<^sub>\\<^sub>1` exactly, and the rendering is a fixed
 point — nothing is destroyed, one fold is merely not applied. It occurs **nowhere**: a
@@ -253,8 +277,10 @@ wrong, and §5 says why.
 Two rules Isabelle applies that neither of our implementations models, recorded so they
 are not mistaken for new: jEdit declines to style an operand carrying its own `font:`
 declaration — which all 135 phi-System private-use symbols do — and declines
-non-`is_controllable` operands. Our fold coincides only because `SUBSUP_TRANS_TABLE`'s
-alphabet happens to avoid both cases.
+non-`is_controllable` operands. Wherever our fold fires it agrees with Isabelle, and only
+because `SUBSUP_TRANS_TABLE`'s alphabet happens to avoid both cases; the converse does
+not hold, and not through a rule we fail to model — a plain-text rendering can fold only
+an operand that has a precomposed character (§6.6's unfoldable-subscript class).
 
 ## 2. The root cause, which is not the private-use rule
 
@@ -440,7 +466,7 @@ duplication is removed as completely as by Option C.
 *Against*: nothing, since 2026-09-22. Until then it preserved §1b's difference from
 Isabelle, which §1b explained was acceptable — lossless, round-trips exactly, zero
 instances — and §5 explains why an earlier draft was wrong to reject Option D over it;
-in the end §1b's fix was a two-character change to the fold pattern inside Option D.
+in the end §1b's fix was one change to the fold pattern inside Option D.
 
 *The interior-offset convention*, internal to `pretty_unicode_indexed` (as ruled on
 2026-09-22, replacing a three-case rule that told a rewritten match from an untouched one
@@ -535,19 +561,22 @@ it and must be stated, not discovered.
 5. **Three routes to vacuity closed.** This file has already shipped vacuous sweeps once.
    - *No data passes.* `check_all` records `EMPTY` and `main()` still returns 0, so on a
      machine with no component registered every private-use check is skipped and the run
-     is green. Make it fatal for the classes this fix is about.
+     is green. Closed by removing the configuration rather than by making it fatal: the
+     seed corpus of the third bullet is swept on every machine under the seed table, so no
+     sweep this fix is about can be empty; a fatal EMPTY would abort `--self-check` at its
+     unmutated copy (as ruled in the review of 2026-09-22).
    - *All-ASCII input.* `FileIndex` on symbol-free text yields 0 offenders under every
      implementation including the identity. Assert **positive counts**: the corpus must
      have contained at least one private-use escape, N folds, and N symbols whose
-     rendering differs from themselves. Fail if any count is zero. This is the cheapest
-     anti-vacuity device available and no draft has had it.
-   - *Machine dependence.* Serve a five-line temporary symbols file through the module's
+     rendering differs from themselves. Fail if any count is zero on the seed corpus,
+     which is ours; a machine's own corpus that supplies none of one class says NO DATA
+     for it. This is the cheapest anti-vacuity device available and no draft has had it.
+   - *Machine dependence.* Serve a six-line temporary symbols file through the module's
      own loader (`_load_table([path])` into `_TABLE`, the suite's `seeded_table()`) — two
-     ordinary symbols, the markers, one synthetic private-use symbol at U+E000 — so every
-     rendering class is exercised unconditionally, and sweep a corpus written in that
-     alphabet under it, so the positive counts and the empty-sweep rule hold on every
-     machine; the real-corpus sweep becomes corroboration rather than the only source of
-     the case.
+     ordinary symbols, the fold table's three markers, one synthetic private-use symbol
+     at U+E000 — so every rendering class is exercised unconditionally, and sweep a corpus
+     written in that alphabet under it, so the positive counts hold on every machine; the
+     real-corpus sweep becomes corroboration rather than the only source of the case.
 
 6. **Hand-written cases for every rendering class**, since no corpus supplies them all:
    private-use symbol, private-use symbol as a fold operand, ordinary component symbol,
@@ -698,8 +727,8 @@ replacement function, beside the `return`, record the match's `start()`, `end()`
 the replacement's length. `pretty_unicode(src)` returns `_render(src)[0]`.
 `pretty_unicode_indexed(symbols)` renders `''.join(symbols)` through `_render`, then
 maps each symbol's start (the prefix sums of the symbol lengths) and the final sentinel
-through the first pass's records and then the second's, by the three-case convention of
-§4 D; the composition is one helper applied twice. About 60 lines in all (the re-check's
+through the first pass's records and then the second's, by the interior-offset convention
+of §4 D; the composition is one helper applied twice. About 60 lines in all (the re-check's
 prototype of 2026-09-21; `diagnosis/ref.py` is the older instrument).
 
 Clear §6b's first two defects in the same edit, since both sit on these lines: cache one
@@ -739,9 +768,8 @@ any fold condition, and `grep` says so.
 
 **4. The invariant test.** §3's form, per line, against `idx.source`. Carry **all three**
 of §6.5's anti-vacuity devices, not two: the positive-count assertions, the seeded
-synthetic table, and making an empty sweep fatal — `check_all` records `EMPTY` and
-`main()` still returns 0 today, which is how a machine with no component registered goes
-green. Add §6.6's hand-written rendering classes here; no corpus supplies them
+synthetic table, and the seed corpus swept under that table on every machine, so that no
+sweep this fix is about can be empty. Add §6.6's hand-written rendering classes here; no corpus supplies them
 all. Document §6.9's interior-offset convention on `pretty_unicode_indexed` while you
 are in it.
 
