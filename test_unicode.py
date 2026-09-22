@@ -28,10 +28,11 @@ from itertools import accumulate
 
 from Isabelle_RPC_Host import unicode as unicode_module
 from Isabelle_RPC_Host.unicode import (
-    pretty_unicode, pretty_unicode_indexed, ascii_of_unicode, is_private_use,
-    get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE, _load_symbols)
+    pretty_unicode, pretty_unicode_indexed, symbol_explode, ascii_of_unicode,
+    is_private_use, get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE,
+    _load_symbols)
 from Isabelle_RPC_Host.paths import resolve_isabelle_path_list
-from Isabelle_RPC_Host.position import FileIndex, symbol_explode
+from Isabelle_RPC_Host.position import FileIndex
 
 FAILURES = []
 EMPTY = []
@@ -419,7 +420,7 @@ MUTANTS = [
     ("isabelle_to_unicode measures from the ASCII line start", POSITION_PY,
      "        return self.sym_unicode_offsets[sym_idx]",
      "        return self.ascii_line_offsets[line - 1]"),
-    ("symbol_explode stops a name at '_' and digits", POSITION_PY,
+    ("symbol_explode stops a name at '_' and digits", UNICODE_PY,
      "                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in \"_'\")):",
      "                while j < n and (text[j].isascii() and text[j].isalpha()):"),
 ]

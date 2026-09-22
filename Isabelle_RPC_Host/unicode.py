@@ -205,6 +205,58 @@ def is_private_use(ch):
     return 0xE000 <= c <= 0xF8FF or 0xF0000 <= c <= 0xFFFFD or 0x100000 <= c <= 0x10FFFD
 
 
+def symbol_explode(text: str) -> list[str]:
+    """Split a string into Isabelle symbols.
+
+    Port of Pure/General/symbol_explode.ML. Purely static — no configuration
+    or context needed. Handles:
+    - ``\\r\\n`` / ``\\r`` → ``\\n`` (CR normalization)
+    - Named symbols ``\\<name>`` and ``\\<^name>`` as single symbols
+    - All other characters as individual symbols
+
+    The `\\<name>` scan must stay a superset of `_ESCAPE`'s below: an escape the regex
+    matches is exactly one symbol here, which `pretty_unicode_indexed` relies on. This
+    scan is the more permissive one (a missing `>` is tolerated); the two are not the
+    same rule and must not be merged.
+
+    Since Python strings are already decoded Unicode (not raw bytes), UTF-8
+    multi-byte sequences are already single characters and need no special handling.
+    """
+    result: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        # CR normalization: \r\n -> \n, bare \r -> \n
+        if ch == '\r':
+            result.append('\n')
+            if i + 1 < n and text[i + 1] == '\n':
+                i += 2
+            else:
+                i += 1
+        # Named symbol: \<...>
+        elif ch == '\\' and i + 1 < n and text[i + 1] == '<':
+            j = i + 2
+            # optional ^ for control symbols
+            if j < n and text[j] == '^':
+                j += 1
+            # ASCII identifier
+            if j < n and text[j].isascii() and text[j].isalpha():
+                j += 1
+                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in "_'")):
+                    j += 1
+            # optional closing >
+            if j < n and text[j] == '>':
+                j += 1
+            result.append(text[i:j])
+            i = j
+        # Single character (includes decoded Unicode like α, ⇒, etc.)
+        else:
+            result.append(ch)
+            i += 1
+    return result
+
+
 # Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a letter,
 # then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the next `>` wherever
 # it falls, so one malformed escape swallows the next valid one -- `\<alpha \<beta>`

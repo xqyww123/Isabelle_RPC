@@ -5,12 +5,11 @@ Implements a simplified Isabelle lexer based on ``symbol_pos.ML`` and
 ``∀`` are equivalent). Used to locate a *named symbol* on a source line so
 callers never have to count columns.
 
-Reuses :func:`Isabelle_RPC_Host.position.symbol_explode` and
+Reuses :func:`Isabelle_RPC_Host.unicode.symbol_explode` and
 :func:`Isabelle_RPC_Host.unicode.ascii_of_unicode`.
 """
 
-from .position import symbol_explode
-from .unicode import ascii_of_unicode
+from .unicode import ascii_of_unicode, symbol_explode
 
 # Explicit enumeration from symbol.ML lines 246-386.
 # NOTE: \<lambda> is intentionally excluded (it is an operator, not a letter).

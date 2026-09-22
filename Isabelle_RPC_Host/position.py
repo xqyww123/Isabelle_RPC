@@ -5,61 +5,11 @@ from collections import OrderedDict
 from itertools import accumulate
 from typing import TYPE_CHECKING
 
-from .unicode import pretty_unicode_indexed
+from .unicode import pretty_unicode_indexed, symbol_explode
+from .tokens import find_symbol_token_indices
 
 if TYPE_CHECKING:
     from .rpc import Connection
-
-
-# ---------------------------------------------------------------------------
-# Symbol explode
-# ---------------------------------------------------------------------------
-
-def symbol_explode(text: str) -> list[str]:
-    """Split a string into Isabelle symbols.
-
-    Port of Pure/General/symbol_explode.ML. Purely static — no configuration
-    or context needed. Handles:
-    - ``\\r\\n`` / ``\\r`` → ``\\n`` (CR normalization)
-    - Named symbols ``\\<name>`` and ``\\<^name>`` as single symbols
-    - All other characters as individual symbols
-
-    Since Python strings are already decoded Unicode (not raw bytes), UTF-8
-    multi-byte sequences are already single characters and need no special handling.
-    """
-    result: list[str] = []
-    n = len(text)
-    i = 0
-    while i < n:
-        ch = text[i]
-        # CR normalization: \r\n -> \n, bare \r -> \n
-        if ch == '\r':
-            result.append('\n')
-            if i + 1 < n and text[i + 1] == '\n':
-                i += 2
-            else:
-                i += 1
-        # Named symbol: \<...>
-        elif ch == '\\' and i + 1 < n and text[i + 1] == '<':
-            j = i + 2
-            # optional ^ for control symbols
-            if j < n and text[j] == '^':
-                j += 1
-            # ASCII identifier
-            if j < n and text[j].isascii() and text[j].isalpha():
-                j += 1
-                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in "_'")):
-                    j += 1
-            # optional closing >
-            if j < n and text[j] == '>':
-                j += 1
-            result.append(text[i:j])
-            i = j
-        # Single character (includes decoded Unicode like α, ⇒, etc.)
-        else:
-            result.append(ch)
-            i += 1
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +154,6 @@ class FileIndex:
         ``"∀"``). Matching is on Isabelle token boundaries. Empty if not
         found.
         """
-        from .tokens import find_symbol_token_indices
         doc = self.ascii_line(line)
         if not doc:
             return []
