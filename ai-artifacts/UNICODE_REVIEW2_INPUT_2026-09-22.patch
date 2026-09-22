@@ -1,0 +1,1218 @@
+commit d544b0c
+Plan: the four follow-up commits named; C22 deferred to section 7
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+commit 2ad1f09
+The fold of adjacent markers follows Isabelle: the later marker applies
+
+Plan section 1b. The fold pattern was a marker followed by any character, so
+two adjacent markers matched as a pair, folded nothing, and the second never
+folded with what followed: one marker folded, two did not, three folded the
+last. Isabelle's renderers let the later control symbol apply and emit the
+displaced one literally. The pattern is now a marker followed by a non-marker
+(never a line break), which does the same: x\<^sub>\<^sub>1 renders x⇩₁.
+
+Granted by the author on 2026-09-22 on the review's proposal. Measured: no
+rendering in the 4,506-file corpus changes (the construction occurs in no
+source here or in the checked-in mirrors); the seeded cases state the new
+rule for two kinds of marker and for a marker before a line break.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+commit 6c1ee40
+symbol_explode lives beside the escape pattern whose rule it shares
+
+The indexed view's contract is stated in symbol_explode's unit, and the two
+scans encode the same naming rule with symbol_explode the more permissive; the
+function now sits ten lines from _ESCAPE and its docstring states the superset
+relation pretty_unicode_indexed relies on. tokens.py imports it from unicode.py,
+which lets position.py's only deferred intra-package import be hoisted;
+position.py keeps re-exporting symbol_explode for its outside importers
+(review item C38).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+commit 601df27
+SUBSUP_RESTORE_TABLE is derived from the fold table, which must stay injective
+
+The inverse was a second hand-written copy of 142 entries; a one-sided edit
+restored a silently different symbol (review item C12, measured with an added
+entry). Derived now, and the module refuses to load if the forward table ever
+folds two pairs to one character.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+commit 615cb01
+Review conditions applied: record only rewritten matches, name the record, close the net
+
+The adversarial review of 3360162 (ai-artifacts/UNICODE_REVIEW_2026-09-22.md)
+ruled MET_ON_CONDITION. Applied here, with the author's two rulings of
+2026-09-22:
+
+- The recording keeps only the matches a replacement rewrote, so _map_offsets
+  no longer infers "the text did not change" from "the length did not change"
+  (sound before only because the fold table maps two characters to one, which
+  nothing stated); the convention has two cases, and the match record is a
+  named tuple read by field.
+- The symbol table is read by field name everywhere; the public 4-tuple is a
+  named projection, so the record's field order no longer silently decides
+  what pretty_unicode does. The fold's marker class is derived from the fold
+  table. _load_symbols is a pure function; _load_table takes its file list, so
+  the test fixture goes through the real loader. pretty_unicode_indexed is
+  annotated, so passing a string is a pyright error at the caller.
+- FileIndex's ASCII prefix sums come from accumulate, the line starts from the
+  sums, so two of the four corruptions the review found cannot be written.
+- The suite: the corpus arm compares renderings, not lengths; a seed corpus in
+  the seed table's alphabet is swept on every machine, so an empty sweep cannot
+  pass; every symbol away from a fold owns its slice of the rendering; the six
+  coordinate conversions and the ASCII bookkeeping are asserted per line and
+  per file; each _ESCAPE match must be exactly one symbol; the two population
+  counts travel with their own denominators; the position.py mutants are linear
+  and self-contained; --self-check first runs an unmutated copy; fourteen
+  mutants, all killed; the suite fails against the parent's FileIndex with no
+  corpus present.
+- Plan: the two-case convention, the review paragraph, the pre-fix-tree note,
+  the corrected counts and citations; the review scripts declared frozen.
+
+pretty_unicode stays byte-identical over the 4,506-file corpus.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+
+diff --git a/Isabelle_RPC_Host/position.py b/Isabelle_RPC_Host/position.py
+index d01f151..5b3437b 100644
+--- a/Isabelle_RPC_Host/position.py
++++ b/Isabelle_RPC_Host/position.py
+@@ -2,65 +2,16 @@ import bisect
+ import os
+ from array import array
+ from collections import OrderedDict
++from itertools import accumulate
+ from typing import TYPE_CHECKING
+ 
+-from .unicode import pretty_unicode_indexed
++from .unicode import pretty_unicode_indexed, symbol_explode
++from .tokens import find_symbol_token_indices
+ 
+ if TYPE_CHECKING:
+     from .rpc import Connection
+ 
+ 
+-# ---------------------------------------------------------------------------
+-# Symbol explode
+-# ---------------------------------------------------------------------------
+-
+-def symbol_explode(text: str) -> list[str]:
+-    """Split a string into Isabelle symbols.
+-
+-    Port of Pure/General/symbol_explode.ML. Purely static — no configuration
+-    or context needed. Handles:
+-    - ``\\r\\n`` / ``\\r`` → ``\\n`` (CR normalization)
+-    - Named symbols ``\\<name>`` and ``\\<^name>`` as single symbols
+-    - All other characters as individual symbols
+-
+-    Since Python strings are already decoded Unicode (not raw bytes), UTF-8
+-    multi-byte sequences are already single characters and need no special handling.
+-    """
+-    result: list[str] = []
+-    n = len(text)
+-    i = 0
+-    while i < n:
+-        ch = text[i]
+-        # CR normalization: \r\n -> \n, bare \r -> \n
+-        if ch == '\r':
+-            result.append('\n')
+-            if i + 1 < n and text[i + 1] == '\n':
+-                i += 2
+-            else:
+-                i += 1
+-        # Named symbol: \<...>
+-        elif ch == '\\' and i + 1 < n and text[i + 1] == '<':
+-            j = i + 2
+-            # optional ^ for control symbols
+-            if j < n and text[j] == '^':
+-                j += 1
+-            # ASCII identifier
+-            if j < n and text[j].isascii() and text[j].isalpha():
+-                j += 1
+-                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in "_'")):
+-                    j += 1
+-            # optional closing >
+-            if j < n and text[j] == '>':
+-                j += 1
+-            result.append(text[i:j])
+-            i = j
+-        # Single character (includes decoded Unicode like α, ⇒, etc.)
+-        else:
+-            result.append(ch)
+-            i += 1
+-    return result
+-
+-
+ # ---------------------------------------------------------------------------
+ # File index: compact arrays for efficient position conversion
+ # ---------------------------------------------------------------------------
+@@ -91,15 +42,9 @@ class FileIndex:
+         # Where a symbol lands in the rendering is the renderer's to say (unicode.py).
+         _, unicode_offsets = pretty_unicode_indexed(symbols)
+ 
+-        sym_ascii = array('I')
++        sym_ascii = array('I', accumulate(map(len, symbols), initial=0))
+         ascii_lines = array('I', [0])
+-        ascii_off = 0
+-        for sym in symbols:
+-            sym_ascii.append(ascii_off)
+-            ascii_off += len(sym)
+-            if sym == '\n':
+-                ascii_lines.append(ascii_off)
+-        sym_ascii.append(ascii_off)   # sentinel
++        ascii_lines.extend(sym_ascii[i + 1] for i, sym in enumerate(symbols) if sym == '\n')
+ 
+         self.sym_ascii_offsets = sym_ascii
+         self.sym_unicode_offsets = array('I', unicode_offsets)
+@@ -209,7 +154,6 @@ class FileIndex:
+         ``"∀"``). Matching is on Isabelle token boundaries. Empty if not
+         found.
+         """
+-        from .tokens import find_symbol_token_indices
+         doc = self.ascii_line(line)
+         if not doc:
+             return []
+diff --git a/Isabelle_RPC_Host/tokens.py b/Isabelle_RPC_Host/tokens.py
+index 8a07a27..d8201a4 100644
+--- a/Isabelle_RPC_Host/tokens.py
++++ b/Isabelle_RPC_Host/tokens.py
+@@ -5,12 +5,11 @@ Implements a simplified Isabelle lexer based on ``symbol_pos.ML`` and
+ ``∀`` are equivalent). Used to locate a *named symbol* on a source line so
+ callers never have to count columns.
+ 
+-Reuses :func:`Isabelle_RPC_Host.position.symbol_explode` and
++Reuses :func:`Isabelle_RPC_Host.unicode.symbol_explode` and
+ :func:`Isabelle_RPC_Host.unicode.ascii_of_unicode`.
+ """
+ 
+-from .position import symbol_explode
+-from .unicode import ascii_of_unicode
++from .unicode import ascii_of_unicode, symbol_explode
+ 
+ # Explicit enumeration from symbol.ML lines 246-386.
+ # NOTE: \<lambda> is intentionally excluded (it is an operator, not a letter).
+diff --git a/Isabelle_RPC_Host/unicode.py b/Isabelle_RPC_Host/unicode.py
+index 6a362c2..352100c 100644
+--- a/Isabelle_RPC_Host/unicode.py
++++ b/Isabelle_RPC_Host/unicode.py
+@@ -1,24 +1,20 @@
+ import os
+ import re
+ from collections import namedtuple
++from itertools import accumulate
+ 
+ from .paths import resolve_isabelle_var, resolve_isabelle_path_list
+ 
+ 
+-def _load_symbols(path, symbols=None, reverse_symbols=None, groups=None):
++def _load_symbols(path):
+     """
+-    Load an Isabelle symbol file on top of the given dictionaries (fresh ones if omitted).
++    Load one Isabelle symbol file.
+     Return: (ASCII-symbol -> unicode-symbol dict, the reverse dict, and an
+              ASCII-symbol -> group dict from the `group:` field).
+     """
+     if not isinstance(path, str):
+         raise ValueError("the argument path must be a string")
+-    if symbols is None:
+-        symbols = {}
+-    if reverse_symbols is None:
+-        reverse_symbols = {}
+-    if groups is None:
+-        groups = {}
++    symbols, reverse_symbols, groups = {}, {}, {}
+     if not os.path.exists(path):
+         return symbols, reverse_symbols, groups
+     with open(path, 'r', encoding='utf-8') as file:
+@@ -66,8 +62,7 @@ def _load_symbols(path, symbols=None, reverse_symbols=None, groups=None):
+                 groups[symbol] = group
+     return symbols, reverse_symbols, groups
+ 
+-# The loaded table, one record: the 4-tuple get_SYMBOLS_AND_REVERSED() projects out of it,
+-# plus the files it was built from.
++# The loaded table, one record, read by field name.
+ _Table = namedtuple('_Table', 'symbols reverse trans letters files')
+ _TABLE = None
+ 
+@@ -77,13 +72,14 @@ def _table():
+         _TABLE = _load_table()
+     return _TABLE
+ 
+-def _load_table():
+-    # ISABELLE_SYMBOLS is the authority: Isabelle assembles it from the distribution's
+-    # etc/symbols, the user overlay, and one entry per component that declares extra
+-    # symbols (phi-System appends its `symbols` and `symbols-words`). Rebuilding the
+-    # list from ISABELLE_HOME instead — which this used to do — silently drops every
+-    # component file, so a component symbol stays literal text and is never converted.
+-    symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")
++def _load_table(symbol_files=None):
++    if symbol_files is None:
++        # ISABELLE_SYMBOLS is the authority: Isabelle assembles it from the distribution's
++        # etc/symbols, the user overlay, and one entry per component that declares extra
++        # symbols (phi-System appends its `symbols` and `symbols-words`). Rebuilding the
++        # list from ISABELLE_HOME instead — which this used to do — silently drops every
++        # component file, so a component symbol stays literal text and is never converted.
++        symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")
+     if not symbol_files:
+         # No settings environment to ask: ISABELLE_SYMBOLS is unset and `isabelle` is
+         # unavailable. Fall back to the two files Isabelle always puts first, so that a
+@@ -107,7 +103,10 @@ def _load_table():
+     for file in symbol_files:
+         # In ISABELLE_SYMBOLS order, each file layering on top of the ones before it:
+         # the user overlay overrides the distribution, and a component overrides both.
+-        SYMBOLS, REVERSE_SYMBOLS, GROUPS = _load_symbols(file, SYMBOLS, REVERSE_SYMBOLS, GROUPS)
++        symbols, reverse_symbols, groups = _load_symbols(file)
++        SYMBOLS.update(symbols)
++        REVERSE_SYMBOLS.update(reverse_symbols)
++        GROUPS.update(groups)
+     if not SYMBOLS:
+         # The paths resolved but nothing loaded: files missing, unreadable, or empty
+         # (a relocated/partial install, or a stale exported value). That would make
+@@ -128,21 +127,22 @@ def _load_table():
+                   tuple(symbol_files))
+ 
+ def get_SYMBOLS_AND_REVERSED():
+-    """(symbols, reverse, translation table, letter symbols). Callers unpack this 4-tuple
+-    by arity, so it keeps its shape; the files behind it are get_SYMBOL_FILES()."""
+-    return _table()[:4]
++    """(symbols, reverse, translation table, letter symbols): callers unpack this
++    4-tuple by arity. The files behind it are get_SYMBOL_FILES()."""
++    t = _table()
++    return (t.symbols, t.reverse, t.trans, t.letters)
+ 
+ def get_SYMBOLS():
+-    return get_SYMBOLS_AND_REVERSED()[0]
++    return _table().symbols
+ 
+ def get_REVERSE_SYMBOLS():
+-    return get_SYMBOLS_AND_REVERSED()[1]
++    return _table().reverse
+ 
+ def get_LETTER_SYMBOLS():
+     """The set of Isabelle symbols (as ASCII `\\<name>` strings) that may occur
+     as a *letter* inside an identifier / fact name — a safe over-approximation
+     of Symbol.is_letter_symbol (the file's `letter` and `greek` groups)."""
+-    return get_SYMBOLS_AND_REVERSED()[3]
++    return _table().letters
+ 
+ def get_SYMBOL_FILES():
+     """The symbol files the loaded table was actually built from, in load order.
+@@ -187,34 +187,11 @@ SUBSUP_TRANS_TABLE = {
+     "❙Y": "𝐘", "❙Z": "𝐙",
+ }
+ 
+-SUBSUP_RESTORE_TABLE = {
+-    "₀": "⇩0", "₁": "⇩1", "₂": "⇩2", "₃": "⇩3", "₄": "⇩4",
+-    "₅": "⇩5", "₆": "⇩6", "₇": "⇩7", "₈": "⇩8", "₉": "⇩9",
+-    "ₐ": "⇩a", "ₑ": "⇩e", "ₕ": "⇩h", "ᵢ": "⇩i", "ⱼ": "⇩j", "ₖ": "⇩k", "ₗ": "⇩l",
+-    "ₘ": "⇩m", "ₙ": "⇩n", "ₒ": "⇩o", "ₚ": "⇩p", "ᵣ": "⇩r", "ₛ": "⇩s", "ₜ": "⇩t",
+-    "ᵤ": "⇩u", "ᵥ": "⇩v", "ₓ": "⇩x",
+-    "⁰": "⇧0", "¹": "⇧1", "²": "⇧2", "³": "⇧3", "⁴": "⇧4",
+-    "⁵": "⇧5", "⁶": "⇧6", "⁷": "⇧7", "⁸": "⇧8", "⁹": "⇧9",
+-    "ᴬ": "⇧A", "ᴮ": "⇧B", "ᴰ": "⇧D", "ᴱ": "⇧E", "ᴳ": "⇧G", "ᴴ": "⇧H", "ᴵ": "⇧I",
+-    "ᴶ": "⇧J", "ᴷ": "⇧K", "ᴸ": "⇧L", "ᴹ": "⇧M", "ᴺ": "⇧N", "ᴼ": "⇧O", "ᴾ": "⇧P",
+-    "ᴿ": "⇧R", "ᵀ": "⇧T", "ᵁ": "⇧U", "ⱽ": "⇧V", "ᵂ": "⇧W",
+-    "ᵃ": "⇧a", "ᵇ": "⇧b", "ᶜ": "⇧c", "ᵈ": "⇧d", "ᵉ": "⇧e", "ᶠ": "⇧f",
+-    "ᵍ": "⇧g", "ʰ": "⇧h", "ⁱ": "⇧i", "ʲ": "⇧j", "ᵏ": "⇧k", "ˡ": "⇧l",
+-    "ᵐ": "⇧m", "ⁿ": "⇧n", "ᵒ": "⇧o", "ᵖ": "⇧p", "ˢ": "⇧s", "ᵗ": "⇧t",
+-    "ᵘ": "⇧u", "ᵛ": "⇧v", "ʷ": "⇧w", "ˣ": "⇧x", "ʸ": "⇧y", "ᶻ": "⇧z",
+-    "₋": "⇩-", "⁻": "⇧-", "₊": "⇩+", "⁺": "⇧+", "₌": "⇩=", "⁼": "⇧=",
+-    "₍": "⇩(", "⁽": "⇧(", "₎": "⇩)", "⁾": "⇧)",
+-    "𝐚": "❙a", "𝐛": "❙b", "𝐜": "❙c", "𝐝": "❙d", "𝐞": "❙e", "𝐟": "❙f",
+-    "𝐠": "❙g", "𝐡": "❙h", "𝐢": "❙i", "𝐣": "❙j", "𝐤": "❙k", "𝐥": "❙l",
+-    "𝐦": "❙m", "𝐧": "❙n", "𝐨": "❙o", "𝐩": "❙p", "𝐪": "❙q", "𝐫": "❙r",
+-    "𝐬": "❙s", "𝐭": "❙t", "𝐮": "❙u", "𝐯": "❙v", "𝐰": "❙w", "𝐱": "❙x",
+-    "𝐲": "❙y", "𝐳": "❙z",
+-    "𝐀": "❙A", "𝐁": "❙B", "𝐂": "❙C", "𝐃": "❙D", "𝐄": "❙E", "𝐅": "❙F",
+-    "𝐆": "❙G", "𝐇": "❙H", "𝐈": "❙I", "𝐉": "❙J", "𝐊": "❙K", "𝐋": "❙L",
+-    "𝐌": "❙M", "𝐍": "❙N", "𝐎": "❙O", "𝐏": "❙P", "𝐐": "❙Q", "𝐑": "❙R",
+-    "𝐒": "❙S", "𝐓": "❙T", "𝐔": "❙U", "𝐕": "❙V", "𝐖": "❙W", "𝐗": "❙X",
+-    "𝐘": "❙Y", "𝐙": "❙Z",
+-}
++# The fold's inverse. The forward table must stay injective, or one folded character
++# would name two escapes; refuse to load rather than restore the wrong one.
++SUBSUP_RESTORE_TABLE = {folded: pair for pair, folded in SUBSUP_TRANS_TABLE.items()}
++if len(SUBSUP_RESTORE_TABLE) != len(SUBSUP_TRANS_TABLE):
++    raise RuntimeError("SUBSUP_TRANS_TABLE folds two different pairs to one character")
+ 
+ SUBSUP_RESTORE_TABLE_trans = str.maketrans(SUBSUP_RESTORE_TABLE)
+ 
+@@ -228,29 +205,89 @@ def is_private_use(ch):
+     return 0xE000 <= c <= 0xF8FF or 0xF0000 <= c <= 0xFFFFD or 0x100000 <= c <= 0x10FFFD
+ 
+ 
++def symbol_explode(text: str) -> list[str]:
++    """Split a string into Isabelle symbols.
++
++    Port of Pure/General/symbol_explode.ML. Purely static — no configuration
++    or context needed. Handles:
++    - ``\\r\\n`` / ``\\r`` → ``\\n`` (CR normalization)
++    - Named symbols ``\\<name>`` and ``\\<^name>`` as single symbols
++    - All other characters as individual symbols
++
++    The `\\<name>` scan must stay a superset of `_ESCAPE`'s below: an escape the regex
++    matches is exactly one symbol here, which `pretty_unicode_indexed` relies on. This
++    scan is the more permissive one (a missing `>` is tolerated); the two are not the
++    same rule and must not be merged.
++
++    Since Python strings are already decoded Unicode (not raw bytes), UTF-8
++    multi-byte sequences are already single characters and need no special handling.
++    """
++    result: list[str] = []
++    n = len(text)
++    i = 0
++    while i < n:
++        ch = text[i]
++        # CR normalization: \r\n -> \n, bare \r -> \n
++        if ch == '\r':
++            result.append('\n')
++            if i + 1 < n and text[i + 1] == '\n':
++                i += 2
++            else:
++                i += 1
++        # Named symbol: \<...>
++        elif ch == '\\' and i + 1 < n and text[i + 1] == '<':
++            j = i + 2
++            # optional ^ for control symbols
++            if j < n and text[j] == '^':
++                j += 1
++            # ASCII identifier
++            if j < n and text[j].isascii() and text[j].isalpha():
++                j += 1
++                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in "_'")):
++                    j += 1
++            # optional closing >
++            if j < n and text[j] == '>':
++                j += 1
++            result.append(text[i:j])
++            i = j
++        # Single character (includes decoded Unicode like α, ⇒, etc.)
++        else:
++            result.append(ch)
++            i += 1
++    return result
++
++
+ # Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a letter,
+ # then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the next `>` wherever
+-# it falls, so one malformed escape swallows the next valid one -- `\\<alpha \\<beta>`
++# it falls, so one malformed escape swallows the next valid one -- `\<alpha \<beta>`
+ # converts nothing. Identical on well-formed input.
+ _ESCAPE = re.compile(r"\\<\^?[A-Za-z][A-Za-z0-9_']*>")
+-# A sub/superscript or bold marker and the character after it: the fold's candidates.
+-_FOLD = re.compile('⇩.|⇧.|❙.')
++# A sub/superscript or bold marker (the fold table's own) and the character after it,
++# unless that is another marker or a line break: of two adjacent markers the later one
++# applies and the displaced one is emitted literally, as Isabelle renders them.
++_MARKERS = re.escape(''.join(sorted({pair[0] for pair in SUBSUP_TRANS_TABLE})))
++_FOLD = re.compile(f"[{_MARKERS}][^{_MARKERS}\n]")
++
++# One match a replacement rewrote: its input span and its output length.
++_Record = namedtuple('_Record', 'start end out_len')
+ 
+ 
+ def _sub_recording(pattern, replace, text):
+-    """`pattern.sub(replace, text)`, and one record (start, end, output length) per match."""
++    """`pattern.sub`, with `replace` called on the matched text rather than the match,
++    and one record kept per match the replacement rewrote (ascending, non-overlapping)."""
+     records = []
+ 
+     def callback(match):
+         out = replace(match.group(0))
+-        records.append((match.start(), match.end(), len(out)))
++        if out != match.group(0):
++            records.append(_Record(match.start(), match.end(), len(out)))
+         return out
+ 
+     return pattern.sub(callback, text), records
+ 
+ 
+ def _replace_escape(symbol):
+-    char = get_SYMBOLS().get(symbol)
++    char = _table().symbols.get(symbol)
+     if char is None or is_private_use(char):
+         return symbol
+     return char
+@@ -260,7 +297,7 @@ def _fold(pair):
+     return SUBSUP_TRANS_TABLE.get(pair, pair)
+ 
+ 
+-def _render(text):
++def _render(text: str) -> tuple[str, tuple[list, list]]:
+     """The rendering of `text` and the records of its two passes: escapes to characters,
+     then the sub/superscript fold. The one place that decides what a symbol renders as;
+     `pretty_unicode` and `pretty_unicode_indexed` are views of it."""
+@@ -269,7 +306,7 @@ def _render(text):
+     return out, (escapes, folds)
+ 
+ 
+-def pretty_unicode(src):
++def pretty_unicode(src: str) -> str:
+     """
+     Argument src: Any script that uses Isabelle's ASCII notation like `\\<Rightarrow>`
+     Return: unicode version of `src`
+@@ -289,36 +326,38 @@ def pretty_unicode(src):
+ def _map_offsets(records, offsets):
+     """Where each of the ascending `offsets` into a pass's input lands in its output.
+ 
+-    Exact at a match boundary. Strictly inside a match that changed length, the match's
+-    output start; inside one that kept its length, unchanged."""
+-    out = []
++    Every offset moves with the length changes of the rewritten matches before it. One
++    strictly inside a rewritten match lands at that match's output start: the match is
++    one unit, so a fold operand shares the folded character's position."""
++    mapped = []
+     shift = 0                 # output minus input offset, in the text between matches
+     k = 0
+     for off in offsets:
+-        while k < len(records) and records[k][1] <= off:
+-            start, end, length = records[k]
+-            shift += length - (end - start)
++        while k < len(records) and records[k].end <= off:
++            done = records[k]
++            shift += done.out_len - (done.end - done.start)
+             k += 1
+-        record = records[k] if k < len(records) else None
+-        if record and record[0] < off and record[2] != record[1] - record[0]:
+-            out.append(record[0] + shift)
++        here = records[k] if k < len(records) else None
++        if here and here.start < off:
++            mapped.append(here.start + shift)
+         else:
+-            out.append(off + shift)
+-    return out
++            mapped.append(off + shift)
++    return mapped
+ 
+ 
+-def pretty_unicode_indexed(symbols):
++def pretty_unicode_indexed(symbols: list[str]) -> tuple[str, list[int]]:
+     """The rendering of ''.join(symbols), and where each symbol begins in it.
+ 
+     `symbols` is `symbol_explode`'s output, so the text rendered is the CR-folded one an
+     index holds. `offsets` has len(symbols) + 1 entries, the last equal to the
+-    rendering's length. A fold operand shares the folded character's position with its
+-    marker; `_map_offsets` says how an offset inside a match is placed.
++    rendering's length; a fold operand shares the folded character's position with its
++    marker (`_map_offsets`). Every `_ESCAPE` match must be exactly one of `symbols`:
++    `symbol_explode` scans the same name more permissively, tolerating a missing `>`,
++    and if that stopped holding the symbols inside a match would be placed at its start
++    with no error.
+     """
+     rendered, (escapes, folds) = _render(''.join(symbols))
+-    starts = [0]
+-    for symbol in symbols:
+-        starts.append(starts[-1] + len(symbol))
++    starts = list(accumulate(map(len, symbols), initial=0))
+     return rendered, _map_offsets(folds, _map_offsets(escapes, starts))
+ 
+ def unicode_of_ascii(src):
+@@ -330,5 +369,4 @@ def ascii_of_unicode(src):
+     Return: Isabelle's ASCII version of `src`.
+     This method is the reverse of `pretty_unicode`.
+     """
+-    trans_table = get_SYMBOLS_AND_REVERSED()[2]
+-    return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(trans_table)
++    return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(_table().trans)
+diff --git a/UNICODE_CONSISTENCY_FIX_PLAN.md b/UNICODE_CONSISTENCY_FIX_PLAN.md
+index 134b6c8..4ed4078 100644
+--- a/UNICODE_CONSISTENCY_FIX_PLAN.md
++++ b/UNICODE_CONSISTENCY_FIX_PLAN.md
+@@ -1,6 +1,7 @@
+ # Fixing the FileIndex / pretty_unicode divergence
+ 
+-Status: design ruled by the author, implementation not yet started. Written 2026-08-18
++Status: implemented in `3360162` and revised under the adversarial review of 2026-09-22
++(the paragraphs below). Written 2026-08-18
+ after a review of commits `eab47d6` and `8b7325e` found a live regression; the shape
+ (Option D, §5: keep the regex substitution and record positions while it runs) was
+ chosen by the author that day ("我强烈建议走法一，原始的方案", "很好。请改方案"). On
+@@ -30,13 +31,37 @@ digests before and after); `pretty_unicode(''.join(symbols)) ==
+ pretty_unicode_indexed(symbols)[0]`, the whole-file sentinel and `FileIndex`'s agreement
+ with the indexed view on all 4,506; `position.py` references none of `SYMBOLS`,
+ `SUBSUP_TRANS_TABLE` or a fold condition; the suite's seeded cases cover the twelve
+-rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with every
+-class seen; run against the parent commit's `FileIndex`, that suite fails (three seeded
+-cases and 7,571 of the 68,148 lines); `--self-check` kills all nine mutants, including
+-`FileIndex` restored to its own computation and to the bare table lookup; on
++rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with its three
++§6.5 counts — private-use escapes, folds, symbols rendered differently — all positive;
++run against the parent commit's `FileIndex`, that suite fails (three seeded cases, 107 of
++the 160 files and 7,464 of the 68,148 lines); `--self-check` kills all nine mutants,
++including `FileIndex` restored to its own computation and to the bare table lookup, every
++kill coming from the seeded cases (the sweep runs outside the mutant copies); on
+ `Resource_Template.thy:156` both hover routes now place `Itself`, `Rel` and `Normal` at
+ columns 21 (and 40), 66 and 71, where the rendered line has them.
+ 
++**REVIEWED 2026-09-22** (a two-round adversarial review, 60 agents; the record is
++`ai-artifacts/UNICODE_REVIEW_2026-09-22.md`): the judge ruled MET_ON_CONDITION — the fix
++correct and in the ruled shape, its net short in five places: §6 item 2's corpus arm
++compared lengths where the item asks for the renderings; §6.5's device against an empty
++sweep had not shipped, so a machine without phi-system beside the repository went green
++without sweeping; §6 item 9's third clause was false as worded; and the six coordinate
++conversions and `FileIndex`'s ASCII bookkeeping had no test. The author granted both
++proposals put to him ("赞同你的建议", 2026-09-22): the recording keeps only the matches a
++replacement rewrote, so the convention of §4 D has two cases instead of three; and §1b is
++fixed in a follow-up commit — the fold pattern becomes a marker followed by a non-marker,
++Isabelle's own rule, with no rendering in 14,500 sources and 9,913 checked-in mirrors
++changing. The judge's conditions and 30 of the 31 items he assigned to the drafter are
++applied in the four commits that follow `3360162` (`615cb01` the conditions and the
++shape; `601df27` the derived restore table; `6c1ee40` `symbol_explode` moved beside the
++escape pattern; `2ad1f09` §1b); the 31st, C22, is deferred to §7; the 13 he dismissed are
++not to be re-raised. The review's own record says which is which.
++
++Everything below this paragraph, from §0 on, describes the tree as it stood before the
++fix (`f9e139c`): its line numbers and names — `FileIndex.__init__` at `position.py:82-154`,
++the bare lookups, `SYMBOLS_CACHE` — are the ones `3360162` changed. Read it as the record
++of what was wrong and why the fix has this shape; for the tree as it stands, read the code.
++
+ ## 0. Where things are, and how to run them
+ 
+ Everything here is in the `contrib/Isabelle_RPC` submodule, its own git repository, on
+@@ -175,7 +200,7 @@ and definition tools take `{file, line, symbol}` with no column at all. An earli
+ said the inbound direction was the worse of the two; there is no inbound direction in
+ use.
+ 
+-### 1b. A second divergence class, recorded and not fixed
++### 1b. A second divergence class, fixed on 2026-09-22
+ 
+ `pretty_unicode`'s fold pass is `re.sub('\u21e9.|\u21e7.|\u2759.', ...)`. The `.` is *any* character,
+ and a second marker is a character, so two markers in a row match as a pair, fail to
+@@ -205,13 +230,22 @@ if (is_control(sym)) { output_symbol(ctrl); ctrl = sym } // displaced control is
+ 
+ So Isabelle gives `\u21e9` + `\u2081` where we give `\u21e9\u21e91`.
+ 
+-**This is recorded, not fixed, and it does not decide the shape of the fix.** Three
+-reasons, in order of weight. It is **lossless**: measured, `pretty_unicode` then
++**Fixed on 2026-09-22**, in the commit after the review, on the review's proposal and the
++author's grant ("赞同你的建议"): the fold pattern is a marker followed by a non-marker (and
++never a line break), so of two adjacent markers the later one applies and the displaced
++one is emitted literally, as Isabelle renders them — `x\<^sub>\<^sub>1` renders `x⇩₁`.
++Measured before the change: no rendering in 14,500 sources of this tree and 9,913
++checked-in `.unicode.thy` mirrors contains two adjacent markers, so nothing observable
++moved, and §6 item 3's byte-identity holds with that one stated exception. The fix is a
++two-character change inside Option D; the 2026-08-18 belief that it needed Option C was
++what kept it out. **Until then it was recorded, not fixed**, for three reasons that were
++sound at the time, in order of weight. It is **lossless**: measured, `pretty_unicode` then
+ `ascii_of_unicode` returns `x\\<^sub>\\<^sub>1` exactly, and the rendering is a fixed
+ point — nothing is destroyed, one fold is merely not applied. It occurs **nowhere**: a
+ tree-wide search for two adjacent markers over every `.thy` and `.ML` returns 0 files.
+ And it is a different kind of thing from §1: §1 is *two of our implementations
+-disagreeing with each other*, which misdirects 94 files' worth of positions today, where
++disagreeing with each other*, which misdirects the positions in every phi-System theory
++§1 counts, where
+ this is *our one implementation differing from the prover* on a construction that never
+ arises. An earlier draft used this to reject the remedy §5 now recommends. That was
+ wrong, and §5 says why.
+@@ -340,9 +374,9 @@ reopening only if the renderer ever has to change behaviour for another reason.
+ 
+ **The recommendation.** `re.sub` calls its replacement function once per match with a
+ match object, which carries `start()` and `end()` — where the match was in the input —
+-and the function's return value has a known length. So each pass can record, per match,
+-"input from here to here became output of this length at this position", and from those
+-records compute where every input offset lands in the output.
++and the function's return value has a known length. So each pass can record, per match
++it rewrote, "input from here to here became output of this length at this position", and
++from those records compute where every input offset lands in the output.
+ 
+ The substitution logic is untouched. The replacement function returns exactly what it
+ returned before; one line is added beside it that writes down what happened.
+@@ -352,7 +386,7 @@ One private core does the rendering; the two public functions are views of it:
+ ```python
+ def _render(text: str) -> tuple[str, list]:
+     """The two `re.sub` passes exactly as today. Each replacement callback also
+-    records (input start, input end, output length) for its match."""
++    records (input start, input end, output length) for each match it rewrote."""
+ 
+ def pretty_unicode(src: str) -> str:
+     return _render(src)[0]            # byte-identical to today, CR handling included
+@@ -403,20 +437,23 @@ what it should have done.
+ forever. No guard and no benchmark, because nothing about the scanning changes. The
+ duplication is removed as completely as by Option C.
+ 
+-*Against*: it preserves §1b's difference from Isabelle. §1b explains why that is
+-acceptable — lossless, round-trips exactly, zero instances — and §5 explains why an
+-earlier draft was wrong to reject Option D over it.
+-
+-*The interior-offset convention*, internal to `pretty_unicode_indexed`: an input offset
+-at a match boundary maps exactly; an offset strictly **inside** a match that changed
+-length maps to the match's output start; an offset strictly inside a match that kept
+-its length maps by identity. Symbol boundaries do fall inside matches — a fold operand
+-begins inside the fold match (`x\<^sub>i`: the operand `i` maps to the folded
+-character's position, giving `[0, 1, 1]`), and after a private-use symbol the fold
+-regex matches the marker plus the escape's backslash without folding
+-(`\<^sub>\<proc>`, a length-preserving match, where identity is the right answer). The
+-convention is what turns match records into per-symbol offsets; it lives inside the
+-function, and no caller meets it.
++*Against*: nothing, since 2026-09-22. Until then it preserved §1b's difference from
++Isabelle, which §1b explained was acceptable — lossless, round-trips exactly, zero
++instances — and §5 explains why an earlier draft was wrong to reject Option D over it;
++in the end §1b's fix was a two-character change to the fold pattern inside Option D.
++
++*The interior-offset convention*, internal to `pretty_unicode_indexed` (as ruled on
++2026-09-22, replacing a three-case rule that told a rewritten match from an untouched one
++by its length — sound only because the fold table happens to map two characters to one,
++which nothing stated): only the matches a replacement rewrote are recorded; every offset
++moves with the length changes of the rewritten matches before it; and an offset strictly
++**inside** a rewritten match lands at that match's output start, the match being one
++unit. Symbol boundaries do fall inside matches — a fold operand begins inside the fold
++match (`x\<^sub>i`: the operand `i` lands on the folded character, giving `[0, 1, 1]`);
++after a private-use symbol the fold regex matches the marker plus the escape's backslash
++and leaves it as it is, which records nothing, so `\<^sub>\<proc>` keeps every symbol
++where it is. The convention is what turns match records into per-symbol offsets; it
++lives inside the function, and no caller meets it.
+ 
+ ## 5. Recommendation
+ 
+@@ -439,7 +476,8 @@ tree to stand in for an equivalence it cannot have structurally.
+ 
+ What settles it is that the second draft's objection compares two different magnitudes.
+ The defect being fixed is **two of our implementations disagreeing with each other**,
+-which sends the interpreting model to the wrong column in 94 files today. §1b is **our
++which sends the interpreting model to the wrong column in every one of those files. §1b
++is **our
+ one implementation differing from the prover** on a construction that occurs in no file,
+ loses no information, and round-trips exactly. Trading a real fix that changes no
+ behaviour for the second is trading a measured regression for a difference nobody can
+@@ -473,11 +511,12 @@ it and must be stated, not discovered.
+    structure this fix exists to abolish.
+ 
+ 3. **No behaviour change, and that is checkable.** `pretty_unicode`'s output must be
+-   byte-identical before and after, on the corpus and on §6.6's hand cases. §1b's fold
+-   and the existing CR handling both stay exactly as they are (`pretty_unicode` still
+-   takes the raw string; only the indexed view takes `symbol_explode`'s output); if
+-   either moves, the recording step has been written as a reimplementation and step 1
+-   is not done.
++   byte-identical before and after, on the corpus and on §6.6's hand cases — with one
++   exception stated and measured since 2026-09-22: two adjacent fold markers render as
++   Isabelle does (§1b), a construction the corpus does not contain. The existing CR
++   handling stays exactly as it is (`pretty_unicode` still takes the raw string; only
++   the indexed view takes `symbol_explode`'s output); if it moves, the recording step
++   has been written as a reimplementation and step 1 is not done.
+ 
+ 4. **Mutants that actually exercise the new test.** `self_check()` currently hardcodes
+    its target as `unicode.py` and needs a per-mutant file field, because the mutants
+@@ -502,11 +541,13 @@ it and must be stated, not discovered.
+      have contained at least one private-use escape, N folds, and N symbols whose
+      rendering differs from themselves. Fail if any count is zero. This is the cheapest
+      anti-vacuity device available and no draft has had it.
+-   - *Machine dependence.* Seed `SYMBOLS_CACHE` from a three-line temporary symbols file
+-     through the existing `_load_symbols` — one ordinary symbol, `\\<^sub>`, one synthetic
+-     private-use symbol at U+E000 — so every rendering class is exercised unconditionally
+-     and the real-corpus sweep becomes corroboration rather than the only source of the
+-     case. About eight lines, verified to work.
++   - *Machine dependence.* Serve a five-line temporary symbols file through the module's
++     own loader (`_load_table([path])` into `_TABLE`, the suite's `seeded_table()`) — two
++     ordinary symbols, the markers, one synthetic private-use symbol at U+E000 — so every
++     rendering class is exercised unconditionally, and sweep a corpus written in that
++     alphabet under it, so the positive counts and the empty-sweep rule hold on every
++     machine; the real-corpus sweep becomes corroboration rather than the only source of
++     the case.
+ 
+ 6. **Hand-written cases for every rendering class**, since no corpus supplies them all:
+    private-use symbol, private-use symbol as a fold operand, ordinary component symbol,
+@@ -535,10 +576,10 @@ it and must be stated, not discovered.
+    handed to the model addresses the symbol it names.
+ 
+ 9. **The interior-offset convention documented on the function**, not only here: the
+-    three-case rule of §4 D (exact at a match boundary; the match's output start inside
+-    a match that changed length; identity inside a match that kept its length), written
+-    where the records become offsets. It is internal to `pretty_unicode_indexed`, and
+-    the docstring says so, so nobody builds a second consumer of the raw records.
++    rule of §4 D (every offset moves with the rewritten matches before it; one inside a
++    rewritten match lands at that match's output start), written where the records
++    become offsets. It is internal to `pretty_unicode_indexed`, and the docstring says
++    so, so nobody builds a second consumer of the raw records.
+ 
+ ## 6b. Hygiene on the lines this fix touches
+ 
+@@ -550,8 +591,8 @@ first exists only to prop up an API this fix is already changing.
+ **Two module globals cache one thing.** `get_SYMBOLS_AND_REVERSED()` returns a 4-tuple,
+ and `get_SYMBOL_FILES()` reads from a *second* global, `SYMBOL_FILES_CACHE`, whose
+ docstring explains that the tuple could not grow because "callers unpack that by arity".
+-Two callers do: `test_unicode.py:78`, inside this package and in the suite §8 step 5
+-extends, and `contrib/isasearch-web/site/prototype/tokenize_prototype.py:13` (moved
++Two callers do: the `symbols, reverse, _, _ = get_SYMBOLS_AND_REVERSED()` in
++`test_unicode.py`'s `main()`, inside this package and in the suite §8 step 5 extends, and `contrib/isasearch-web/site/prototype/tokenize_prototype.py:13` (moved
+ there from Semantic_Embedding since 2026-08-18; `subtoken_rule.py:6` beside it indexes
+ the tuple positionally). One of them lives outside this package, which is one more
+ reason the tuple's shape must not change.
+@@ -623,6 +664,13 @@ repository) uses U+3010/U+3011 as an in-band marker, and `\<lblbrace>`/`\<rblbra
+ side works on ASCII before Python sees it. Needs a different marker eventually, or a
+ documented reason it cannot collide.
+ 
++**`get_LETTER_SYMBOLS()` has no test against `Pure/General/symbol.ML`'s letter list**
++(review item C22 of 2026-09-22, pre-existing, low priority): the comment in `_load_table`
++argues that the union of the `letter` and `greek` groups over-approximates
++`Symbol.is_letter_symbol`, and a tightening of that union would pass the suite. The
++review's fix — parse `letter_symbols` out of the ML file and assert each is in the set,
++with a mutant — is deferred by the drafter; do it with the other items here.
++
+ **Latent parsing gaps in `_load_symbols`**, all zero-instance on this machine: a symbol
+ redefined across files leaves a stale `REVERSE_SYMBOLS` entry; only the first `group:`
+ field of a line is read where Isabelle collects all of them (48 lines in the
+@@ -667,8 +715,8 @@ which moves into `_render`; and the fourth anchor (`unicode.py:232`) moves with
+ an anchor no longer matches, `self_check` prints "mutation site not found — this
+ self-check is stale" and counts the mutant as **survived**. Re-anchor all of them in the
+ same commit. The one-record refactor keeps the 4-tuple's shape (§6b), so
+-`test_unicode.py:78` and `tokenize_prototype.py:13` keep working; run the former to see
+-that they do.
++the arity unpack in `test_unicode.py`'s `main()` and `tokenize_prototype.py:13` keep
++working; run the former to see that they do.
+ 
+ *Accepted when* `pretty_unicode`'s output is byte-identical before and after over the
+ corpora of §0 and §6.6's hand cases — not as evidence of an equivalent rewrite, which is
+@@ -676,8 +724,9 @@ not what this is, but as a check that the recording step was not accidentally wr
+ one — and `pretty_unicode(''.join(symbols)) == pretty_unicode_indexed(symbols)[0]`
+ holds over the same inputs.
+ 
+-**2. Nothing to decide about behaviour.** Option D changes none. §1b's fold and the
+-existing CR handling stay as they are. The indexed view takes the symbol sequence, so
++**2. Nothing to decide about behaviour.** Option D changes none; the one behaviour change
++in this work, §1b's fold, is a separate commit the author granted. The existing CR
++handling stays as it is. The indexed view takes the symbol sequence, so
+ the line-ending question of the 2026-08-18 draft cannot arise; there is nothing to
+ remember here.
+ 
+diff --git a/review-2026-08-18/README.md b/review-2026-08-18/README.md
+index 3f1f6a6..f267637 100644
+--- a/review-2026-08-18/README.md
++++ b/review-2026-08-18/README.md
+@@ -7,7 +7,10 @@ not the code to build from. The fix records positions inside the existing substi
+ `diagnosis/ref.py` is the instrument closest to it.)
+ 
+ They hardcode `/home/qiyuan/Current/MLML/contrib/Isabelle_RPC` on `sys.path`; fix that
+-before running them elsewhere. They are throwaway review code, not maintained.
++before running them elsewhere. They are throwaway review code, not maintained, and since
++the fix landed (`3360162` renamed the cache `remedy/seed.py` assigns and changed
++`_load_symbols`'s signature) some no longer run or no longer probe anything. They are
++kept as the record of what was measured on 2026-08-18, not repaired.
+ 
+ ## diagnosis/ — is the bug what the plan says it is
+ 
+diff --git a/test_unicode.py b/test_unicode.py
+index 315321d..6952662 100644
+--- a/test_unicode.py
++++ b/test_unicode.py
+@@ -2,17 +2,21 @@
+ """Tests for Isabelle_RPC_Host.unicode and the FileIndex offsets built on it — run with
+ `python3 test_unicode.py`.
+ 
+-Every check here is mutation-tested: `python3 test_unicode.py --self-check` re-runs
+-the suite against deliberately broken copies of `unicode.py` and `position.py` and
+-fails unless each mutant is caught. An earlier version of this file had three table-driven sweeps that
+-reported zero offenders even when `pretty_unicode` converted nothing at all — they
+-fed each symbol name in isolation, where idempotence and round-tripping hold for any
+-implementation whatsoever. Sweeps here run against text with context, and the
+-conversion itself is asserted directly rather than inferred from its fixed points.
++Every machine-independent check here is mutation-tested: `python3 test_unicode.py
++--self-check` re-runs the suite against deliberately broken copies of `unicode.py` and
++`position.py` and fails unless each mutant is caught. The sweep of a phi-system checkout
++is deliberately outside that: a mutant copy runs from a temporary directory, and a kill
++must not depend on which corpora a machine happens to have. An earlier version of this
++file had three table-driven sweeps that reported zero offenders even when
++`pretty_unicode` converted nothing at all — they fed each symbol name in isolation, where
++idempotence and round-tripping hold for any implementation whatsoever. Sweeps here run
++against text with context, and the conversion itself is asserted directly rather than
++inferred from its fixed points.
+ 
+ Coverage varies with the machine: the table is whatever `ISABELLE_SYMBOLS` resolves
+ to, so a host with no component registered has no private-use symbol to check. The
+-summary says so out loud rather than passing quietly.
++summary says so out loud rather than passing quietly, and the seed table below, with the
++seed corpus swept under it, exercises every rendering class on every machine.
+ """
+ 
+ import contextlib
+@@ -20,13 +24,15 @@ import os
+ import subprocess
+ import sys
+ import tempfile
++from itertools import accumulate
+ 
+ from Isabelle_RPC_Host import unicode as unicode_module
+ from Isabelle_RPC_Host.unicode import (
+-    pretty_unicode, pretty_unicode_indexed, ascii_of_unicode, is_private_use,
+-    get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_RESTORE_TABLE, _load_symbols)
++    pretty_unicode, pretty_unicode_indexed, symbol_explode, ascii_of_unicode,
++    is_private_use, get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE,
++    _load_symbols)
+ from Isabelle_RPC_Host.paths import resolve_isabelle_path_list
+-from Isabelle_RPC_Host.position import FileIndex, symbol_explode
++from Isabelle_RPC_Host.position import FileIndex
+ 
+ FAILURES = []
+ EMPTY = []
+@@ -80,18 +86,20 @@ ESCAPE_SCANNING = [
+ ]
+ 
+ # A table of our own, so that every rendering class below is exercised on every
+-# machine, whatever components are registered: one ordinary symbol, the markers, and a
+-# synthetic private-use symbol at U+E000.
++# machine, whatever components are registered: two ordinary symbols (one named with a
++# `_` and a digit), the markers, and a synthetic private-use symbol at U+E000.
+ SEED_SYMBOLS = """\\<alpha>   code: 0x0003b1  group: greek
++\\<beta_2>  code: 0x0003b2  group: greek
+ \\<^sub>    code: 0x0021e9  group: control
+ \\<^bold>   code: 0x002759  group: control
+ \\<pua>     code: 0x00e000  font: Synthetic  group: letter
+ """
++OTHER_SEED = "\\<gamma>   code: 0x0003b3  group: greek\n"
+ 
+ 
+-def seed_file():
++def seed_file(text=SEED_SYMBOLS):
+     with tempfile.NamedTemporaryFile('w', suffix='.symbols', delete=False, encoding='utf-8') as f:
+-        f.write(SEED_SYMBOLS)
++        f.write(text)
+         return f.name
+ 
+ 
+@@ -101,9 +109,7 @@ def seeded_table():
+     path = seed_file()
+     saved = unicode_module._TABLE
+     try:
+-        symbols, reverse, _ = _load_symbols(path)
+-        unicode_module._TABLE = unicode_module._Table(
+-            symbols, reverse, str.maketrans(reverse), frozenset(), (path,))
++        unicode_module._TABLE = unicode_module._load_table([path])
+         yield
+     finally:
+         unicode_module._TABLE = saved
+@@ -113,20 +119,39 @@ def seeded_table():
+ # One case per rendering class: the source, its rendering, and where each of its
+ # symbols begins in the rendering (plus the sentinel). Under the seed table.
+ INDEXED_CASES = [
+-    ("private-use symbol",           r"a\<pua>b",                r"a\<pua>b",   [0, 1, 7, 8]),
+-    ("private-use fold operand",     r"\<^sub>\<pua>x",          "⇩\\<pua>x",   [0, 1, 7, 8]),
+-    ("ordinary symbol",              r"\<alpha>",                "α",           [0, 1]),
+-    ("foldable subscript, escape",   r"x\<^sub>i",               "xᵢ",          [0, 1, 1, 2]),
+-    ("foldable subscript, raw",      "x⇩i",                      "xᵢ",          [0, 1, 1, 2]),
+-    ("unfoldable subscript",         r"x\<^sub>Q",               "x⇩Q",         [0, 1, 2, 3]),
+-    ("bold fold",                    r"\<^bold>x",               "𝐱",           [0, 0, 1]),
+-    ("bold, no fold available",      r"\<^bold>1",               "❙1",          [0, 1, 2]),
+-    ("malformed escape",             r"\<alpha \<alpha>",        "\\<alpha α",  [0, 7, 8, 9]),
+-    ("two adjacent markers",         r"x\<^sub>\<^sub>1",        "x⇩⇩1",        [0, 1, 2, 3, 4]),
+-    ("three adjacent markers",       r"x\<^sub>\<^sub>\<^sub>1", "x⇩⇩₁",        [0, 1, 2, 3, 3, 4]),
+-    ("CRLF",                         "a\r\nb",                   "a\nb",        [0, 1, 2, 3]),
++    ("private-use symbol",              r"a\<pua>b",                r"a\<pua>b",   [0, 1, 7, 8]),
++    ("private-use fold operand",        r"\<^sub>\<pua>x",          "⇩\\<pua>x",   [0, 1, 7, 8]),
++    ("ordinary symbol",                 r"\<alpha>",                "α",           [0, 1]),
++    ("escape named with _ and a digit", r"a\<beta_2>b",             "aβb",         [0, 1, 2, 3]),
++    ("foldable subscript, escape",      r"x\<^sub>i",               "xᵢ",          [0, 1, 1, 2]),
++    ("foldable subscript, raw",         "x⇩i",                      "xᵢ",          [0, 1, 1, 2]),
++    ("two folds on one line",           r"x\<^sub>i y\<^sub>i",     "xᵢ yᵢ",       [0, 1, 1, 2, 3, 4, 4, 5]),
++    ("unfoldable subscript",            r"x\<^sub>Q",               "x⇩Q",         [0, 1, 2, 3]),
++    ("bold fold",                       r"\<^bold>x",               "𝐱",           [0, 0, 1]),
++    ("bold, no fold available",         r"\<^bold>1",               "❙1",          [0, 1, 2]),
++    ("malformed escape",                r"\<alpha \<alpha>",        "\\<alpha α",  [0, 7, 8, 9]),
++    # Of adjacent markers the later one applies, the displaced one is emitted literally.
++    ("two adjacent markers",            r"x\<^sub>\<^sub>1",        "x⇩₁",         [0, 1, 2, 2, 3]),
++    ("three adjacent markers",          r"x\<^sub>\<^sub>\<^sub>1", "x⇩⇩₁",        [0, 1, 2, 3, 3, 4]),
++    ("adjacent markers of two kinds",   "x⇩⇧1",                     "x⇩¹",         [0, 1, 2, 2, 3]),
++    ("bold then subscript marker",      "x❙⇩a",                     "x❙ₐ",         [0, 1, 2, 2, 3]),
++    ("marker before a line break",      "x⇩\ny",                    "x⇩\ny",       [0, 1, 2, 3, 4]),
++    ("CRLF",                            "a\r\nb",                   "a\nb",        [0, 1, 2, 3]),
+ ]
+ 
++# A corpus in the seed table's alphabet, swept on every machine: every rendering class
++# above in running text, a CRLF line, an empty line and a plain ASCII line.
++SEED_CORPUS = (
++    "theory Seed\n"
++    "  lemma \\<alpha>\\<^sub>1 = x\\<^sub>i y\\<^sub>i\n"
++    "  \\<pua> f \\<^sub>\\<pua>x \\<^bold>x \\<^bold>1\n"
++    "plain ascii line\r\n"
++    "  \\<alpha \\<alpha> \\<beta_2>\\<^sub>2 x\\<^sub>Q\n"
++    "  x\\<^sub>\\<^sub>1 x\\<^sub>\\<^sub>\\<^sub>1\n"
++    "\n"
++    "  \\<alpha>\\<^bold>\\<alpha> end\n"
++)
++
+ 
+ def check_indexed_cases():
+     print("== the indexed view and FileIndex, one case per rendering class, seed table ==")
+@@ -139,52 +164,98 @@ def check_indexed_cases():
+             check(f"{label}: pretty_unicode is the same view", pretty_unicode(''.join(symbols)), rendering)
+             check(f"{label}: FileIndex takes the offsets", list(FileIndex(src).sym_unicode_offsets), offsets)
+         check("CRLF: pretty_unicode keeps a raw string's CR", pretty_unicode("a\r\nb"), "a\r\nb")
++        check("CRLF: ascii_line is the folded line body", FileIndex("a\r\nb\r\nc").ascii_line(2), "b")
+ 
+     print("== _load_symbols does not share state between calls ==")
+-    path = seed_file()
++    first_file, second_file = seed_file(), seed_file(OTHER_SEED)
+     try:
+-        first = _load_symbols(path)[0]
+-        second = _load_symbols(path)[0]
++        first = _load_symbols(first_file)[0]
++        second = _load_symbols(second_file)[0]
+         check("two loads are distinct objects", first is second, False)
+-        check("a load holds only its own file", len(second), 4)
++        check("a load holds only its own file", sorted(second), [r"\<gamma>"])
+     finally:
+-        os.unlink(path)
++        os.unlink(first_file)
++        os.unlink(second_file)
+ 
+ 
+-def sweep_index(root):
+-    """The plan's invariant over every `.thy` under `root`, per line: FileIndex's
+-    offsets are the indexed view's, its sentinel is the rendering's length, offsets never
+-    decrease, and pretty_unicode is the same view. Also whole-file sentinels. Returns the
+-    offenders, the number of lines, and how often each rendering class was seen — a sweep
+-    that saw none of a class proves nothing about it."""
++def theory_files(root):
++    """(path, text) for every `.thy` under `root` but the `.unicode.thy` mirrors."""
++    for d, _, fs in os.walk(root):
++        for f in sorted(fs):
++            if f.endswith('.thy') and not f.endswith('.unicode.thy'):
++                path = os.path.join(d, f)
++                with open(path, encoding='utf-8') as fh:
++                    yield path, fh.read()
++
++
++def sweep_index(texts):
++    """The plan's invariant over every (name, text) in `texts`.
++
++    Per file: FileIndex's ASCII sentinel is the source's length, its lines reassemble the
++    source, and its unicode sentinel is the rendering's length. Per line: FileIndex's
++    unicode offsets are the indexed view's (true by construction; the guard against a
++    FileIndex deciding for itself), the view's sentinel is its rendering's length,
++    pretty_unicode of the line is that rendering, offsets never decrease, every `_ESCAPE`
++    match is exactly one symbol, each symbol away from a fold owns exactly its own
++    rendering in the line's, and the conversions place every symbol of the line where
++    the line's own index says. Returns (file offenders, files), (line offenders, lines),
++    the number of slices compared, and §6.5's three counts — private-use escapes, folds,
++    symbols rendered differently — because a sweep that met none of one of them proves
++    nothing about it. §6.6's twelve rendering classes are the seeded cases' business; no
++    corpus supplies them all."""
+     symbols_table = get_SYMBOLS_AND_REVERSED()[0]
+     private = {n for n, c in symbols_table.items() if is_private_use(c)}
+-    folded = set(SUBSUP_RESTORE_TABLE)
+-    offenders, lines = [], 0
++    markers = {pair[0] for pair in SUBSUP_TRANS_TABLE}
++    folded = set(SUBSUP_TRANS_TABLE.values())
++    file_offenders, files, line_offenders, lines, slices = [], 0, [], 0, 0
+     seen = {"private-use escapes": 0, "folds": 0, "symbols rendered differently": 0}
+-    for d, _, fs in os.walk(root):
+-        for f in sorted(fs):
+-            if not f.endswith('.thy') or f.endswith('.unicode.thy'):
+-                continue
+-            path = os.path.join(d, f)
+-            text = open(path, encoding='utf-8', errors='surrogateescape').read()
+-            whole = FileIndex(text)
+-            if whole.sym_unicode_offsets[-1] != len(pretty_unicode(whole.source)):
+-                offenders.append(path)
+-            for no, line in enumerate(text.split('\n'), 1):
+-                lines += 1
+-                idx = FileIndex(line)
+-                symbols = symbol_explode(idx.source)
+-                rendered, offsets = pretty_unicode_indexed(symbols)
+-                if not (list(idx.sym_unicode_offsets) == offsets
+-                        and offsets[-1] == len(rendered) == len(pretty_unicode(idx.source))
+-                        and all(a <= b for a, b in zip(offsets, offsets[1:]))):
+-                    offenders.append(f"{path}:{no}")
+-                seen["private-use escapes"] += sum(s in private for s in symbols)
+-                seen["folds"] += sum(ch in folded for ch in rendered)
+-                seen["symbols rendered differently"] += sum(
+-                    s in symbols_table and s not in private for s in symbols)
+-    return offenders, lines, seen
++    for name, text in texts:
++        files += 1
++        whole = FileIndex(text)
++        body = whole.source.split('\n')
++        if not (whole.sym_ascii_offsets[-1] == len(whole.source)
++                and whole.sym_unicode_offsets[-1] == len(pretty_unicode(whole.source))
++                and [whole.ascii_line(no) for no in range(1, whole.num_lines + 1)] == body):
++            file_offenders.append(name)
++        for no, line in enumerate(body, 1):
++            lines += 1
++            idx = FileIndex(line)
++            symbols = symbol_explode(idx.source)
++            rendered, offsets = pretty_unicode_indexed(symbols)
++            starts = list(accumulate(map(len, symbols), initial=0))
++            at = {s: i for i, s in enumerate(starts)}
++            first = whole.ascii_to_isabelle(no, 1)
++            renders = [pretty_unicode(s) for s in symbols]
++            ok = (list(idx.sym_unicode_offsets) == offsets
++                  and offsets[-1] == len(rendered)
++                  and rendered == pretty_unicode(idx.source)
++                  and all(a <= b for a, b in zip(offsets, offsets[1:]))
++                  and all(m.start() in at and starts[at[m.start()] + 1] == m.end()
++                          for m in unicode_module._ESCAPE.finditer(idx.source))
++                  and all(whole.isabelle_to_unicode(first + j) == (no, offsets[j] + 1)
++                          and whole.ascii_to_unicode(no, starts[j] + 1) == (no, offsets[j] + 1)
++                          for j in range(len(symbols))))
++            for j, own in enumerate(renders):
++                if own in markers or (j > 0 and renders[j - 1] in markers):
++                    continue
++                slices += 1
++                ok = ok and rendered[offsets[j]:offsets[j + 1]] == own
++            if not ok:
++                line_offenders.append(f"{name}:{no}")
++            seen["private-use escapes"] += sum(s in private for s in symbols)
++            seen["folds"] += sum(ch in folded for ch in rendered)
++            seen["symbols rendered differently"] += sum(
++                s in symbols_table and s not in private for s in symbols)
++    return (file_offenders, files), (line_offenders, lines), slices, seen
++
++
++def report_sweep(result, label):
++    (file_offenders, files), (line_offenders, lines), slices, seen = result
++    check_all(f"{label}: whole files", file_offenders, files)
++    check_all(f"{label}: lines", line_offenders, lines)
++    check(f"{label}: slices compared", slices > 0, True)
++    for cls, count in seen.items():
++        check(f"{label}: the sweep saw {cls}", count > 0, True)
+ 
+ 
+ def main():
+@@ -232,19 +303,19 @@ def main():
+ 
+     check_indexed_cases()
+ 
+-    # The real corpus, as corroboration of the seeded cases above: phi-system, when it is
+-    # checked out beside this repository. Its count of each class must be positive, or
+-    # the sweep ran on text that could not have exercised the fix.
++    print("== the sweep over the seed corpus, seed table ==")
++    with seeded_table():
++        report_sweep(sweep_index([("seed corpus", SEED_CORPUS)]), "seed corpus")
++
++    # The real corpus, as corroboration of the seeded cases: phi-system, when it is
++    # checked out beside this repository.
+     corpus = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "phi-system")
+-    print("== FileIndex agrees with the rendering on every line of phi-system ==")
++    print("== the sweep over phi-system, the real table ==")
+     if os.path.isdir(corpus):
+-        offenders, lines, seen = sweep_index(corpus)
+-        check_all("FileIndex offsets", offenders, lines)
+-        for cls, count in seen.items():
+-            check(f"the sweep saw {cls}", count > 0, True)
++        report_sweep(sweep_index(theory_files(corpus)), "phi-system")
+     else:
+         print("  ----  NO DATA: no phi-system checkout beside this repository")
+-        EMPTY.append("FileIndex offsets")
++        EMPTY.extend(["phi-system: whole files", "phi-system: lines"])
+ 
+     # The sweeps below assert the conversion itself. Checking only its fixed points
+     # is what made the previous version of this file vacuous: a bare `\<name>` maps
+@@ -318,53 +389,88 @@ MUTANTS = [
+      "    out, folds = _sub_recording(_FOLD, _fold, mid)",
+      "    out, folds = mid, []"),
+     ("only the distribution's symbol file is read", UNICODE_PY,
+-     '    symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")',
+-     '    symbol_files = []'),
++     '        symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")',
++     '        symbol_files = []'),
+     ("the recording step is skipped", UNICODE_PY,
+-     "        records.append((match.start(), match.end(), len(out)))",
+-     "        pass"),
+-    ("an offset inside a match that changed length is not moved to its start", UNICODE_PY,
+-     "        if record and record[0] < off and record[2] != record[1] - record[0]:",
++     "            records.append(_Record(match.start(), match.end(), len(out)))",
++     "            pass"),
++    ("an offset inside a rewritten match is not moved to its start", UNICODE_PY,
++     "        if here and here.start < off:",
+      "        if False:"),
++    ("an offset inside a rewritten match ignores the shift before it", UNICODE_PY,
++     "            mapped.append(here.start + shift)",
++     "            mapped.append(here.start)"),
+     # The one that decides whether this work removed the duplication: FileIndex back to
+     # computing its own offsets, first without rendering, then with the bare table
+     # lookup the old code had.
+     ("FileIndex computes its own offsets", POSITION_PY,
+      "        _, unicode_offsets = pretty_unicode_indexed(symbols)",
+-     "        unicode_offsets = [sum(map(len, symbols[:k])) for k in range(len(symbols) + 1)]"),
++     "        unicode_offsets = [0]\n"
++     "        for _s in symbols:\n"
++     "            unicode_offsets.append(unicode_offsets[-1] + len(_s))"),
+     ("FileIndex renders by a bare table lookup", POSITION_PY,
+      "        _, unicode_offsets = pretty_unicode_indexed(symbols)",
+-     "        unicode_offsets = [sum(len(__import__('Isabelle_RPC_Host.unicode', fromlist=['get_SYMBOLS'])"
+-     ".get_SYMBOLS().get(s, s)) for s in symbols[:k]) for k in range(len(symbols) + 1)]"),
++     "        from .unicode import get_SYMBOLS\n"
++     "        _t = get_SYMBOLS()\n"
++     "        unicode_offsets = [0]\n"
++     "        for _s in symbols:\n"
++     "            unicode_offsets.append(unicode_offsets[-1] + len(_t.get(_s, _s)))"),
++    ("FileIndex.source is the raw source, CR and all", POSITION_PY,
++     "        self.source = ''.join(symbols)",
++     "        self.source = source"),
++    ("line starts are not recorded", POSITION_PY,
++     "        ascii_lines.extend(sym_ascii[i + 1] for i, sym in enumerate(symbols) if sym == '\\n')",
++     "        pass"),
++    ("isabelle_to_unicode measures from the ASCII line start", POSITION_PY,
++     "        return self.sym_unicode_offsets[sym_idx]",
++     "        return self.ascii_line_offsets[line - 1]"),
++    ("symbol_explode stops a name at '_' and digits", UNICODE_PY,
++     "                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in \"_'\")):",
++     "                while j < n and (text[j].isascii() and text[j].isalpha()):"),
+ ]
+ 
+ 
+ def self_check():
+     import io, shutil
+     here = os.path.dirname(os.path.abspath(__file__))
+-    survived = []
+-    for label, file, old, new in MUTANTS:
++
++    def run_copy(mutation=None):
++        """The suite on a fresh copy of the package, with one source line replaced."""
+         tmp = tempfile.mkdtemp(prefix="mutcheck_")
+         try:
+             shutil.copytree(os.path.join(here, "Isabelle_RPC_Host"),
+                             os.path.join(tmp, "Isabelle_RPC_Host"))
+             shutil.copy(os.path.abspath(__file__), tmp)
+-            target = os.path.join(tmp, file)
+-            src = io.open(target, encoding="utf-8").read()
+-            if src.count(old) != 1:
+-                print(f"  ????  {label}: mutation site not found — this self-check is stale")
+-                survived.append(label)
+-                continue
+-            io.open(target, "w", encoding="utf-8").write(src.replace(old, new))
+-            r = subprocess.run([sys.executable, os.path.basename(__file__)],
+-                               cwd=tmp, capture_output=True, text=True)
+-            if r.returncode == 0:
+-                print(f"  SURVIVED  {label}")
+-                survived.append(label)
+-            else:
+-                print(f"  killed    {label}")
++            if mutation:
++                file, old, new = mutation
++                target = os.path.join(tmp, file)
++                src = io.open(target, encoding="utf-8").read()
++                io.open(target, "w", encoding="utf-8").write(src.replace(old, new))
++            return subprocess.run([sys.executable, os.path.basename(__file__)],
++                                  cwd=tmp, capture_output=True, text=True)
+         finally:
+             shutil.rmtree(tmp, ignore_errors=True)
++
++    def anchored_once(file, old):
++        return io.open(os.path.join(here, file), encoding="utf-8").read().count(old) == 1
++
++    # The copies run from a temporary directory; the suite must pass there unmutated,
++    # or no verdict below means anything.
++    clean = run_copy()
++    if clean.returncode != 0:
++        print(clean.stdout[-3000:])
++        print("SELF-CHECK ABORTED: the unmutated copy fails, so no mutant verdict is trustworthy")
++        return 1
++    survived = []
++    for label, file, old, new in MUTANTS:
++        if not anchored_once(file, old):
++            print(f"  ????  {label}: mutation site not found — this self-check is stale")
++            survived.append(label)
++        elif run_copy((file, old, new)).returncode == 0:
++            print(f"  SURVIVED  {label}")
++            survived.append(label)
++        else:
++            print(f"  killed    {label}")
+     print()
+     if survived:
+         print(f"SELF-CHECK FAILED: {len(survived)} mutant(s) survived: {', '.join(survived)}")
