@@ -4,6 +4,8 @@ from array import array
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from .unicode import pretty_unicode_indexed
+
 if TYPE_CHECKING:
     from .rpc import Connection
 
@@ -80,77 +82,27 @@ class FileIndex:
     __slots__ = ('source', 'sym_ascii_offsets', 'sym_unicode_offsets', 'ascii_line_offsets')
 
     def __init__(self, source: str):
-        from .unicode import get_SYMBOLS, SUBSUP_TRANS_TABLE
-
-        SYMBOLS = get_SYMBOLS()
         symbols = symbol_explode(source)
         # Normalized source (CR-folded by symbol_explode), in the same character
         # coordinate space as ``ascii_line_offsets`` below — so ``ascii_line``
         # slicing stays correct even on CRLF files (where the raw on-disk source
         # would be off by one char per line).
         self.source = ''.join(symbols)
-        n = len(symbols)
+        # Where a symbol lands in the rendering is the renderer's to say (unicode.py).
+        _, unicode_offsets = pretty_unicode_indexed(symbols)
 
         sym_ascii = array('I')
-        sym_unicode = array('I')
-        ascii_lines = array('I')
-
+        ascii_lines = array('I', [0])
         ascii_off = 0
-        unicode_off = 0
-        ascii_lines.append(0)
-
-        i = 0
-        while i < n:
-            sym = symbols[i]
+        for sym in symbols:
             sym_ascii.append(ascii_off)
-            sym_unicode.append(unicode_off)
-
-            # Compute unicode representation of this symbol
-            if sym.startswith('\\<'):
-                uni = SYMBOLS.get(sym, sym)
-            else:
-                uni = sym
-            uni_len = len(uni)
-
-            # Check for sub/superscript merging: modifier + next → 1 char
-            if uni_len == 1 and uni in '\u21e9\u21e7\u2759' and i + 1 < n:
-                # ⇩ = \u21e9 (subscript), ⇧ = \u21e7 (superscript), ❙ = \u2759 (bold)
-                next_sym = symbols[i + 1]
-                if next_sym.startswith('\\<'):
-                    next_uni = SYMBOLS.get(next_sym, next_sym)
-                else:
-                    next_uni = next_sym
-                combined = uni + next_uni
-                if len(next_uni) == 1 and combined in SUBSUP_TRANS_TABLE:
-                    # Modifier symbol: unicode width 0
-                    ascii_off += len(sym)
-                    if sym == '\n':
-                        ascii_lines.append(ascii_off)
-                    i += 1
-                    # Operand symbol: carries the merged char (unicode width 1)
-                    sym_ascii.append(ascii_off)
-                    sym_unicode.append(unicode_off)
-                    ascii_off += len(next_sym)
-                    unicode_off += 1
-                    if next_sym == '\n':
-                        ascii_lines.append(ascii_off)
-                    i += 1
-                    continue
-
             ascii_off += len(sym)
-            unicode_off += uni_len
-
             if sym == '\n':
                 ascii_lines.append(ascii_off)
-
-            i += 1
-
-        # Sentinels
-        sym_ascii.append(ascii_off)
-        sym_unicode.append(unicode_off)
+        sym_ascii.append(ascii_off)   # sentinel
 
         self.sym_ascii_offsets = sym_ascii
-        self.sym_unicode_offsets = sym_unicode
+        self.sym_unicode_offsets = array('I', unicode_offsets)
         self.ascii_line_offsets = ascii_lines
 
     @property

@@ -1,17 +1,24 @@
 import os
 import re
+from collections import namedtuple
 
 from .paths import resolve_isabelle_var, resolve_isabelle_path_list
 
 
-def _load_symbols(path, symbols={}, reverse_symbols={}, groups={}):
+def _load_symbols(path, symbols=None, reverse_symbols=None, groups=None):
     """
-    Load Isabelle symbol file
+    Load an Isabelle symbol file on top of the given dictionaries (fresh ones if omitted).
     Return: (ASCII-symbol -> unicode-symbol dict, the reverse dict, and an
              ASCII-symbol -> group dict from the `group:` field).
     """
     if not isinstance(path, str):
         raise ValueError("the argument path must be a string")
+    if symbols is None:
+        symbols = {}
+    if reverse_symbols is None:
+        reverse_symbols = {}
+    if groups is None:
+        groups = {}
     if not os.path.exists(path):
         return symbols, reverse_symbols, groups
     with open(path, 'r', encoding='utf-8') as file:
@@ -59,13 +66,18 @@ def _load_symbols(path, symbols={}, reverse_symbols={}, groups={}):
                 groups[symbol] = group
     return symbols, reverse_symbols, groups
 
-SYMBOLS_CACHE = None
-SYMBOL_FILES_CACHE = ()   # empty until the table is loaded; never None, so callers may len() it
+# The loaded table, one record: the 4-tuple get_SYMBOLS_AND_REVERSED() projects out of it,
+# plus the files it was built from.
+_Table = namedtuple('_Table', 'symbols reverse trans letters files')
+_TABLE = None
 
-def get_SYMBOLS_AND_REVERSED():
-    global SYMBOLS_CACHE, SYMBOL_FILES_CACHE
-    if SYMBOLS_CACHE is not None:
-        return SYMBOLS_CACHE
+def _table():
+    global _TABLE
+    if _TABLE is None:
+        _TABLE = _load_table()
+    return _TABLE
+
+def _load_table():
     # ISABELLE_SYMBOLS is the authority: Isabelle assembles it from the distribution's
     # etc/symbols, the user overlay, and one entry per component that declares extra
     # symbols (phi-System appends its `symbols` and `symbols-words`). Rebuilding the
@@ -112,9 +124,13 @@ def get_SYMBOLS_AND_REVERSED():
     # its only extras (blackboard-bold letters, \<lambda>) merely fail to flag a
     # would-be proposition, which the ML fact parser catches anyway.
     LETTER_SYMBOLS = frozenset(s for s, g in GROUPS.items() if g in ('letter', 'greek'))
-    SYMBOL_FILES_CACHE = tuple(symbol_files)
-    SYMBOLS_CACHE = (SYMBOLS, REVERSE_SYMBOLS, str.maketrans(REVERSE_SYMBOLS), LETTER_SYMBOLS)
-    return SYMBOLS_CACHE
+    return _Table(SYMBOLS, REVERSE_SYMBOLS, str.maketrans(REVERSE_SYMBOLS), LETTER_SYMBOLS,
+                  tuple(symbol_files))
+
+def get_SYMBOLS_AND_REVERSED():
+    """(symbols, reverse, translation table, letter symbols). Callers unpack this 4-tuple
+    by arity, so it keeps its shape; the files behind it are get_SYMBOL_FILES()."""
+    return _table()[:4]
 
 def get_SYMBOLS():
     return get_SYMBOLS_AND_REVERSED()[0]
@@ -137,8 +153,7 @@ def get_SYMBOL_FILES():
     record this list and refuse a mismatch, or the artefact and the data derived from
     it will disagree with no error anywhere. Kept out of get_SYMBOLS_AND_REVERSED()'s
     tuple on purpose — callers unpack that by arity."""
-    get_SYMBOLS_AND_REVERSED()   # populate the cache if it is cold
-    return SYMBOL_FILES_CACHE
+    return _table().files
 
 SUBSUP_TRANS_TABLE = {
     "⇩0": "₀", "⇩1": "₁", "⇩2": "₂", "⇩3": "₃", "⇩4": "₄",
@@ -213,6 +228,47 @@ def is_private_use(ch):
     return 0xE000 <= c <= 0xF8FF or 0xF0000 <= c <= 0xFFFFD or 0x100000 <= c <= 0x10FFFD
 
 
+# Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a letter,
+# then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the next `>` wherever
+# it falls, so one malformed escape swallows the next valid one -- `\\<alpha \\<beta>`
+# converts nothing. Identical on well-formed input.
+_ESCAPE = re.compile(r"\\<\^?[A-Za-z][A-Za-z0-9_']*>")
+# A sub/superscript or bold marker and the character after it: the fold's candidates.
+_FOLD = re.compile('⇩.|⇧.|❙.')
+
+
+def _sub_recording(pattern, replace, text):
+    """`pattern.sub(replace, text)`, and one record (start, end, output length) per match."""
+    records = []
+
+    def callback(match):
+        out = replace(match.group(0))
+        records.append((match.start(), match.end(), len(out)))
+        return out
+
+    return pattern.sub(callback, text), records
+
+
+def _replace_escape(symbol):
+    char = get_SYMBOLS().get(symbol)
+    if char is None or is_private_use(char):
+        return symbol
+    return char
+
+
+def _fold(pair):
+    return SUBSUP_TRANS_TABLE.get(pair, pair)
+
+
+def _render(text):
+    """The rendering of `text` and the records of its two passes: escapes to characters,
+    then the sub/superscript fold. The one place that decides what a symbol renders as;
+    `pretty_unicode` and `pretty_unicode_indexed` are views of it."""
+    mid, escapes = _sub_recording(_ESCAPE, _replace_escape, text)
+    out, folds = _sub_recording(_FOLD, _fold, mid)
+    return out, (escapes, folds)
+
+
 def pretty_unicode(src):
     """
     Argument src: Any script that uses Isabelle's ASCII notation like `\\<Rightarrow>`
@@ -224,28 +280,46 @@ def pretty_unicode(src):
     while the escape at least still spells the word. Note the asymmetry with
     `ascii_of_unicode`, which does convert such a character back to its name: text
     dragged out of jEdit carries the raw code point, and naming it is a repair.
+
+    `pretty_unicode_indexed` is the same rendering with the position of every symbol.
     """
-    # Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a
-    # letter, then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the
-    # next `>` wherever it falls, so one malformed escape swallows the next valid
-    # one -- `\\<alpha \\<beta>` converts nothing. Identical on well-formed input.
-    pattern = r"\\<\^?[A-Za-z][A-Za-z0-9_']*>"
-    subscript_pattern = r'⇩.|⇧.|❙.'
+    return _render(src)[0]
 
-    def replace_symbol(match):
-        symbol = match.group(0)
-        char = get_SYMBOLS().get(symbol)
-        if char is None or (len(char) == 1 and is_private_use(char)):
-            return symbol
-        return char
 
-    def replace_subsupscript(match):
-        symbol = match.group(0)
-        if symbol in SUBSUP_TRANS_TABLE:
-            return SUBSUP_TRANS_TABLE[symbol]
-        return symbol
+def _map_offsets(records, offsets):
+    """Where each of the ascending `offsets` into a pass's input lands in its output.
 
-    return re.sub(subscript_pattern, replace_subsupscript, re.sub(pattern, replace_symbol, src))
+    Exact at a match boundary. Strictly inside a match that changed length, the match's
+    output start; inside one that kept its length, unchanged."""
+    out = []
+    shift = 0                 # output minus input offset, in the text between matches
+    k = 0
+    for off in offsets:
+        while k < len(records) and records[k][1] <= off:
+            start, end, length = records[k]
+            shift += length - (end - start)
+            k += 1
+        record = records[k] if k < len(records) else None
+        if record and record[0] < off and record[2] != record[1] - record[0]:
+            out.append(record[0] + shift)
+        else:
+            out.append(off + shift)
+    return out
+
+
+def pretty_unicode_indexed(symbols):
+    """The rendering of ''.join(symbols), and where each symbol begins in it.
+
+    `symbols` is `symbol_explode`'s output, so the text rendered is the CR-folded one an
+    index holds. `offsets` has len(symbols) + 1 entries, the last equal to the
+    rendering's length. A fold operand shares the folded character's position with its
+    marker; `_map_offsets` says how an offset inside a match is placed.
+    """
+    rendered, (escapes, folds) = _render(''.join(symbols))
+    starts = [0]
+    for symbol in symbols:
+        starts.append(starts[-1] + len(symbol))
+    return rendered, _map_offsets(folds, _map_offsets(escapes, starts))
 
 def unicode_of_ascii(src):
     return pretty_unicode(src)

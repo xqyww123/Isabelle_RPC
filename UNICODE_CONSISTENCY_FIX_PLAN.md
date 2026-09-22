@@ -24,6 +24,19 @@ everything about acceptance, is the drafter's ("只有对设计的改变需要�
 §7, §8 step 6) and the `build/lib` deletion (§6.7, §8 step 6), and applied the re-check's
 citation and wording corrections.
 
+**IMPLEMENTED 2026-09-22** (the commit carrying this paragraph), §8 steps 1–7, with these
+acceptances observed: `pretty_unicode` byte-identical over the 4,506 files of §0 (per-file
+digests before and after); `pretty_unicode(''.join(symbols)) ==
+pretty_unicode_indexed(symbols)[0]`, the whole-file sentinel and `FileIndex`'s agreement
+with the indexed view on all 4,506; `position.py` references none of `SYMBOLS`,
+`SUBSUP_TRANS_TABLE` or a fold condition; the suite's seeded cases cover the twelve
+rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with every
+class seen; run against the parent commit's `FileIndex`, that suite fails (three seeded
+cases and 7,571 of the 68,148 lines); `--self-check` kills all nine mutants, including
+`FileIndex` restored to its own computation and to the bare table lookup; on
+`Resource_Template.thy:156` both hover routes now place `Itself`, `Rel` and `Normal` at
+columns 21 (and 40), 66 and 71, where the rendered line has them.
+
 ## 0. Where things are, and how to run them
 
 Everything here is in the `contrib/Isabelle_RPC` submodule, its own git repository, on
