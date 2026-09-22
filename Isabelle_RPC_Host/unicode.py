@@ -1,6 +1,6 @@
 import os
 import re
-from collections import namedtuple
+from collections import Counter, namedtuple
 from itertools import accumulate
 
 from .paths import resolve_isabelle_var, resolve_isabelle_path_list
@@ -194,8 +194,7 @@ def _invert_fold(table):
     would name two escapes; refuse to load rather than restore the wrong one."""
     inverse = {folded: pair for pair, folded in table.items()}
     if len(inverse) != len(table):
-        collided = sorted({folded for folded, n in
-                           ((f, sum(1 for v in table.values() if v == f)) for f in inverse) if n > 1})
+        collided = sorted(f for f, n in Counter(table.values()).items() if n > 1)
         raise RuntimeError(f"the fold table folds different pairs to one character: {collided}")
     return inverse
 
@@ -278,9 +277,11 @@ _MARKERS = re.escape(''.join(sorted({pair[0] for pair in SUBSUP_TRANS_TABLE})))
 _FOLD = re.compile(f"[{_MARKERS}][^{_MARKERS}\n]")
 # The pattern, the marker set and the inverse all read the table as marker-plus-operand
 # pairs folding to one character; a table entry of another shape would fold nothing.
-if not all(_FOLD.fullmatch(pair) and len(folded) == 1 for pair, folded in SUBSUP_TRANS_TABLE.items()):
-    raise RuntimeError("the fold table has an entry that is not a marker and one operand "
-                       "folding to one character")
+_MISSHAPED = [pair for pair, folded in SUBSUP_TRANS_TABLE.items()
+              if not (_FOLD.fullmatch(pair) and len(folded) == 1)]
+if _MISSHAPED:
+    raise RuntimeError("the fold table has entries that are not a marker and one operand "
+                       f"folding to one character: {_MISSHAPED}")
 
 # One match a replacement rewrote: its input span and its output length.
 _Record = namedtuple('_Record', 'start end out_len')
@@ -292,9 +293,9 @@ def _sub_recording(pattern, replace, text):
     records = []
 
     def callback(match):
-        text = match.group(0)
-        out = replace(text)
-        if out != text:
+        matched = match.group(0)
+        out = replace(matched)
+        if out != matched:
             records.append(_Record(match.start(), match.end(), len(out)))
         return out
 

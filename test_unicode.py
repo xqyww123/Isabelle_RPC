@@ -60,11 +60,15 @@ def check_all(label, bad, total):
         FAILURES.append(label)
 
 
-def check_count(label, n):
-    """A population size. Zero is not a failure of the code under test: it is a sweep
-    that had nothing of this kind to look at, and says so."""
+def check_count(label, n, swept):
+    """A population size. Zero on a corpus that was swept is the vacuous run section
+    6.5 warns about (a component not registered, a class the text lacks) and fails;
+    zero because there was nothing to sweep says so."""
     if n > 0:
         print(f"  ok   {label}: {n}")
+    elif swept:
+        print(f"  FAIL {label}: 0, so the sweep proves nothing about this class")
+        FAILURES.append(label)
     else:
         print(f"  ----  {label}: NO DATA on this machine, nothing was checked")
         EMPTY.append(label)
@@ -328,6 +332,11 @@ def sweep_index(texts):
                 ("isabelle_to_ascii places every symbol",
                  all(whole.isabelle_to_ascii(first + j) == (no, starts[j] + 1)
                      for j in range(len(symbols)))),
+                ("ascii_to_isabelle finds every symbol",
+                 all(whole.ascii_to_isabelle(no, starts[j] + 1) == first + j
+                     for j in range(len(symbols)))),
+                # A unicode column names one rendered character; a fold operand shares
+                # its marker's, so the inverses are asked only about symbols away from a fold.
                 ("unicode_to_isabelle inverts isabelle_to_unicode",
                  all(whole.unicode_to_isabelle(no, offsets[j] + 1) == first + j for j in own)),
                 ("unicode_to_ascii inverts ascii_to_unicode",
@@ -342,17 +351,12 @@ def sweep_index(texts):
     return (file_offenders, files), (line_offenders, lines), slices, seen
 
 
-def report_sweep(result, label, complete):
-    """`complete`: the corpus is ours and must exhibit every class; a machine's own
-    corpus that supplies none of one says NO DATA for it instead."""
+def report_sweep(result, label):
     (file_offenders, files), (line_offenders, lines), slices, seen = result
     check_all(f"{label}: whole files", file_offenders, files)
     check_all(f"{label}: lines", line_offenders, lines)
     for what, n in [("slices compared", slices), *((f"{cls} seen", c) for cls, c in seen.items())]:
-        if complete:
-            check(f"{label}: {what}", n > 0, True)
-        else:
-            check_count(f"{label}: {what}", n)
+        check_count(f"{label}: {what}", n, swept=files > 0)
 
 
 def main():
@@ -402,7 +406,7 @@ def main():
 
     print("== the sweep over the seed corpus, seed table ==")
     with seeded_table():
-        report_sweep(sweep_index([("seed corpus", SEED_CORPUS)]), "seed corpus", complete=True)
+        report_sweep(sweep_index([("seed corpus", SEED_CORPUS)]), "seed corpus")
 
     # The real corpus, as corroboration of the seeded cases: phi-system, when it is
     # checked out beside this repository.
@@ -410,7 +414,7 @@ def main():
     print("== the sweep over phi-system, the real table ==")
     if not os.path.isdir(corpus):
         print("  (no phi-system checkout beside this repository)")
-    report_sweep(sweep_index(theory_files(corpus)), "phi-system", complete=False)   # an absent root walks empty
+    report_sweep(sweep_index(theory_files(corpus)), "phi-system")   # an absent root walks empty
 
     # The sweeps below assert the conversion itself. Checking only its fixed points
     # is what made the previous version of this file vacuous: a bare `\<name>` maps
@@ -501,6 +505,9 @@ MUTANTS = [
     ("a name may begin with a digit", UNICODE_PY,
      "            if j < n and text[j].isascii() and text[j].isalpha():",
      "            if j < n and text[j].isascii() and text[j].isalnum():"),
+    ("a name may begin with a non-ASCII letter", UNICODE_PY,
+     "            if j < n and text[j].isascii() and text[j].isalpha():",
+     "            if j < n and text[j].isalpha():"),
     ("only the distribution's symbol file is read", UNICODE_PY,
      '        symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")',
      '        symbol_files = []'),
@@ -538,6 +545,25 @@ MUTANTS = [
     ("the unicode line start is the ASCII line start", POSITION_PY,
      "        return self.sym_unicode_offsets[sym_idx]",
      "        return self.ascii_line_offsets[line - 1]"),
+    # One mutant per conversion, on the line only that conversion has.
+    ("isabelle_to_ascii counts from the file start", POSITION_PY,
+     "        return (line, self._column(ascii_off, self.ascii_line_offsets[line - 1]))",
+     "        return (line, self._column(ascii_off, 0))"),
+    ("isabelle_to_unicode counts from the file start", POSITION_PY,
+     "        return (line, self._column(self.sym_unicode_offsets[idx], self._line_start_unicode(line)))",
+     "        return (line, self._column(self.sym_unicode_offsets[idx], 0))"),
+    ("ascii_to_isabelle is off by one", POSITION_PY,
+     "        return bisect.bisect_right(self.sym_ascii_offsets, ascii_off)",
+     "        return bisect.bisect_right(self.sym_ascii_offsets, ascii_off) - 1"),
+    ("unicode_to_isabelle is off by one", POSITION_PY,
+     "        return bisect.bisect_right(self.sym_unicode_offsets, unicode_off)",
+     "        return bisect.bisect_right(self.sym_unicode_offsets, unicode_off) - 1"),
+    ("ascii_to_unicode counts from the file start", POSITION_PY,
+     "        return (line, self._column(self.sym_unicode_offsets[sym_idx], self._line_start_unicode(line)))",
+     "        return (line, self._column(self.sym_unicode_offsets[sym_idx], 0))"),
+    ("unicode_to_ascii counts from the file start", POSITION_PY,
+     "        return (line, self._column(self.sym_ascii_offsets[sym_idx], self.ascii_line_offsets[line - 1]))",
+     "        return (line, self._column(self.sym_ascii_offsets[sym_idx], 0))"),
     ("a column is counted from the file start", POSITION_PY,
      "        return offset - line_start + 1",
      "        return offset + 1"),
