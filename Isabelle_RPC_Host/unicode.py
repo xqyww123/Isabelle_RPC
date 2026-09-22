@@ -1,24 +1,20 @@
 import os
 import re
 from collections import namedtuple
+from itertools import accumulate
 
 from .paths import resolve_isabelle_var, resolve_isabelle_path_list
 
 
-def _load_symbols(path, symbols=None, reverse_symbols=None, groups=None):
+def _load_symbols(path):
     """
-    Load an Isabelle symbol file on top of the given dictionaries (fresh ones if omitted).
+    Load one Isabelle symbol file.
     Return: (ASCII-symbol -> unicode-symbol dict, the reverse dict, and an
              ASCII-symbol -> group dict from the `group:` field).
     """
     if not isinstance(path, str):
         raise ValueError("the argument path must be a string")
-    if symbols is None:
-        symbols = {}
-    if reverse_symbols is None:
-        reverse_symbols = {}
-    if groups is None:
-        groups = {}
+    symbols, reverse_symbols, groups = {}, {}, {}
     if not os.path.exists(path):
         return symbols, reverse_symbols, groups
     with open(path, 'r', encoding='utf-8') as file:
@@ -66,8 +62,7 @@ def _load_symbols(path, symbols=None, reverse_symbols=None, groups=None):
                 groups[symbol] = group
     return symbols, reverse_symbols, groups
 
-# The loaded table, one record: the 4-tuple get_SYMBOLS_AND_REVERSED() projects out of it,
-# plus the files it was built from.
+# The loaded table, one record, read by field name.
 _Table = namedtuple('_Table', 'symbols reverse trans letters files')
 _TABLE = None
 
@@ -77,13 +72,14 @@ def _table():
         _TABLE = _load_table()
     return _TABLE
 
-def _load_table():
-    # ISABELLE_SYMBOLS is the authority: Isabelle assembles it from the distribution's
-    # etc/symbols, the user overlay, and one entry per component that declares extra
-    # symbols (phi-System appends its `symbols` and `symbols-words`). Rebuilding the
-    # list from ISABELLE_HOME instead — which this used to do — silently drops every
-    # component file, so a component symbol stays literal text and is never converted.
-    symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")
+def _load_table(symbol_files=None):
+    if symbol_files is None:
+        # ISABELLE_SYMBOLS is the authority: Isabelle assembles it from the distribution's
+        # etc/symbols, the user overlay, and one entry per component that declares extra
+        # symbols (phi-System appends its `symbols` and `symbols-words`). Rebuilding the
+        # list from ISABELLE_HOME instead — which this used to do — silently drops every
+        # component file, so a component symbol stays literal text and is never converted.
+        symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")
     if not symbol_files:
         # No settings environment to ask: ISABELLE_SYMBOLS is unset and `isabelle` is
         # unavailable. Fall back to the two files Isabelle always puts first, so that a
@@ -107,7 +103,10 @@ def _load_table():
     for file in symbol_files:
         # In ISABELLE_SYMBOLS order, each file layering on top of the ones before it:
         # the user overlay overrides the distribution, and a component overrides both.
-        SYMBOLS, REVERSE_SYMBOLS, GROUPS = _load_symbols(file, SYMBOLS, REVERSE_SYMBOLS, GROUPS)
+        symbols, reverse_symbols, groups = _load_symbols(file)
+        SYMBOLS.update(symbols)
+        REVERSE_SYMBOLS.update(reverse_symbols)
+        GROUPS.update(groups)
     if not SYMBOLS:
         # The paths resolved but nothing loaded: files missing, unreadable, or empty
         # (a relocated/partial install, or a stale exported value). That would make
@@ -128,21 +127,22 @@ def _load_table():
                   tuple(symbol_files))
 
 def get_SYMBOLS_AND_REVERSED():
-    """(symbols, reverse, translation table, letter symbols). Callers unpack this 4-tuple
-    by arity, so it keeps its shape; the files behind it are get_SYMBOL_FILES()."""
-    return _table()[:4]
+    """(symbols, reverse, translation table, letter symbols): callers unpack this
+    4-tuple by arity. The files behind it are get_SYMBOL_FILES()."""
+    t = _table()
+    return (t.symbols, t.reverse, t.trans, t.letters)
 
 def get_SYMBOLS():
-    return get_SYMBOLS_AND_REVERSED()[0]
+    return _table().symbols
 
 def get_REVERSE_SYMBOLS():
-    return get_SYMBOLS_AND_REVERSED()[1]
+    return _table().reverse
 
 def get_LETTER_SYMBOLS():
     """The set of Isabelle symbols (as ASCII `\\<name>` strings) that may occur
     as a *letter* inside an identifier / fact name — a safe over-approximation
     of Symbol.is_letter_symbol (the file's `letter` and `greek` groups)."""
-    return get_SYMBOLS_AND_REVERSED()[3]
+    return _table().letters
 
 def get_SYMBOL_FILES():
     """The symbol files the loaded table was actually built from, in load order.
@@ -230,27 +230,34 @@ def is_private_use(ch):
 
 # Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a letter,
 # then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the next `>` wherever
-# it falls, so one malformed escape swallows the next valid one -- `\\<alpha \\<beta>`
+# it falls, so one malformed escape swallows the next valid one -- `\<alpha \<beta>`
 # converts nothing. Identical on well-formed input.
 _ESCAPE = re.compile(r"\\<\^?[A-Za-z][A-Za-z0-9_']*>")
-# A sub/superscript or bold marker and the character after it: the fold's candidates.
-_FOLD = re.compile('⇩.|⇧.|❙.')
+# A sub/superscript or bold marker (the fold table's own) and the character after it:
+# the fold's candidates.
+_MARKERS = re.escape(''.join(sorted({pair[0] for pair in SUBSUP_TRANS_TABLE})))
+_FOLD = re.compile(f"[{_MARKERS}].")
+
+# One match a replacement rewrote: its input span and its output length.
+_Record = namedtuple('_Record', 'start end out_len')
 
 
 def _sub_recording(pattern, replace, text):
-    """`pattern.sub(replace, text)`, and one record (start, end, output length) per match."""
+    """`pattern.sub`, with `replace` called on the matched text rather than the match,
+    and one record kept per match the replacement rewrote (ascending, non-overlapping)."""
     records = []
 
     def callback(match):
         out = replace(match.group(0))
-        records.append((match.start(), match.end(), len(out)))
+        if out != match.group(0):
+            records.append(_Record(match.start(), match.end(), len(out)))
         return out
 
     return pattern.sub(callback, text), records
 
 
 def _replace_escape(symbol):
-    char = get_SYMBOLS().get(symbol)
+    char = _table().symbols.get(symbol)
     if char is None or is_private_use(char):
         return symbol
     return char
@@ -260,7 +267,7 @@ def _fold(pair):
     return SUBSUP_TRANS_TABLE.get(pair, pair)
 
 
-def _render(text):
+def _render(text: str) -> tuple[str, tuple[list, list]]:
     """The rendering of `text` and the records of its two passes: escapes to characters,
     then the sub/superscript fold. The one place that decides what a symbol renders as;
     `pretty_unicode` and `pretty_unicode_indexed` are views of it."""
@@ -269,7 +276,7 @@ def _render(text):
     return out, (escapes, folds)
 
 
-def pretty_unicode(src):
+def pretty_unicode(src: str) -> str:
     """
     Argument src: Any script that uses Isabelle's ASCII notation like `\\<Rightarrow>`
     Return: unicode version of `src`
@@ -289,36 +296,38 @@ def pretty_unicode(src):
 def _map_offsets(records, offsets):
     """Where each of the ascending `offsets` into a pass's input lands in its output.
 
-    Exact at a match boundary. Strictly inside a match that changed length, the match's
-    output start; inside one that kept its length, unchanged."""
-    out = []
+    Every offset moves with the length changes of the rewritten matches before it. One
+    strictly inside a rewritten match lands at that match's output start: the match is
+    one unit, so a fold operand shares the folded character's position."""
+    mapped = []
     shift = 0                 # output minus input offset, in the text between matches
     k = 0
     for off in offsets:
-        while k < len(records) and records[k][1] <= off:
-            start, end, length = records[k]
-            shift += length - (end - start)
+        while k < len(records) and records[k].end <= off:
+            done = records[k]
+            shift += done.out_len - (done.end - done.start)
             k += 1
-        record = records[k] if k < len(records) else None
-        if record and record[0] < off and record[2] != record[1] - record[0]:
-            out.append(record[0] + shift)
+        here = records[k] if k < len(records) else None
+        if here and here.start < off:
+            mapped.append(here.start + shift)
         else:
-            out.append(off + shift)
-    return out
+            mapped.append(off + shift)
+    return mapped
 
 
-def pretty_unicode_indexed(symbols):
+def pretty_unicode_indexed(symbols: list[str]) -> tuple[str, list[int]]:
     """The rendering of ''.join(symbols), and where each symbol begins in it.
 
     `symbols` is `symbol_explode`'s output, so the text rendered is the CR-folded one an
     index holds. `offsets` has len(symbols) + 1 entries, the last equal to the
-    rendering's length. A fold operand shares the folded character's position with its
-    marker; `_map_offsets` says how an offset inside a match is placed.
+    rendering's length; a fold operand shares the folded character's position with its
+    marker (`_map_offsets`). Every `_ESCAPE` match must be exactly one of `symbols`:
+    `symbol_explode` scans the same name more permissively, tolerating a missing `>`,
+    and if that stopped holding the symbols inside a match would be placed at its start
+    with no error.
     """
     rendered, (escapes, folds) = _render(''.join(symbols))
-    starts = [0]
-    for symbol in symbols:
-        starts.append(starts[-1] + len(symbol))
+    starts = list(accumulate(map(len, symbols), initial=0))
     return rendered, _map_offsets(folds, _map_offsets(escapes, starts))
 
 def unicode_of_ascii(src):
@@ -330,5 +339,4 @@ def ascii_of_unicode(src):
     Return: Isabelle's ASCII version of `src`.
     This method is the reverse of `pretty_unicode`.
     """
-    trans_table = get_SYMBOLS_AND_REVERSED()[2]
-    return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(trans_table)
+    return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(_table().trans)

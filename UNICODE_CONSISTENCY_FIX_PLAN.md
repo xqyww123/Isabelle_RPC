@@ -1,6 +1,7 @@
 # Fixing the FileIndex / pretty_unicode divergence
 
-Status: design ruled by the author, implementation not yet started. Written 2026-08-18
+Status: implemented in `3360162` and revised under the adversarial review of 2026-09-22
+(the paragraphs below). Written 2026-08-18
 after a review of commits `eab47d6` and `8b7325e` found a live regression; the shape
 (Option D, §5: keep the regex substitution and record positions while it runs) was
 chosen by the author that day ("我强烈建议走法一，原始的方案", "很好。请改方案"). On
@@ -30,12 +31,34 @@ digests before and after); `pretty_unicode(''.join(symbols)) ==
 pretty_unicode_indexed(symbols)[0]`, the whole-file sentinel and `FileIndex`'s agreement
 with the indexed view on all 4,506; `position.py` references none of `SYMBOLS`,
 `SUBSUP_TRANS_TABLE` or a fold condition; the suite's seeded cases cover the twelve
-rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with every
-class seen; run against the parent commit's `FileIndex`, that suite fails (three seeded
-cases and 7,571 of the 68,148 lines); `--self-check` kills all nine mutants, including
-`FileIndex` restored to its own computation and to the bare table lookup; on
+rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with its three
+§6.5 counts — private-use escapes, folds, symbols rendered differently — all positive;
+run against the parent commit's `FileIndex`, that suite fails (three seeded cases, 107 of
+the 160 files and 7,464 of the 68,148 lines); `--self-check` kills all nine mutants,
+including `FileIndex` restored to its own computation and to the bare table lookup, every
+kill coming from the seeded cases (the sweep runs outside the mutant copies); on
 `Resource_Template.thy:156` both hover routes now place `Itself`, `Rel` and `Normal` at
 columns 21 (and 40), 66 and 71, where the rendered line has them.
+
+**REVIEWED 2026-09-22** (a two-round adversarial review, 60 agents; the record is
+`ai-artifacts/UNICODE_REVIEW_2026-09-22.md`): the judge ruled MET_ON_CONDITION — the fix
+correct and in the ruled shape, its net short in five places: §6 item 2's corpus arm
+compared lengths where the item asks for the renderings; §6.5's device against an empty
+sweep had not shipped, so a machine without phi-system beside the repository went green
+without sweeping; §6 item 9's third clause was false as worded; and the six coordinate
+conversions and `FileIndex`'s ASCII bookkeeping had no test. The author granted both
+proposals put to him ("赞同你的建议", 2026-09-22): the recording keeps only the matches a
+replacement rewrote, so the convention of §4 D has two cases instead of three; and §1b is
+fixed in a follow-up commit — the fold pattern becomes a marker followed by a non-marker,
+Isabelle's own rule, with no rendering in 14,500 sources and 9,913 checked-in mirrors
+changing. The judge's conditions and the 31 items he assigned to the drafter are applied
+in the commits that follow `3360162`; the 13 he dismissed are not to be re-raised. The
+review's own record says which is which.
+
+Everything below this paragraph, from §0 on, describes the tree as it stood before the
+fix (`f9e139c`): its line numbers and names — `FileIndex.__init__` at `position.py:82-154`,
+the bare lookups, `SYMBOLS_CACHE` — are the ones `3360162` changed. Read it as the record
+of what was wrong and why the fix has this shape; for the tree as it stands, read the code.
 
 ## 0. Where things are, and how to run them
 
@@ -211,7 +234,8 @@ reasons, in order of weight. It is **lossless**: measured, `pretty_unicode` then
 point — nothing is destroyed, one fold is merely not applied. It occurs **nowhere**: a
 tree-wide search for two adjacent markers over every `.thy` and `.ML` returns 0 files.
 And it is a different kind of thing from §1: §1 is *two of our implementations
-disagreeing with each other*, which misdirects 94 files' worth of positions today, where
+disagreeing with each other*, which misdirects the positions in every phi-System theory
+§1 counts, where
 this is *our one implementation differing from the prover* on a construction that never
 arises. An earlier draft used this to reject the remedy §5 now recommends. That was
 wrong, and §5 says why.
@@ -340,9 +364,9 @@ reopening only if the renderer ever has to change behaviour for another reason.
 
 **The recommendation.** `re.sub` calls its replacement function once per match with a
 match object, which carries `start()` and `end()` — where the match was in the input —
-and the function's return value has a known length. So each pass can record, per match,
-"input from here to here became output of this length at this position", and from those
-records compute where every input offset lands in the output.
+and the function's return value has a known length. So each pass can record, per match
+it rewrote, "input from here to here became output of this length at this position", and
+from those records compute where every input offset lands in the output.
 
 The substitution logic is untouched. The replacement function returns exactly what it
 returned before; one line is added beside it that writes down what happened.
@@ -352,7 +376,7 @@ One private core does the rendering; the two public functions are views of it:
 ```python
 def _render(text: str) -> tuple[str, list]:
     """The two `re.sub` passes exactly as today. Each replacement callback also
-    records (input start, input end, output length) for its match."""
+    records (input start, input end, output length) for each match it rewrote."""
 
 def pretty_unicode(src: str) -> str:
     return _render(src)[0]            # byte-identical to today, CR handling included
@@ -407,16 +431,18 @@ duplication is removed as completely as by Option C.
 acceptable — lossless, round-trips exactly, zero instances — and §5 explains why an
 earlier draft was wrong to reject Option D over it.
 
-*The interior-offset convention*, internal to `pretty_unicode_indexed`: an input offset
-at a match boundary maps exactly; an offset strictly **inside** a match that changed
-length maps to the match's output start; an offset strictly inside a match that kept
-its length maps by identity. Symbol boundaries do fall inside matches — a fold operand
-begins inside the fold match (`x\<^sub>i`: the operand `i` maps to the folded
-character's position, giving `[0, 1, 1]`), and after a private-use symbol the fold
-regex matches the marker plus the escape's backslash without folding
-(`\<^sub>\<proc>`, a length-preserving match, where identity is the right answer). The
-convention is what turns match records into per-symbol offsets; it lives inside the
-function, and no caller meets it.
+*The interior-offset convention*, internal to `pretty_unicode_indexed` (as ruled on
+2026-09-22, replacing a three-case rule that told a rewritten match from an untouched one
+by its length — sound only because the fold table happens to map two characters to one,
+which nothing stated): only the matches a replacement rewrote are recorded; every offset
+moves with the length changes of the rewritten matches before it; and an offset strictly
+**inside** a rewritten match lands at that match's output start, the match being one
+unit. Symbol boundaries do fall inside matches — a fold operand begins inside the fold
+match (`x\<^sub>i`: the operand `i` lands on the folded character, giving `[0, 1, 1]`);
+after a private-use symbol the fold regex matches the marker plus the escape's backslash
+and leaves it as it is, which records nothing, so `\<^sub>\<proc>` keeps every symbol
+where it is. The convention is what turns match records into per-symbol offsets; it
+lives inside the function, and no caller meets it.
 
 ## 5. Recommendation
 
@@ -439,7 +465,8 @@ tree to stand in for an equivalence it cannot have structurally.
 
 What settles it is that the second draft's objection compares two different magnitudes.
 The defect being fixed is **two of our implementations disagreeing with each other**,
-which sends the interpreting model to the wrong column in 94 files today. §1b is **our
+which sends the interpreting model to the wrong column in every one of those files. §1b
+is **our
 one implementation differing from the prover** on a construction that occurs in no file,
 loses no information, and round-trips exactly. Trading a real fix that changes no
 behaviour for the second is trading a measured regression for a difference nobody can
@@ -502,11 +529,13 @@ it and must be stated, not discovered.
      have contained at least one private-use escape, N folds, and N symbols whose
      rendering differs from themselves. Fail if any count is zero. This is the cheapest
      anti-vacuity device available and no draft has had it.
-   - *Machine dependence.* Seed `SYMBOLS_CACHE` from a three-line temporary symbols file
-     through the existing `_load_symbols` — one ordinary symbol, `\\<^sub>`, one synthetic
-     private-use symbol at U+E000 — so every rendering class is exercised unconditionally
-     and the real-corpus sweep becomes corroboration rather than the only source of the
-     case. About eight lines, verified to work.
+   - *Machine dependence.* Serve a five-line temporary symbols file through the module's
+     own loader (`_load_table([path])` into `_TABLE`, the suite's `seeded_table()`) — two
+     ordinary symbols, the markers, one synthetic private-use symbol at U+E000 — so every
+     rendering class is exercised unconditionally, and sweep a corpus written in that
+     alphabet under it, so the positive counts and the empty-sweep rule hold on every
+     machine; the real-corpus sweep becomes corroboration rather than the only source of
+     the case.
 
 6. **Hand-written cases for every rendering class**, since no corpus supplies them all:
    private-use symbol, private-use symbol as a fold operand, ordinary component symbol,
@@ -535,10 +564,10 @@ it and must be stated, not discovered.
    handed to the model addresses the symbol it names.
 
 9. **The interior-offset convention documented on the function**, not only here: the
-    three-case rule of §4 D (exact at a match boundary; the match's output start inside
-    a match that changed length; identity inside a match that kept its length), written
-    where the records become offsets. It is internal to `pretty_unicode_indexed`, and
-    the docstring says so, so nobody builds a second consumer of the raw records.
+    rule of §4 D (every offset moves with the rewritten matches before it; one inside a
+    rewritten match lands at that match's output start), written where the records
+    become offsets. It is internal to `pretty_unicode_indexed`, and the docstring says
+    so, so nobody builds a second consumer of the raw records.
 
 ## 6b. Hygiene on the lines this fix touches
 
@@ -550,8 +579,8 @@ first exists only to prop up an API this fix is already changing.
 **Two module globals cache one thing.** `get_SYMBOLS_AND_REVERSED()` returns a 4-tuple,
 and `get_SYMBOL_FILES()` reads from a *second* global, `SYMBOL_FILES_CACHE`, whose
 docstring explains that the tuple could not grow because "callers unpack that by arity".
-Two callers do: `test_unicode.py:78`, inside this package and in the suite §8 step 5
-extends, and `contrib/isasearch-web/site/prototype/tokenize_prototype.py:13` (moved
+Two callers do: the `symbols, reverse, _, _ = get_SYMBOLS_AND_REVERSED()` in
+`test_unicode.py`'s `main()`, inside this package and in the suite §8 step 5 extends, and `contrib/isasearch-web/site/prototype/tokenize_prototype.py:13` (moved
 there from Semantic_Embedding since 2026-08-18; `subtoken_rule.py:6` beside it indexes
 the tuple positionally). One of them lives outside this package, which is one more
 reason the tuple's shape must not change.
@@ -667,8 +696,8 @@ which moves into `_render`; and the fourth anchor (`unicode.py:232`) moves with 
 an anchor no longer matches, `self_check` prints "mutation site not found — this
 self-check is stale" and counts the mutant as **survived**. Re-anchor all of them in the
 same commit. The one-record refactor keeps the 4-tuple's shape (§6b), so
-`test_unicode.py:78` and `tokenize_prototype.py:13` keep working; run the former to see
-that they do.
+the arity unpack in `test_unicode.py`'s `main()` and `tokenize_prototype.py:13` keep
+working; run the former to see that they do.
 
 *Accepted when* `pretty_unicode`'s output is byte-identical before and after over the
 corpora of §0 and §6.6's hand cases — not as evidence of an equivalent rewrite, which is

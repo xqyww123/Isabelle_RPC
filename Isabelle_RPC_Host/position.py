@@ -2,6 +2,7 @@ import bisect
 import os
 from array import array
 from collections import OrderedDict
+from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from .unicode import pretty_unicode_indexed
@@ -91,15 +92,9 @@ class FileIndex:
         # Where a symbol lands in the rendering is the renderer's to say (unicode.py).
         _, unicode_offsets = pretty_unicode_indexed(symbols)
 
-        sym_ascii = array('I')
+        sym_ascii = array('I', accumulate(map(len, symbols), initial=0))
         ascii_lines = array('I', [0])
-        ascii_off = 0
-        for sym in symbols:
-            sym_ascii.append(ascii_off)
-            ascii_off += len(sym)
-            if sym == '\n':
-                ascii_lines.append(ascii_off)
-        sym_ascii.append(ascii_off)   # sentinel
+        ascii_lines.extend(sym_ascii[i + 1] for i, sym in enumerate(symbols) if sym == '\n')
 
         self.sym_ascii_offsets = sym_ascii
         self.sym_unicode_offsets = array('I', unicode_offsets)

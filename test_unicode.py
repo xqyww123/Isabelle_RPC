@@ -2,17 +2,21 @@
 """Tests for Isabelle_RPC_Host.unicode and the FileIndex offsets built on it — run with
 `python3 test_unicode.py`.
 
-Every check here is mutation-tested: `python3 test_unicode.py --self-check` re-runs
-the suite against deliberately broken copies of `unicode.py` and `position.py` and
-fails unless each mutant is caught. An earlier version of this file had three table-driven sweeps that
-reported zero offenders even when `pretty_unicode` converted nothing at all — they
-fed each symbol name in isolation, where idempotence and round-tripping hold for any
-implementation whatsoever. Sweeps here run against text with context, and the
-conversion itself is asserted directly rather than inferred from its fixed points.
+Every machine-independent check here is mutation-tested: `python3 test_unicode.py
+--self-check` re-runs the suite against deliberately broken copies of `unicode.py` and
+`position.py` and fails unless each mutant is caught. The sweep of a phi-system checkout
+is deliberately outside that: a mutant copy runs from a temporary directory, and a kill
+must not depend on which corpora a machine happens to have. An earlier version of this
+file had three table-driven sweeps that reported zero offenders even when
+`pretty_unicode` converted nothing at all — they fed each symbol name in isolation, where
+idempotence and round-tripping hold for any implementation whatsoever. Sweeps here run
+against text with context, and the conversion itself is asserted directly rather than
+inferred from its fixed points.
 
 Coverage varies with the machine: the table is whatever `ISABELLE_SYMBOLS` resolves
 to, so a host with no component registered has no private-use symbol to check. The
-summary says so out loud rather than passing quietly.
+summary says so out loud rather than passing quietly, and the seed table below, with the
+seed corpus swept under it, exercises every rendering class on every machine.
 """
 
 import contextlib
@@ -20,11 +24,12 @@ import os
 import subprocess
 import sys
 import tempfile
+from itertools import accumulate
 
 from Isabelle_RPC_Host import unicode as unicode_module
 from Isabelle_RPC_Host.unicode import (
     pretty_unicode, pretty_unicode_indexed, ascii_of_unicode, is_private_use,
-    get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_RESTORE_TABLE, _load_symbols)
+    get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE, _load_symbols)
 from Isabelle_RPC_Host.paths import resolve_isabelle_path_list
 from Isabelle_RPC_Host.position import FileIndex, symbol_explode
 
@@ -80,18 +85,20 @@ ESCAPE_SCANNING = [
 ]
 
 # A table of our own, so that every rendering class below is exercised on every
-# machine, whatever components are registered: one ordinary symbol, the markers, and a
-# synthetic private-use symbol at U+E000.
+# machine, whatever components are registered: two ordinary symbols (one named with a
+# `_` and a digit), the markers, and a synthetic private-use symbol at U+E000.
 SEED_SYMBOLS = """\\<alpha>   code: 0x0003b1  group: greek
+\\<beta_2>  code: 0x0003b2  group: greek
 \\<^sub>    code: 0x0021e9  group: control
 \\<^bold>   code: 0x002759  group: control
 \\<pua>     code: 0x00e000  font: Synthetic  group: letter
 """
+OTHER_SEED = "\\<gamma>   code: 0x0003b3  group: greek\n"
 
 
-def seed_file():
+def seed_file(text=SEED_SYMBOLS):
     with tempfile.NamedTemporaryFile('w', suffix='.symbols', delete=False, encoding='utf-8') as f:
-        f.write(SEED_SYMBOLS)
+        f.write(text)
         return f.name
 
 
@@ -101,9 +108,7 @@ def seeded_table():
     path = seed_file()
     saved = unicode_module._TABLE
     try:
-        symbols, reverse, _ = _load_symbols(path)
-        unicode_module._TABLE = unicode_module._Table(
-            symbols, reverse, str.maketrans(reverse), frozenset(), (path,))
+        unicode_module._TABLE = unicode_module._load_table([path])
         yield
     finally:
         unicode_module._TABLE = saved
@@ -113,19 +118,34 @@ def seeded_table():
 # One case per rendering class: the source, its rendering, and where each of its
 # symbols begins in the rendering (plus the sentinel). Under the seed table.
 INDEXED_CASES = [
-    ("private-use symbol",           r"a\<pua>b",                r"a\<pua>b",   [0, 1, 7, 8]),
-    ("private-use fold operand",     r"\<^sub>\<pua>x",          "⇩\\<pua>x",   [0, 1, 7, 8]),
-    ("ordinary symbol",              r"\<alpha>",                "α",           [0, 1]),
-    ("foldable subscript, escape",   r"x\<^sub>i",               "xᵢ",          [0, 1, 1, 2]),
-    ("foldable subscript, raw",      "x⇩i",                      "xᵢ",          [0, 1, 1, 2]),
-    ("unfoldable subscript",         r"x\<^sub>Q",               "x⇩Q",         [0, 1, 2, 3]),
-    ("bold fold",                    r"\<^bold>x",               "𝐱",           [0, 0, 1]),
-    ("bold, no fold available",      r"\<^bold>1",               "❙1",          [0, 1, 2]),
-    ("malformed escape",             r"\<alpha \<alpha>",        "\\<alpha α",  [0, 7, 8, 9]),
-    ("two adjacent markers",         r"x\<^sub>\<^sub>1",        "x⇩⇩1",        [0, 1, 2, 3, 4]),
-    ("three adjacent markers",       r"x\<^sub>\<^sub>\<^sub>1", "x⇩⇩₁",        [0, 1, 2, 3, 3, 4]),
-    ("CRLF",                         "a\r\nb",                   "a\nb",        [0, 1, 2, 3]),
+    ("private-use symbol",              r"a\<pua>b",                r"a\<pua>b",   [0, 1, 7, 8]),
+    ("private-use fold operand",        r"\<^sub>\<pua>x",          "⇩\\<pua>x",   [0, 1, 7, 8]),
+    ("ordinary symbol",                 r"\<alpha>",                "α",           [0, 1]),
+    ("escape named with _ and a digit", r"a\<beta_2>b",             "aβb",         [0, 1, 2, 3]),
+    ("foldable subscript, escape",      r"x\<^sub>i",               "xᵢ",          [0, 1, 1, 2]),
+    ("foldable subscript, raw",         "x⇩i",                      "xᵢ",          [0, 1, 1, 2]),
+    ("two folds on one line",           r"x\<^sub>i y\<^sub>i",     "xᵢ yᵢ",       [0, 1, 1, 2, 3, 4, 4, 5]),
+    ("unfoldable subscript",            r"x\<^sub>Q",               "x⇩Q",         [0, 1, 2, 3]),
+    ("bold fold",                       r"\<^bold>x",               "𝐱",           [0, 0, 1]),
+    ("bold, no fold available",         r"\<^bold>1",               "❙1",          [0, 1, 2]),
+    ("malformed escape",                r"\<alpha \<alpha>",        "\\<alpha α",  [0, 7, 8, 9]),
+    ("two adjacent markers",            r"x\<^sub>\<^sub>1",        "x⇩⇩1",        [0, 1, 2, 3, 4]),
+    ("three adjacent markers",          r"x\<^sub>\<^sub>\<^sub>1", "x⇩⇩₁",        [0, 1, 2, 3, 3, 4]),
+    ("CRLF",                            "a\r\nb",                   "a\nb",        [0, 1, 2, 3]),
 ]
+
+# A corpus in the seed table's alphabet, swept on every machine: every rendering class
+# above in running text, a CRLF line, an empty line and a plain ASCII line.
+SEED_CORPUS = (
+    "theory Seed\n"
+    "  lemma \\<alpha>\\<^sub>1 = x\\<^sub>i y\\<^sub>i\n"
+    "  \\<pua> f \\<^sub>\\<pua>x \\<^bold>x \\<^bold>1\n"
+    "plain ascii line\r\n"
+    "  \\<alpha \\<alpha> \\<beta_2>\\<^sub>2 x\\<^sub>Q\n"
+    "  x\\<^sub>\\<^sub>1 x\\<^sub>\\<^sub>\\<^sub>1\n"
+    "\n"
+    "  \\<alpha>\\<^bold>\\<alpha> end\n"
+)
 
 
 def check_indexed_cases():
@@ -139,52 +159,98 @@ def check_indexed_cases():
             check(f"{label}: pretty_unicode is the same view", pretty_unicode(''.join(symbols)), rendering)
             check(f"{label}: FileIndex takes the offsets", list(FileIndex(src).sym_unicode_offsets), offsets)
         check("CRLF: pretty_unicode keeps a raw string's CR", pretty_unicode("a\r\nb"), "a\r\nb")
+        check("CRLF: ascii_line is the folded line body", FileIndex("a\r\nb\r\nc").ascii_line(2), "b")
 
     print("== _load_symbols does not share state between calls ==")
-    path = seed_file()
+    first_file, second_file = seed_file(), seed_file(OTHER_SEED)
     try:
-        first = _load_symbols(path)[0]
-        second = _load_symbols(path)[0]
+        first = _load_symbols(first_file)[0]
+        second = _load_symbols(second_file)[0]
         check("two loads are distinct objects", first is second, False)
-        check("a load holds only its own file", len(second), 4)
+        check("a load holds only its own file", sorted(second), [r"\<gamma>"])
     finally:
-        os.unlink(path)
+        os.unlink(first_file)
+        os.unlink(second_file)
 
 
-def sweep_index(root):
-    """The plan's invariant over every `.thy` under `root`, per line: FileIndex's
-    offsets are the indexed view's, its sentinel is the rendering's length, offsets never
-    decrease, and pretty_unicode is the same view. Also whole-file sentinels. Returns the
-    offenders, the number of lines, and how often each rendering class was seen — a sweep
-    that saw none of a class proves nothing about it."""
-    symbols_table = get_SYMBOLS_AND_REVERSED()[0]
-    private = {n for n, c in symbols_table.items() if is_private_use(c)}
-    folded = set(SUBSUP_RESTORE_TABLE)
-    offenders, lines = [], 0
-    seen = {"private-use escapes": 0, "folds": 0, "symbols rendered differently": 0}
+def theory_files(root):
+    """(path, text) for every `.thy` under `root` but the `.unicode.thy` mirrors."""
     for d, _, fs in os.walk(root):
         for f in sorted(fs):
-            if not f.endswith('.thy') or f.endswith('.unicode.thy'):
-                continue
-            path = os.path.join(d, f)
-            text = open(path, encoding='utf-8', errors='surrogateescape').read()
-            whole = FileIndex(text)
-            if whole.sym_unicode_offsets[-1] != len(pretty_unicode(whole.source)):
-                offenders.append(path)
-            for no, line in enumerate(text.split('\n'), 1):
-                lines += 1
-                idx = FileIndex(line)
-                symbols = symbol_explode(idx.source)
-                rendered, offsets = pretty_unicode_indexed(symbols)
-                if not (list(idx.sym_unicode_offsets) == offsets
-                        and offsets[-1] == len(rendered) == len(pretty_unicode(idx.source))
-                        and all(a <= b for a, b in zip(offsets, offsets[1:]))):
-                    offenders.append(f"{path}:{no}")
-                seen["private-use escapes"] += sum(s in private for s in symbols)
-                seen["folds"] += sum(ch in folded for ch in rendered)
-                seen["symbols rendered differently"] += sum(
-                    s in symbols_table and s not in private for s in symbols)
-    return offenders, lines, seen
+            if f.endswith('.thy') and not f.endswith('.unicode.thy'):
+                path = os.path.join(d, f)
+                with open(path, encoding='utf-8') as fh:
+                    yield path, fh.read()
+
+
+def sweep_index(texts):
+    """The plan's invariant over every (name, text) in `texts`.
+
+    Per file: FileIndex's ASCII sentinel is the source's length, its lines reassemble the
+    source, and its unicode sentinel is the rendering's length. Per line: FileIndex's
+    unicode offsets are the indexed view's (true by construction; the guard against a
+    FileIndex deciding for itself), the view's sentinel is its rendering's length,
+    pretty_unicode of the line is that rendering, offsets never decrease, every `_ESCAPE`
+    match is exactly one symbol, each symbol away from a fold owns exactly its own
+    rendering in the line's, and the conversions place every symbol of the line where
+    the line's own index says. Returns (file offenders, files), (line offenders, lines),
+    the number of slices compared, and §6.5's three counts — private-use escapes, folds,
+    symbols rendered differently — because a sweep that met none of one of them proves
+    nothing about it. §6.6's twelve rendering classes are the seeded cases' business; no
+    corpus supplies them all."""
+    symbols_table = get_SYMBOLS_AND_REVERSED()[0]
+    private = {n for n, c in symbols_table.items() if is_private_use(c)}
+    markers = {pair[0] for pair in SUBSUP_TRANS_TABLE}
+    folded = set(SUBSUP_TRANS_TABLE.values())
+    file_offenders, files, line_offenders, lines, slices = [], 0, [], 0, 0
+    seen = {"private-use escapes": 0, "folds": 0, "symbols rendered differently": 0}
+    for name, text in texts:
+        files += 1
+        whole = FileIndex(text)
+        body = whole.source.split('\n')
+        if not (whole.sym_ascii_offsets[-1] == len(whole.source)
+                and whole.sym_unicode_offsets[-1] == len(pretty_unicode(whole.source))
+                and [whole.ascii_line(no) for no in range(1, whole.num_lines + 1)] == body):
+            file_offenders.append(name)
+        for no, line in enumerate(body, 1):
+            lines += 1
+            idx = FileIndex(line)
+            symbols = symbol_explode(idx.source)
+            rendered, offsets = pretty_unicode_indexed(symbols)
+            starts = list(accumulate(map(len, symbols), initial=0))
+            at = {s: i for i, s in enumerate(starts)}
+            first = whole.ascii_to_isabelle(no, 1)
+            renders = [pretty_unicode(s) for s in symbols]
+            ok = (list(idx.sym_unicode_offsets) == offsets
+                  and offsets[-1] == len(rendered)
+                  and rendered == pretty_unicode(idx.source)
+                  and all(a <= b for a, b in zip(offsets, offsets[1:]))
+                  and all(m.start() in at and starts[at[m.start()] + 1] == m.end()
+                          for m in unicode_module._ESCAPE.finditer(idx.source))
+                  and all(whole.isabelle_to_unicode(first + j) == (no, offsets[j] + 1)
+                          and whole.ascii_to_unicode(no, starts[j] + 1) == (no, offsets[j] + 1)
+                          for j in range(len(symbols))))
+            for j, own in enumerate(renders):
+                if own in markers or (j > 0 and renders[j - 1] in markers):
+                    continue
+                slices += 1
+                ok = ok and rendered[offsets[j]:offsets[j + 1]] == own
+            if not ok:
+                line_offenders.append(f"{name}:{no}")
+            seen["private-use escapes"] += sum(s in private for s in symbols)
+            seen["folds"] += sum(ch in folded for ch in rendered)
+            seen["symbols rendered differently"] += sum(
+                s in symbols_table and s not in private for s in symbols)
+    return (file_offenders, files), (line_offenders, lines), slices, seen
+
+
+def report_sweep(result, label):
+    (file_offenders, files), (line_offenders, lines), slices, seen = result
+    check_all(f"{label}: whole files", file_offenders, files)
+    check_all(f"{label}: lines", line_offenders, lines)
+    check(f"{label}: slices compared", slices > 0, True)
+    for cls, count in seen.items():
+        check(f"{label}: the sweep saw {cls}", count > 0, True)
 
 
 def main():
@@ -232,19 +298,19 @@ def main():
 
     check_indexed_cases()
 
-    # The real corpus, as corroboration of the seeded cases above: phi-system, when it is
-    # checked out beside this repository. Its count of each class must be positive, or
-    # the sweep ran on text that could not have exercised the fix.
+    print("== the sweep over the seed corpus, seed table ==")
+    with seeded_table():
+        report_sweep(sweep_index([("seed corpus", SEED_CORPUS)]), "seed corpus")
+
+    # The real corpus, as corroboration of the seeded cases: phi-system, when it is
+    # checked out beside this repository.
     corpus = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "phi-system")
-    print("== FileIndex agrees with the rendering on every line of phi-system ==")
+    print("== the sweep over phi-system, the real table ==")
     if os.path.isdir(corpus):
-        offenders, lines, seen = sweep_index(corpus)
-        check_all("FileIndex offsets", offenders, lines)
-        for cls, count in seen.items():
-            check(f"the sweep saw {cls}", count > 0, True)
+        report_sweep(sweep_index(theory_files(corpus)), "phi-system")
     else:
         print("  ----  NO DATA: no phi-system checkout beside this repository")
-        EMPTY.append("FileIndex offsets")
+        EMPTY.extend(["phi-system: whole files", "phi-system: lines"])
 
     # The sweeps below assert the conversion itself. Checking only its fixed points
     # is what made the previous version of this file vacuous: a bare `\<name>` maps
@@ -318,53 +384,88 @@ MUTANTS = [
      "    out, folds = _sub_recording(_FOLD, _fold, mid)",
      "    out, folds = mid, []"),
     ("only the distribution's symbol file is read", UNICODE_PY,
-     '    symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")',
-     '    symbol_files = []'),
+     '        symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")',
+     '        symbol_files = []'),
     ("the recording step is skipped", UNICODE_PY,
-     "        records.append((match.start(), match.end(), len(out)))",
-     "        pass"),
-    ("an offset inside a match that changed length is not moved to its start", UNICODE_PY,
-     "        if record and record[0] < off and record[2] != record[1] - record[0]:",
+     "            records.append(_Record(match.start(), match.end(), len(out)))",
+     "            pass"),
+    ("an offset inside a rewritten match is not moved to its start", UNICODE_PY,
+     "        if here and here.start < off:",
      "        if False:"),
+    ("an offset inside a rewritten match ignores the shift before it", UNICODE_PY,
+     "            mapped.append(here.start + shift)",
+     "            mapped.append(here.start)"),
     # The one that decides whether this work removed the duplication: FileIndex back to
     # computing its own offsets, first without rendering, then with the bare table
     # lookup the old code had.
     ("FileIndex computes its own offsets", POSITION_PY,
      "        _, unicode_offsets = pretty_unicode_indexed(symbols)",
-     "        unicode_offsets = [sum(map(len, symbols[:k])) for k in range(len(symbols) + 1)]"),
+     "        unicode_offsets = [0]\n"
+     "        for _s in symbols:\n"
+     "            unicode_offsets.append(unicode_offsets[-1] + len(_s))"),
     ("FileIndex renders by a bare table lookup", POSITION_PY,
      "        _, unicode_offsets = pretty_unicode_indexed(symbols)",
-     "        unicode_offsets = [sum(len(__import__('Isabelle_RPC_Host.unicode', fromlist=['get_SYMBOLS'])"
-     ".get_SYMBOLS().get(s, s)) for s in symbols[:k]) for k in range(len(symbols) + 1)]"),
+     "        from .unicode import get_SYMBOLS\n"
+     "        _t = get_SYMBOLS()\n"
+     "        unicode_offsets = [0]\n"
+     "        for _s in symbols:\n"
+     "            unicode_offsets.append(unicode_offsets[-1] + len(_t.get(_s, _s)))"),
+    ("FileIndex.source is the raw source, CR and all", POSITION_PY,
+     "        self.source = ''.join(symbols)",
+     "        self.source = source"),
+    ("line starts are not recorded", POSITION_PY,
+     "        ascii_lines.extend(sym_ascii[i + 1] for i, sym in enumerate(symbols) if sym == '\\n')",
+     "        pass"),
+    ("isabelle_to_unicode measures from the ASCII line start", POSITION_PY,
+     "        return self.sym_unicode_offsets[sym_idx]",
+     "        return self.ascii_line_offsets[line - 1]"),
+    ("symbol_explode stops a name at '_' and digits", POSITION_PY,
+     "                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in \"_'\")):",
+     "                while j < n and (text[j].isascii() and text[j].isalpha()):"),
 ]
 
 
 def self_check():
     import io, shutil
     here = os.path.dirname(os.path.abspath(__file__))
-    survived = []
-    for label, file, old, new in MUTANTS:
+
+    def run_copy(mutation=None):
+        """The suite on a fresh copy of the package, with one source line replaced."""
         tmp = tempfile.mkdtemp(prefix="mutcheck_")
         try:
             shutil.copytree(os.path.join(here, "Isabelle_RPC_Host"),
                             os.path.join(tmp, "Isabelle_RPC_Host"))
             shutil.copy(os.path.abspath(__file__), tmp)
-            target = os.path.join(tmp, file)
-            src = io.open(target, encoding="utf-8").read()
-            if src.count(old) != 1:
-                print(f"  ????  {label}: mutation site not found — this self-check is stale")
-                survived.append(label)
-                continue
-            io.open(target, "w", encoding="utf-8").write(src.replace(old, new))
-            r = subprocess.run([sys.executable, os.path.basename(__file__)],
-                               cwd=tmp, capture_output=True, text=True)
-            if r.returncode == 0:
-                print(f"  SURVIVED  {label}")
-                survived.append(label)
-            else:
-                print(f"  killed    {label}")
+            if mutation:
+                file, old, new = mutation
+                target = os.path.join(tmp, file)
+                src = io.open(target, encoding="utf-8").read()
+                io.open(target, "w", encoding="utf-8").write(src.replace(old, new))
+            return subprocess.run([sys.executable, os.path.basename(__file__)],
+                                  cwd=tmp, capture_output=True, text=True)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def anchored_once(file, old):
+        return io.open(os.path.join(here, file), encoding="utf-8").read().count(old) == 1
+
+    # The copies run from a temporary directory; the suite must pass there unmutated,
+    # or no verdict below means anything.
+    clean = run_copy()
+    if clean.returncode != 0:
+        print(clean.stdout[-3000:])
+        print("SELF-CHECK ABORTED: the unmutated copy fails, so no mutant verdict is trustworthy")
+        return 1
+    survived = []
+    for label, file, old, new in MUTANTS:
+        if not anchored_once(file, old):
+            print(f"  ????  {label}: mutation site not found — this self-check is stale")
+            survived.append(label)
+        elif run_copy((file, old, new)).returncode == 0:
+            print(f"  SURVIVED  {label}")
+            survived.append(label)
+        else:
+            print(f"  killed    {label}")
     print()
     if survived:
         print(f"SELF-CHECK FAILED: {len(survived)} mutant(s) survived: {', '.join(survived)}")
