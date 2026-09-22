@@ -1,6 +1,6 @@
 # Adversarial review of Isabelle_RPC commit 3360162 (2026-09-22)
 
-Asked for by the author on 2026-09-22 ("Run an Agent Team for a 2-turn adversarial debate of reviewing your code work … 第一轮质疑问题，第二轮辩护。第二轮必须针对每一个质疑启动一个全新的 agent。必须使用 workflow … 请让 the judge 来裁定是否达到验收条件"). One workflow, 60 agents, all Opus 5 at xhigh effort, concurrency 12 (the tool's cap on this 14-core machine), about 99 minutes: twelve interrogators (86 challenges) → one merge of exact duplicates (46) → one fresh defender per challenge (46) → one judge. Inputs: `UNICODE_REVIEW_BRIEF_2026-09-22.md`, `UNICODE_REVIEW_INPUT_2026-09-22.patch`. The judge's output follows verbatim; the drafter's disposition of each item is recorded in the plan after the author's rulings.
+Asked for by the author on 2026-09-22 ("Run an Agent Team for a 2-turn adversarial debate of reviewing your code work … 第一轮质疑问题，第二轮辩护。第二轮必须针对每一个质疑启动一个全新的 agent。必须使用 workflow … 请让 the judge 来裁定是否达到验收条件"). One workflow, 60 agents, all Opus 5 at xhigh effort, concurrency 12 (the tool's cap on this 14-core machine), about 99 minutes: twelve interrogators (86 challenges) → one merge of exact duplicates (46) → one fresh defender per challenge (46) → one judge. Inputs: `UNICODE_REVIEW_BRIEF_2026-09-22.md` and the diff of `3360162`. The judge's output follows verbatim; the drafter's disposition of each item is recorded in the plan after the author's rulings.
 
 ## Acceptance: **MET_ON_CONDITION**
 
