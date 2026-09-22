@@ -2,7 +2,8 @@
 
 ## What is under review
 The commit `3360162` in the repository `/home/qiyuan/Current/MLML/contrib/Isabelle_RPC`
-(its full diff: `ai-artifacts/UNICODE_REVIEW_INPUT_2026-09-22.patch`). It implements the
+(its full diff: `git show 3360162`; the copy the agents were handed was a temporary
+file, not kept). It implements the
 plan `UNICODE_CONSISTENCY_FIX_PLAN.md` (read §1–§6, §6b, §8; §0 says how to run things),
 after the plan's light re-check `ai-artifacts/UNICODE_PLAN_RECHECK_2026-09-21.md`.
 

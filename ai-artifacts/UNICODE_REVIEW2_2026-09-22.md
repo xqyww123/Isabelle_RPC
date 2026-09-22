@@ -1,6 +1,6 @@
 # Second-round adversarial review of the follow-up commits (2026-09-22)
 
-The five commits on top of `3360162` (`615cb01`, `601df27`, `6c1ee40`, `2ad1f09`, `d544b0c`) under the same rules as the first round: eight interrogators (58 challenges) → merge of exact duplicates (43) → one fresh defender per challenge (43) → one judge; 53 agents, all Opus 5 at xhigh effort. The run was interrupted once by the session limit after 47 agents and resumed from the workflow's cache (the 47 replayed, the last 6 ran). Inputs: `UNICODE_REVIEW2_BRIEF_2026-09-22.md`, `UNICODE_REVIEW2_INPUT_2026-09-22.patch`. The judge's output follows verbatim.
+The five commits on top of `3360162` (`615cb01`, `601df27`, `6c1ee40`, `2ad1f09`, `d544b0c`) under the same rules as the first round: eight interrogators (58 challenges) → merge of exact duplicates (43) → one fresh defender per challenge (43) → one judge; 53 agents, all Opus 5 at xhigh effort. The run was interrupted once by the session limit after 47 agents and resumed from the workflow's cache (the 47 replayed, the last 6 ran). Inputs: `UNICODE_REVIEW2_BRIEF_2026-09-22.md` and the diff `3360162..d544b0c`. The judge's output follows verbatim.
 
 ## Acceptance: **MET_ON_CONDITION**
 

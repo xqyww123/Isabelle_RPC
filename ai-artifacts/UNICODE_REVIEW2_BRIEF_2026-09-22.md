@@ -11,7 +11,8 @@ verdict MET_ON_CONDITION with 33 upheld items and 13 dismissed):
 - `2ad1f09` the fold of adjacent markers follows Isabelle (C37, the author's second grant)
 - the plan-only commit after it: the four named in the status paragraph, C22 deferred to §7
 
-Their combined diff and messages: `ai-artifacts/UNICODE_REVIEW2_INPUT_2026-09-22.patch`.
+Their combined diff and messages: `git log 3360162..d544b0c` and `git diff 3360162..d544b0c`
+(the copy the agents were handed was a temporary file, not kept).
 Read the first review's brief too (`ai-artifacts/UNICODE_REVIEW_BRIEF_2026-09-22.md`): the
 ruled design, the run instructions and the hard rules there still bind.
 
