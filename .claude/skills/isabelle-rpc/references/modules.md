@@ -374,20 +374,30 @@ Convert between the families through a `FileIndex`, which needs the file on disk
 mix it with the `FileIndex` machinery.
 
 Only `IsabellePosition` and `Position` are re-exported from the package; import `FileIndex`,
-`symbol_explode`, `get_file_index`, `AsciiPosition`, `UnicodePosition` from
-`Isabelle_RPC_Host.position`.
+`get_file_index`, `AsciiPosition`, `UnicodePosition` from `Isabelle_RPC_Host.position`.
 
 ### `unicode.py`
 
-Isabelle symbol ↔ Unicode. The tables are parsed from `$ISABELLE_HOME/etc/symbols` and
-`$ISABELLE_HOME_USER/etc/symbols` (located by shelling out to `isabelle getenv`), cached once
-per process.
+Isabelle symbol ↔ Unicode. The table is the one Isabelle presents: the files
+`ISABELLE_SYMBOLS` names (the distribution's `etc/symbols`, the user overlay, and one entry
+per component that declares symbols), read from the environment first and from
+`isabelle getenv` only when the environment has no value; cached once per process as one
+record that `get_SYMBOLS()`, `get_REVERSE_SYMBOLS()`, `get_LETTER_SYMBOLS()`,
+`get_SYMBOL_FILES()` and the 4-tuple `get_SYMBOLS_AND_REVERSED()` project.
 
-- `pretty_unicode(src)` / `unicode_of_ascii(src)` — `\<forall>` → `∀`, then merge
-  sub/superscript pairs (`⇩1` → `₁`). Unknown symbols pass through.
+- `symbol_explode(text)` — a port of Isabelle's symbol scanner: `\<forall>` is one symbol,
+  CR line endings fold to `\n`. It lives here beside the escape pattern whose naming rule
+  it shares; `Isabelle_RPC_Host.position` still imports it, so the older spelling resolves.
+- `pretty_unicode(src)` / `unicode_of_ascii(src)` — `\<forall>` → `∀`, then fold
+  sub/superscript pairs (`⇩1` → `₁`); of two adjacent markers the later one applies. A
+  symbol whose code point is private-use keeps its `\<name>` escape. Unknown symbols pass
+  through.
+- `pretty_unicode_indexed(symbols)` — the same rendering of `''.join(symbols)` plus where
+  each symbol begins in it; `FileIndex` takes its unicode offsets from this.
 - `ascii_of_unicode(src)` — the inverse. **Order matters**: restore sub/superscripts first,
   then reverse-map symbols.
-- If `isabelle` is not on `PATH`, the tables come out empty and conversions **silently no-op**.
+- If no symbol table can be located or it loads empty, the module raises `RuntimeError`
+  rather than converting nothing silently.
 
 ### `tokens.py`
 
