@@ -198,7 +198,7 @@ and definition tools take `{file, line, symbol}` with no column at all. An earli
 said the inbound direction was the worse of the two; there is no inbound direction in
 use.
 
-### 1b. A second divergence class, recorded and not fixed
+### 1b. A second divergence class, fixed on 2026-09-22
 
 `pretty_unicode`'s fold pass is `re.sub('\u21e9.|\u21e7.|\u2759.', ...)`. The `.` is *any* character,
 and a second marker is a character, so two markers in a row match as a pair, fail to
@@ -228,8 +228,16 @@ if (is_control(sym)) { output_symbol(ctrl); ctrl = sym } // displaced control is
 
 So Isabelle gives `\u21e9` + `\u2081` where we give `\u21e9\u21e91`.
 
-**This is recorded, not fixed, and it does not decide the shape of the fix.** Three
-reasons, in order of weight. It is **lossless**: measured, `pretty_unicode` then
+**Fixed on 2026-09-22**, in the commit after the review, on the review's proposal and the
+author's grant ("赞同你的建议"): the fold pattern is a marker followed by a non-marker (and
+never a line break), so of two adjacent markers the later one applies and the displaced
+one is emitted literally, as Isabelle renders them — `x\<^sub>\<^sub>1` renders `x⇩₁`.
+Measured before the change: no rendering in 14,500 sources of this tree and 9,913
+checked-in `.unicode.thy` mirrors contains two adjacent markers, so nothing observable
+moved, and §6 item 3's byte-identity holds with that one stated exception. The fix is a
+two-character change inside Option D; the 2026-08-18 belief that it needed Option C was
+what kept it out. **Until then it was recorded, not fixed**, for three reasons that were
+sound at the time, in order of weight. It is **lossless**: measured, `pretty_unicode` then
 `ascii_of_unicode` returns `x\\<^sub>\\<^sub>1` exactly, and the rendering is a fixed
 point — nothing is destroyed, one fold is merely not applied. It occurs **nowhere**: a
 tree-wide search for two adjacent markers over every `.thy` and `.ML` returns 0 files.
@@ -427,9 +435,10 @@ what it should have done.
 forever. No guard and no benchmark, because nothing about the scanning changes. The
 duplication is removed as completely as by Option C.
 
-*Against*: it preserves §1b's difference from Isabelle. §1b explains why that is
-acceptable — lossless, round-trips exactly, zero instances — and §5 explains why an
-earlier draft was wrong to reject Option D over it.
+*Against*: nothing, since 2026-09-22. Until then it preserved §1b's difference from
+Isabelle, which §1b explained was acceptable — lossless, round-trips exactly, zero
+instances — and §5 explains why an earlier draft was wrong to reject Option D over it;
+in the end §1b's fix was a two-character change to the fold pattern inside Option D.
 
 *The interior-offset convention*, internal to `pretty_unicode_indexed` (as ruled on
 2026-09-22, replacing a three-case rule that told a rewritten match from an untouched one
@@ -500,11 +509,12 @@ it and must be stated, not discovered.
    structure this fix exists to abolish.
 
 3. **No behaviour change, and that is checkable.** `pretty_unicode`'s output must be
-   byte-identical before and after, on the corpus and on §6.6's hand cases. §1b's fold
-   and the existing CR handling both stay exactly as they are (`pretty_unicode` still
-   takes the raw string; only the indexed view takes `symbol_explode`'s output); if
-   either moves, the recording step has been written as a reimplementation and step 1
-   is not done.
+   byte-identical before and after, on the corpus and on §6.6's hand cases — with one
+   exception stated and measured since 2026-09-22: two adjacent fold markers render as
+   Isabelle does (§1b), a construction the corpus does not contain. The existing CR
+   handling stays exactly as it is (`pretty_unicode` still takes the raw string; only
+   the indexed view takes `symbol_explode`'s output); if it moves, the recording step
+   has been written as a reimplementation and step 1 is not done.
 
 4. **Mutants that actually exercise the new test.** `self_check()` currently hardcodes
    its target as `unicode.py` and needs a per-mutant file field, because the mutants
@@ -705,8 +715,9 @@ not what this is, but as a check that the recording step was not accidentally wr
 one — and `pretty_unicode(''.join(symbols)) == pretty_unicode_indexed(symbols)[0]`
 holds over the same inputs.
 
-**2. Nothing to decide about behaviour.** Option D changes none. §1b's fold and the
-existing CR handling stay as they are. The indexed view takes the symbol sequence, so
+**2. Nothing to decide about behaviour.** Option D changes none; the one behaviour change
+in this work, §1b's fold, is a separate commit the author granted. The existing CR
+handling stays as it is. The indexed view takes the symbol sequence, so
 the line-ending question of the 2026-08-18 draft cannot arise; there is nothing to
 remember here.
 

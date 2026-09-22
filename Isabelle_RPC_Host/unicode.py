@@ -262,10 +262,11 @@ def symbol_explode(text: str) -> list[str]:
 # it falls, so one malformed escape swallows the next valid one -- `\<alpha \<beta>`
 # converts nothing. Identical on well-formed input.
 _ESCAPE = re.compile(r"\\<\^?[A-Za-z][A-Za-z0-9_']*>")
-# A sub/superscript or bold marker (the fold table's own) and the character after it:
-# the fold's candidates.
+# A sub/superscript or bold marker (the fold table's own) and the character after it,
+# unless that is another marker or a line break: of two adjacent markers the later one
+# applies and the displaced one is emitted literally, as Isabelle renders them.
 _MARKERS = re.escape(''.join(sorted({pair[0] for pair in SUBSUP_TRANS_TABLE})))
-_FOLD = re.compile(f"[{_MARKERS}].")
+_FOLD = re.compile(f"[{_MARKERS}][^{_MARKERS}\n]")
 
 # One match a replacement rewrote: its input span and its output length.
 _Record = namedtuple('_Record', 'start end out_len')

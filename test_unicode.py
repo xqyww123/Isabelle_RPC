@@ -130,8 +130,12 @@ INDEXED_CASES = [
     ("bold fold",                       r"\<^bold>x",               "𝐱",           [0, 0, 1]),
     ("bold, no fold available",         r"\<^bold>1",               "❙1",          [0, 1, 2]),
     ("malformed escape",                r"\<alpha \<alpha>",        "\\<alpha α",  [0, 7, 8, 9]),
-    ("two adjacent markers",            r"x\<^sub>\<^sub>1",        "x⇩⇩1",        [0, 1, 2, 3, 4]),
+    # Of adjacent markers the later one applies, the displaced one is emitted literally.
+    ("two adjacent markers",            r"x\<^sub>\<^sub>1",        "x⇩₁",         [0, 1, 2, 2, 3]),
     ("three adjacent markers",          r"x\<^sub>\<^sub>\<^sub>1", "x⇩⇩₁",        [0, 1, 2, 3, 3, 4]),
+    ("adjacent markers of two kinds",   "x⇩⇧1",                     "x⇩¹",         [0, 1, 2, 2, 3]),
+    ("bold then subscript marker",      "x❙⇩a",                     "x❙ₐ",         [0, 1, 2, 2, 3]),
+    ("marker before a line break",      "x⇩\ny",                    "x⇩\ny",       [0, 1, 2, 3, 4]),
     ("CRLF",                            "a\r\nb",                   "a\nb",        [0, 1, 2, 3]),
 ]
 
