@@ -51,9 +51,11 @@ proposals put to him ("赞同你的建议", 2026-09-22): the recording keeps onl
 replacement rewrote, so the convention of §4 D has two cases instead of three; and §1b is
 fixed in a follow-up commit — the fold pattern becomes a marker followed by a non-marker,
 Isabelle's own rule, with no rendering in 14,500 sources and 9,913 checked-in mirrors
-changing. The judge's conditions and the 31 items he assigned to the drafter are applied
-in the commits that follow `3360162`; the 13 he dismissed are not to be re-raised. The
-review's own record says which is which.
+changing. The judge's conditions and 30 of the 31 items he assigned to the drafter are
+applied in the four commits that follow `3360162` (`615cb01` the conditions and the
+shape; `601df27` the derived restore table; `6c1ee40` `symbol_explode` moved beside the
+escape pattern; `2ad1f09` §1b); the 31st, C22, is deferred to §7; the 13 he dismissed are
+not to be re-raised. The review's own record says which is which.
 
 Everything below this paragraph, from §0 on, describes the tree as it stood before the
 fix (`f9e139c`): its line numbers and names — `FileIndex.__init__` at `position.py:82-154`,
@@ -661,6 +663,13 @@ repository) uses U+3010/U+3011 as an in-band marker, and `\<lblbrace>`/`\<rblbra
 (`contrib/phi-system/symbols:20-21`) now map to them. Latent: the ML
 side works on ASCII before Python sees it. Needs a different marker eventually, or a
 documented reason it cannot collide.
+
+**`get_LETTER_SYMBOLS()` has no test against `Pure/General/symbol.ML`'s letter list**
+(review item C22 of 2026-09-22, pre-existing, low priority): the comment in `_load_table`
+argues that the union of the `letter` and `greek` groups over-approximates
+`Symbol.is_letter_symbol`, and a tightening of that union would pass the suite. The
+review's fix — parse `letter_symbols` out of the ML file and assert each is in the set,
+with a mutant — is deferred by the drafter; do it with the other items here.
 
 **Latent parsing gaps in `_load_symbols`**, all zero-instance on this machine: a symbol
 redefined across files leaves a stale `REVERSE_SYMBOLS` entry; only the first `group:`
