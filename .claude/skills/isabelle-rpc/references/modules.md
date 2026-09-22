@@ -381,7 +381,8 @@ Only `IsabellePosition` and `Position` are re-exported from the package; import 
 Isabelle symbol ↔ Unicode. The table is the one Isabelle presents: the files
 `ISABELLE_SYMBOLS` names (the distribution's `etc/symbols`, the user overlay, and one entry
 per component that declares symbols), read from the environment first and from
-`isabelle getenv` only when the environment has no value; cached once per process as one
+`isabelle getenv` only when the environment has no value, and from `$ISABELLE_HOME/etc/symbols`
+plus the user overlay only when neither names anything; cached once per process as one
 record that `get_SYMBOLS()`, `get_REVERSE_SYMBOLS()`, `get_LETTER_SYMBOLS()`,
 `get_SYMBOL_FILES()` and the 4-tuple `get_SYMBOLS_AND_REVERSED()` project.
 

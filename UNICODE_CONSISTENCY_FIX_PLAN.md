@@ -33,8 +33,9 @@ with the indexed view on all 4,506; `position.py` references none of `SYMBOLS`,
 `SUBSUP_TRANS_TABLE` or a fold condition; the suite's seeded cases cover the twelve
 rendering classes of §6.6 and its phi-system sweep passes on 68,148 lines with its three
 §6.5 counts — private-use escapes, folds, symbols rendered differently — all positive;
-run against the parent commit's `FileIndex`, that suite fails (three seeded cases, 107 of
-the 160 files and 7,464 of the 68,148 lines); `--self-check` kills all nine mutants,
+run against the parent commit's `FileIndex`, that suite fails (three seeded cases and,
+under its one sweep label, 7,571 of the 68,148 lines — 107 of those entries being whole
+files, the two populations not yet counted apart); `--self-check` kills all nine mutants,
 including `FileIndex` restored to its own computation and to the bare table lookup; the
 phi-system sweep runs outside the mutant copies, so no kill depends on which corpora a
 machine has (one mutant, the distribution-only symbol file, is killed by the file-list
@@ -71,12 +72,21 @@ items put to him: the six coordinate conversions stay, all of them — "强烈�
 的为未来留存的接口！这是库函数的最终产品！不是内部代码！" — so the two without a caller are
 tested rather than deleted; and a position whose offset is below 1, Isabelle's "unknown",
 gets no column instead of an end-of-file answer ("赞同"). Applied in the commits that
-follow `7810570`, with the plan's figures as they stand today: `--self-check` kills all 23
-mutants; against the parent commit's `FileIndex` the suite fails two seeded cases (both
+follow `7810570`, then re-checked once more by one read-only agent, whose findings — the
+count report had let a machine with the corpus but no registered component go green, the
+very configuration the two judges had ruled must stay red (C18, R14); two figures of the
+dated record above and one count of §1b did not reproduce; the conversion conjuncts were
+pinned only jointly — are applied in the commit after `3c69532`. The figures as they stand
+today: `--self-check` kills all 30 mutants, one of them on each conversion's own line;
+against the parent commit's `FileIndex` the suite fails two seeded cases (both
 private-use; the adjacent-marker case changed its expectation with §1b), the seed-corpus
-sweep, 107 of the 160 phi-system files and 7,464 of their 68,148 lines; the seed corpus
-is swept inside every mutant copy, and it alone kills the mutant that makes the unicode
-line start the ASCII one.
+sweep, 107 of the 160 phi-system files and 7,464 of their 68,148 lines; a corpus that was
+swept must have shown every §6.5 class or the run fails, a corpus that was not there says
+NO DATA; the seed corpus is swept inside every mutant copy, and it alone kills the mutant
+that makes the unicode line start the ASCII one. Two items done here were older than this
+work and are recorded as such: the `Position` factories are classmethods, so a subclass
+gets its own class back (R28); and the accessor checks pin that the letter class is the
+loaded files' `letter` and `greek` groups, which does not close C22 (§7).
 
 Everything below this paragraph, from §0 on, describes the tree as it stood before the
 fix (`f9e139c`): its line numbers and names — `FileIndex.__init__` at `position.py:82-154`,
@@ -258,8 +268,9 @@ never a line break), so of two adjacent markers the later one applies and the di
 one is emitted literally, as Isabelle renders them — `x\<^sub>\<^sub>1` renders `x⇩₁`.
 Measured on 2026-09-22 over the `.thy` and `.ML` files under `contrib/phi-system` (486),
 `contrib/Isabelle2025-2/src` (3,768) and `contrib/afp-2026-05-13/thys` (19,420), the
-`.unicode.thy` mirrors among them, and over the 436 checked-in mirrors elsewhere under
-`contrib`: no rendering contains two adjacent markers, so nothing observable moved, and
+`.unicode.thy` mirrors among them, and over the 100 `.unicode.thy` mirrors elsewhere under
+`contrib` (outside every directory named `Isabelle2025-2`, `Isabelle2024*` or `afp-*`):
+no rendering contains two adjacent markers, so nothing observable moved, and
 §6 item 3's byte-identity holds with that one stated exception. The fix is one change to
 the fold pattern inside Option D — its `.` becomes `[^{_MARKERS}\n]`; the 2026-08-18
 belief that it needed Option C was what kept it out. **Until then it was recorded, not fixed**, for three reasons that were
