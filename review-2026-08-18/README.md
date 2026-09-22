@@ -1,8 +1,10 @@
 # Evidence behind UNICODE_CONSISTENCY_FIX_PLAN.md
 
 Scripts two reviewers wrote on 2026-08-18 while checking the plan. Kept because every
-figure the plan quotes came from one of them, and because `remedy/sweep.py` carries the
-symbol-driven prototype the fix is to be built from.
+figure the plan quotes came from one of them. (`remedy/sweep.py` carries the
+symbol-driven prototype of Option C; the plan's §4 rejects that shape, so it is evidence,
+not the code to build from. The fix records positions inside the existing substitution;
+`diagnosis/ref.py` is the instrument closest to it.)
 
 They hardcode `/home/qiyuan/Current/MLML/contrib/Isabelle_RPC` on `sys.path`; fix that
 before running them elsewhere. They are throwaway review code, not maintained.
@@ -19,7 +21,7 @@ before running them elsewhere. They are throwaway review code, not maintained.
 
 ## remedy/ — is the proposed cure right
 
-- `sweep.py` — **the symbol-driven prototype**, and the 4,424-file diff against
+- `sweep.py` — **the symbol-driven prototype of Option C** (rejected), and the 4,424-file diff against
   `pretty_unicode` that found 0 content differences. `phi.out`, `hol.out`, `afp.out` are
   its per-corpus results.
 - `exp1.py` — the adjacent-marker behaviour, and its parity.
