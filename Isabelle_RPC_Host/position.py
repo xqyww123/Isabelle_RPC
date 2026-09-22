@@ -70,6 +70,16 @@ class FileIndex:
         sym_idx = bisect.bisect_right(self.sym_ascii_offsets, ascii_start) - 1
         return self.sym_unicode_offsets[sym_idx]
 
+    # A column is 1-based and counted from its line's start; these two are the only
+    # place that arithmetic is written.
+    @staticmethod
+    def _column(offset: int, line_start: int) -> int:
+        return offset - line_start + 1
+
+    @staticmethod
+    def _offset(line_start: int, column: int) -> int:
+        return line_start + column - 1
+
     # --- 6 conversions ---
 
     def isabelle_to_ascii(self, raw_offset: int) -> tuple[int, int]:
@@ -77,56 +87,43 @@ class FileIndex:
         idx = min(raw_offset - 1, self.num_symbols)
         ascii_off = self.sym_ascii_offsets[idx]
         line = self._line_of_ascii(ascii_off)
-        col = ascii_off - self.ascii_line_offsets[line - 1] + 1
-        return (line, col)
+        return (line, self._column(ascii_off, self.ascii_line_offsets[line - 1]))
 
     def isabelle_to_unicode(self, raw_offset: int) -> tuple[int, int]:
         """Symbol offset (1-based) → (line, column) in rendered Unicode."""
         idx = min(raw_offset - 1, self.num_symbols)
-        ascii_off = self.sym_ascii_offsets[idx]
-        line = self._line_of_ascii(ascii_off)
-        unicode_off = self.sym_unicode_offsets[idx]
-        line_start_uni = self._line_start_unicode(line)
-        col = unicode_off - line_start_uni + 1
-        return (line, col)
+        line = self._line_of_ascii(self.sym_ascii_offsets[idx])
+        return (line, self._column(self.sym_unicode_offsets[idx], self._line_start_unicode(line)))
 
     def ascii_to_isabelle(self, line: int, column: int) -> int:
         """(line, column) in ASCII source → symbol offset (1-based)."""
         if line < 1 or line > self.num_lines:
             return 0
-        ascii_off = self.ascii_line_offsets[line - 1] + column - 1
+        ascii_off = self._offset(self.ascii_line_offsets[line - 1], column)
         return bisect.bisect_right(self.sym_ascii_offsets, ascii_off)
 
     def unicode_to_isabelle(self, line: int, column: int) -> int:
         """(line, column) in rendered Unicode → symbol offset (1-based)."""
         if line < 1 or line > self.num_lines:
             return 0
-        line_start_uni = self._line_start_unicode(line)
-        unicode_off = line_start_uni + column - 1
+        unicode_off = self._offset(self._line_start_unicode(line), column)
         return bisect.bisect_right(self.sym_unicode_offsets, unicode_off)
 
     def ascii_to_unicode(self, line: int, column: int) -> tuple[int, int]:
         """(line, column) in ASCII → (line, column) in Unicode."""
         if line < 1 or line > self.num_lines:
             return (line, column)
-        ascii_off = self.ascii_line_offsets[line - 1] + column - 1
+        ascii_off = self._offset(self.ascii_line_offsets[line - 1], column)
         sym_idx = bisect.bisect_right(self.sym_ascii_offsets, ascii_off) - 1
-        unicode_off = self.sym_unicode_offsets[sym_idx]
-        line_start_uni = self._line_start_unicode(line)
-        col_u = unicode_off - line_start_uni + 1
-        return (line, col_u)
+        return (line, self._column(self.sym_unicode_offsets[sym_idx], self._line_start_unicode(line)))
 
     def unicode_to_ascii(self, line: int, column: int) -> tuple[int, int]:
         """(line, column) in Unicode → (line, column) in ASCII."""
         if line < 1 or line > self.num_lines:
             return (line, column)
-        line_start_uni = self._line_start_unicode(line)
-        unicode_off = line_start_uni + column - 1
+        unicode_off = self._offset(self._line_start_unicode(line), column)
         sym_idx = bisect.bisect_right(self.sym_unicode_offsets, unicode_off) - 1
-        ascii_off = self.sym_ascii_offsets[sym_idx]
-        line_start_ascii = self.ascii_line_offsets[line - 1]
-        col_a = ascii_off - line_start_ascii + 1
-        return (line, col_a)
+        return (line, self._column(self.sym_ascii_offsets[sym_idx], self.ascii_line_offsets[line - 1]))
 
     # --- symbol lookup on a line (for symbol-based, column-free addressing) ---
 
@@ -273,38 +270,42 @@ class IsabellePosition:
             return NotImplemented
         return (self.file, self.line, self.raw_offset) >= (other.file, other.line, other.raw_offset)
 
-    @staticmethod
-    def from_s(position_str):
+    @classmethod
+    def from_s(cls, position_str):
         parts = position_str.split(':')
         match parts:
             case [file, line, raw_offset, _]:
-                return IsabellePosition(int(line), int(raw_offset), file)
+                return cls(int(line), int(raw_offset), file)
             case [file, line, raw_offset]:
-                return IsabellePosition(int(line), int(raw_offset), file)
+                return cls(int(line), int(raw_offset), file)
             case [file, line]:
-                return IsabellePosition(int(line), 0, file)
+                return cls(int(line), 0, file)
             case [file]:
-                return IsabellePosition(0, 0, file)
+                return cls(0, 0, file)
             case _:
                 raise ValueError("The string must be in the format: file:line:raw_offset")
 
-    @staticmethod
-    def unpack(data):
+    @classmethod
+    def unpack(cls, data):
         line, offset, end_offset, tup3 = data
         label, file, id = tup3
-        return IsabellePosition(line, offset, file)
+        return cls(line, offset, file)
 
     def pack(self):
         return (self.line, self.raw_offset, 0, (b'', self.file, 0))
 
+    # A raw offset below 1 is Isabelle's "unknown": the answer keeps the line and has
+    # no column, which `Position.__str__` prints as file:line.
     def to_ascii_position(self) -> "AsciiPosition":
-        idx = get_file_index(self.file)
-        line, col = idx.isabelle_to_ascii(self.raw_offset)
+        if self.raw_offset < 1:
+            return AsciiPosition(self.line, 0, self.file)
+        line, col = get_file_index(self.file).isabelle_to_ascii(self.raw_offset)
         return AsciiPosition(line, col, self.file)
 
     def to_unicode_position(self) -> "UnicodePosition":
-        idx = get_file_index(self.file)
-        line, col = idx.isabelle_to_unicode(self.raw_offset)
+        if self.raw_offset < 1:
+            return UnicodePosition(self.line, 0, self.file)
+        line, col = get_file_index(self.file).isabelle_to_unicode(self.raw_offset)
         return UnicodePosition(line, col, self.file)
 
     # backward compat
@@ -367,18 +368,18 @@ class Position:
             return NotImplemented
         return (self.file, self.line, self.column) >= (other.file, other.line, other.column)
 
-    @staticmethod
-    def from_s(position_str):
+    @classmethod
+    def from_s(cls, position_str):
         parts = position_str.split(':')
         match parts:
             case [file, line, column, _]:
-                return Position(int(line), int(column), file)
+                return cls(int(line), int(column), file)
             case [file, line, column]:
-                return Position(int(line), int(column), file)
+                return cls(int(line), int(column), file)
             case [file, line]:
-                return Position(int(line), 0, file)
+                return cls(int(line), 0, file)
             case [file]:
-                return Position(0, 0, file)
+                return cls(0, 0, file)
             case _:
                 raise ValueError("The string must be in the format: file:line:column")
 
@@ -389,11 +390,11 @@ class Position:
         base_ofs = sum(len(line) for line in lines[:self.line-1])
         return base_ofs + self.column - 1
 
-    @staticmethod
-    def unpack(data):
+    @classmethod
+    def unpack(cls, data):
         line, column, end_offset, tup3 = data
         label, file, id = tup3
-        return Position(line, column, file)
+        return cls(line, column, file)
 
     def pack(self):
         return (self.line, self.column, 0, (b'', self.file, 0))

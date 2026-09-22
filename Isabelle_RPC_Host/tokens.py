@@ -11,7 +11,10 @@ Reuses :func:`Isabelle_RPC_Host.unicode.symbol_explode` and
 
 from .unicode import ascii_of_unicode, symbol_explode
 
-# Explicit enumeration from symbol.ML lines 246-386.
+# Explicit enumeration from symbol.ML lines 246-386. Not unicode.get_LETTER_SYMBOLS():
+# that set is the symbol files' `letter` and `greek` groups, so it is wider and grows
+# with whatever components are registered, while the lexer's letter class is fixed in
+# the ML file.
 # NOTE: \<lambda> is intentionally excluded (it is an operator, not a letter).
 _LETTER_SYMBOLS: frozenset[str] = frozenset([
     # Latin variants \<A>..\<Z>, \<a>..\<z>

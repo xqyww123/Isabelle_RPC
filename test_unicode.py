@@ -29,10 +29,12 @@ from itertools import accumulate
 from Isabelle_RPC_Host import unicode as unicode_module
 from Isabelle_RPC_Host.unicode import (
     pretty_unicode, pretty_unicode_indexed, symbol_explode, ascii_of_unicode,
-    is_private_use, get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE,
-    _load_symbols)
+    is_private_use, get_SYMBOLS, get_REVERSE_SYMBOLS, get_LETTER_SYMBOLS,
+    get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE, _load_symbols,
+    _invert_fold)
 from Isabelle_RPC_Host.paths import resolve_isabelle_path_list
-from Isabelle_RPC_Host.position import FileIndex
+from Isabelle_RPC_Host.position import (
+    FileIndex, IsabellePosition, AsciiPosition, UnicodePosition, _file_index_cache)
 
 FAILURES = []
 EMPTY = []
@@ -56,6 +58,16 @@ def check_all(label, bad, total):
     else:
         print(f"  FAIL {label}: {len(bad)} of {total} — e.g. {bad[:5]}")
         FAILURES.append(label)
+
+
+def check_count(label, n):
+    """A population size. Zero is not a failure of the code under test: it is a sweep
+    that had nothing of this kind to look at, and says so."""
+    if n > 0:
+        print(f"  ok   {label}: {n}")
+    else:
+        print(f"  ----  {label}: NO DATA on this machine, nothing was checked")
+        EMPTY.append(label)
 
 
 # U+DFFF is written as a lone surrogate on purpose: `ord` accepts it, so the lower
@@ -85,16 +97,30 @@ ESCAPE_SCANNING = [
     (r"\<>", r"\<>"),                     # nor be empty
 ]
 
+# The other half of the pair `symbol_explode` and `_ESCAPE` make: the inputs that pin
+# how `symbol_explode` bounds a name (a superset of `_ESCAPE`'s rule; nothing else in
+# this file separates the two scans).
+SYMBOL_SCANNING = [
+    (r"\<1abc>", [r"\<", "1", "a", "b", "c", ">"]),            # a name may not begin with a digit
+    (r"\<ab-c>", [r"\<ab", "-", "c", ">"]),                    # nor run through a non-letdig
+    ("\\<\u00e9x>", [r"\<", "\u00e9", "x", ">"]),                   # nor begin with a non-ASCII letter
+    (r"\<alpha \<beta>", [r"\<alpha", " ", r"\<beta>"]),      # a missing `>` is tolerated
+]
+
 # A table of our own, so that every rendering class below is exercised on every
 # machine, whatever components are registered: two ordinary symbols (one named with a
-# `_` and a digit), the markers, and a synthetic private-use symbol at U+E000.
+# `_` and a digit), the three markers of the fold table, and a synthetic private-use
+# symbol at U+E000.
 SEED_SYMBOLS = """\\<alpha>   code: 0x0003b1  group: greek
 \\<beta_2>  code: 0x0003b2  group: greek
 \\<^sub>    code: 0x0021e9  group: control
+\\<^sup>    code: 0x0021e7  group: control
 \\<^bold>   code: 0x002759  group: control
 \\<pua>     code: 0x00e000  font: Synthetic  group: letter
 """
 OTHER_SEED = "\\<gamma>   code: 0x0003b3  group: greek\n"
+# `\<alpha>` again at another code point and in another group: the later file wins.
+OVERLAY_SEED = "\\<alpha>   code: 0x0003b3  group: letter\n"
 
 
 def seed_file(text=SEED_SYMBOLS):
@@ -116,7 +142,7 @@ def seeded_table():
         os.unlink(path)
 
 
-# One case per rendering class: the source, its rendering, and where each of its
+# Cases for every rendering class: the source, its rendering, and where each of its
 # symbols begins in the rendering (plus the sentinel). Under the seed table.
 INDEXED_CASES = [
     ("private-use symbol",              r"a\<pua>b",                r"a\<pua>b",   [0, 1, 7, 8]),
@@ -139,8 +165,9 @@ INDEXED_CASES = [
     ("CRLF",                            "a\r\nb",                   "a\nb",        [0, 1, 2, 3]),
 ]
 
-# A corpus in the seed table's alphabet, swept on every machine: every rendering class
-# above in running text, a CRLF line, an empty line and a plain ASCII line.
+# Running text in the seed table's alphabet, swept on every machine so that no sweep is
+# empty and section 6.5's three counts are met; every marker is written as an escape,
+# and the classes that need a raw marker are the seeded cases' business (sweep_index).
 SEED_CORPUS = (
     "theory Seed\n"
     "  lemma \\<alpha>\\<^sub>1 = x\\<^sub>i y\\<^sub>i\n"
@@ -154,7 +181,7 @@ SEED_CORPUS = (
 
 
 def check_indexed_cases():
-    print("== the indexed view and FileIndex, one case per rendering class, seed table ==")
+    print("== the indexed view and FileIndex, cases for every rendering class, seed table ==")
     with seeded_table():
         for label, src, rendering, offsets in INDEXED_CASES:
             symbols = symbol_explode(src)
@@ -165,6 +192,19 @@ def check_indexed_cases():
             check(f"{label}: FileIndex takes the offsets", list(FileIndex(src).sym_unicode_offsets), offsets)
         check("CRLF: pretty_unicode keeps a raw string's CR", pretty_unicode("a\r\nb"), "a\r\nb")
         check("CRLF: ascii_line is the folded line body", FileIndex("a\r\nb\r\nc").ascii_line(2), "b")
+
+        print("== the table's accessors are projections of one record, seed table ==")
+        symbols, reverse, trans, letters = get_SYMBOLS_AND_REVERSED()
+        check("symbols", symbols is get_SYMBOLS(), True)
+        check("reverse", reverse is get_REVERSE_SYMBOLS(), True)
+        check("letters", letters is get_LETTER_SYMBOLS(), True)
+        check("the translation table", "\u03b1".translate(trans), r"\<alpha>")
+        check("the letter class is the letter and greek groups",
+              sorted(letters), [r"\<alpha>", r"\<beta_2>", r"\<pua>"])
+
+    print("== symbol_explode bounds a name by Isabelle's rule ==")
+    for src, expected in SYMBOL_SCANNING:
+        check(repr(src), symbol_explode(src), expected)
 
     print("== _load_symbols does not share state between calls ==")
     first_file, second_file = seed_file(), seed_file(OTHER_SEED)
@@ -177,10 +217,47 @@ def check_indexed_cases():
         os.unlink(first_file)
         os.unlink(second_file)
 
+    print("== a later symbol file overrides an earlier one ==")
+    base, overlay = seed_file(), seed_file(OVERLAY_SEED)
+    try:
+        layered = unicode_module._load_table([base, overlay])
+        check("the later file wins", layered.symbols[r"\<alpha>"], "\u03b3")
+        check("the earlier file's other symbols survive", r"\<pua>" in layered.symbols, True)
+        check("the later file's group wins", r"\<alpha>" in layered.letters, True)
+    finally:
+        os.unlink(base)
+        os.unlink(overlay)
+
+    print("== the fold's inverse ==")
+    check("a table inverts", _invert_fold({"\u21e9a": "\u2090"}), {"\u2090": "\u21e9a"})
+    try:
+        _invert_fold({"\u21e9a": "\u2090", "\u21e7a": "\u2090"})
+        check("a collision is refused", "no error", "RuntimeError")
+    except RuntimeError:
+        check("a collision is refused", "RuntimeError", "RuntimeError")
+
+    print("== positions ==")
+    check("an empty line's end offset is its own symbol",
+          FileIndex("a\n\nb").end_of_line_offset(2), 3)
+    check("the subclass factories return their own class",
+          [type(AsciiPosition.from_s("f:1:2")), type(UnicodePosition.unpack((1, 2, 0, (b"", "f", 0))))],
+          [AsciiPosition, UnicodePosition])
+    # An unknown offset (Isabelle's 0) keeps the line and gets no column, without
+    # reading the file: the index cache stays untouched.
+    with tempfile.NamedTemporaryFile('w', suffix='.thy', delete=False, encoding='utf-8') as f:
+        f.write("a\nb\nc\n")
+    try:
+        unknown = IsabellePosition(2, 0, f.name)
+        check("an unknown offset has no column", str(unknown.to_unicode_position()), f"{f.name}:2")
+        check("and asks for no index", os.path.realpath(f.name) in _file_index_cache, False)
+    finally:
+        os.unlink(f.name)
+
 
 def theory_files(root):
     """(path, text) for every `.thy` under `root` but the `.unicode.thy` mirrors."""
-    for d, _, fs in os.walk(root):
+    for d, dirs, fs in os.walk(root):
+        dirs.sort()          # the offenders a failing sweep names come out in one order
         for f in sorted(fs):
             if f.endswith('.thy') and not f.endswith('.unicode.thy'):
                 path = os.path.join(d, f)
@@ -189,21 +266,17 @@ def theory_files(root):
 
 
 def sweep_index(texts):
-    """The plan's invariant over every (name, text) in `texts`.
+    """What the sweep establishes over every (name, text) in `texts`, per file and per
+    line; each property is named, and a failing line says which of them broke.
 
-    Per file: FileIndex's ASCII sentinel is the source's length, its lines reassemble the
-    source, and its unicode sentinel is the rendering's length. Per line: FileIndex's
-    unicode offsets are the indexed view's (true by construction; the guard against a
-    FileIndex deciding for itself), the view's sentinel is its rendering's length,
-    pretty_unicode of the line is that rendering, offsets never decrease, every `_ESCAPE`
-    match is exactly one symbol, each symbol away from a fold owns exactly its own
-    rendering in the line's, and the conversions place every symbol of the line where
-    the line's own index says. Returns (file offenders, files), (line offenders, lines),
-    the number of slices compared, and §6.5's three counts — private-use escapes, folds,
-    symbols rendered differently — because a sweep that met none of one of them proves
-    nothing about it. §6.6's twelve rendering classes are the seeded cases' business; no
-    corpus supplies them all."""
-    symbols_table = get_SYMBOLS_AND_REVERSED()[0]
+    The FileIndex conjunct is true by construction (FileIndex stores what the indexed
+    view returns) and is the guard against a FileIndex deciding for itself; the others
+    are the sweep's content. Returns (file offenders, files), (line offenders, lines),
+    the number of slices compared, and section 6.5's three counts — private-use
+    escapes, folds, symbols rendered differently — because a sweep that met none of one
+    of them proves nothing about it. Section 6.6's rendering classes are the seeded
+    cases' business; no corpus supplies them all."""
+    symbols_table = get_SYMBOLS()
     private = {n for n, c in symbols_table.items() if is_private_use(c)}
     markers = {pair[0] for pair in SUBSUP_TRANS_TABLE}
     folded = set(SUBSUP_TRANS_TABLE.values())
@@ -213,10 +286,16 @@ def sweep_index(texts):
         files += 1
         whole = FileIndex(text)
         body = whole.source.split('\n')
-        if not (whole.sym_ascii_offsets[-1] == len(whole.source)
-                and whole.sym_unicode_offsets[-1] == len(pretty_unicode(whole.source))
-                and [whole.ascii_line(no) for no in range(1, whole.num_lines + 1)] == body):
-            file_offenders.append(name)
+        held = [
+            ("the ASCII sentinel is the source's length",
+             whole.sym_ascii_offsets[-1] == len(whole.source)),
+            ("the unicode sentinel is the rendering's length",
+             whole.sym_unicode_offsets[-1] == len(pretty_unicode(whole.source))),
+            ("the lines reassemble the source",
+             [whole.ascii_line(no) for no in range(1, whole.num_lines + 1)] == body),
+        ]
+        if broke := [what for what, holds in held if not holds]:
+            file_offenders.append(f"{name} ({'; '.join(broke)})")
         for no, line in enumerate(body, 1):
             lines += 1
             idx = FileIndex(line)
@@ -226,22 +305,36 @@ def sweep_index(texts):
             at = {s: i for i, s in enumerate(starts)}
             first = whole.ascii_to_isabelle(no, 1)
             renders = [pretty_unicode(s) for s in symbols]
-            ok = (list(idx.sym_unicode_offsets) == offsets
-                  and offsets[-1] == len(rendered)
-                  and rendered == pretty_unicode(idx.source)
-                  and all(a <= b for a, b in zip(offsets, offsets[1:]))
-                  and all(m.start() in at and starts[at[m.start()] + 1] == m.end()
-                          for m in unicode_module._ESCAPE.finditer(idx.source))
-                  and all(whole.isabelle_to_unicode(first + j) == (no, offsets[j] + 1)
-                          and whole.ascii_to_unicode(no, starts[j] + 1) == (no, offsets[j] + 1)
-                          for j in range(len(symbols))))
-            for j, own in enumerate(renders):
-                if own in markers or (j > 0 and renders[j - 1] in markers):
-                    continue
-                slices += 1
-                ok = ok and rendered[offsets[j]:offsets[j + 1]] == own
-            if not ok:
-                line_offenders.append(f"{name}:{no}")
+            own = [j for j in range(len(symbols))
+                   if renders[j] not in markers and (j == 0 or renders[j - 1] not in markers)]
+            slices += len(own)
+            held = [
+                ("FileIndex stores the indexed view's offsets",
+                 list(idx.sym_unicode_offsets) == offsets),
+                ("the view's sentinel is its rendering's length", offsets[-1] == len(rendered)),
+                ("pretty_unicode is the same view", rendered == pretty_unicode(idx.source)),
+                ("offsets never decrease", all(a <= b for a, b in zip(offsets, offsets[1:]))),
+                ("every _ESCAPE match is exactly one symbol",
+                 all(m.start() in at and starts[at[m.start()] + 1] == m.end()
+                     for m in unicode_module._ESCAPE.finditer(idx.source))),
+                ("a symbol away from a fold owns its slice of the rendering",
+                 all(rendered[offsets[j]:offsets[j + 1]] == renders[j] for j in own)),
+                ("isabelle_to_unicode places every symbol",
+                 all(whole.isabelle_to_unicode(first + j) == (no, offsets[j] + 1)
+                     for j in range(len(symbols)))),
+                ("ascii_to_unicode places every symbol",
+                 all(whole.ascii_to_unicode(no, starts[j] + 1) == (no, offsets[j] + 1)
+                     for j in range(len(symbols)))),
+                ("isabelle_to_ascii places every symbol",
+                 all(whole.isabelle_to_ascii(first + j) == (no, starts[j] + 1)
+                     for j in range(len(symbols)))),
+                ("unicode_to_isabelle inverts isabelle_to_unicode",
+                 all(whole.unicode_to_isabelle(no, offsets[j] + 1) == first + j for j in own)),
+                ("unicode_to_ascii inverts ascii_to_unicode",
+                 all(whole.unicode_to_ascii(no, offsets[j] + 1) == (no, starts[j] + 1) for j in own)),
+            ]
+            if broke := [what for what, holds in held if not holds]:
+                line_offenders.append(f"{name}:{no} ({'; '.join(broke)})")
             seen["private-use escapes"] += sum(s in private for s in symbols)
             seen["folds"] += sum(ch in folded for ch in rendered)
             seen["symbols rendered differently"] += sum(
@@ -249,13 +342,17 @@ def sweep_index(texts):
     return (file_offenders, files), (line_offenders, lines), slices, seen
 
 
-def report_sweep(result, label):
+def report_sweep(result, label, complete):
+    """`complete`: the corpus is ours and must exhibit every class; a machine's own
+    corpus that supplies none of one says NO DATA for it instead."""
     (file_offenders, files), (line_offenders, lines), slices, seen = result
     check_all(f"{label}: whole files", file_offenders, files)
     check_all(f"{label}: lines", line_offenders, lines)
-    check(f"{label}: slices compared", slices > 0, True)
-    for cls, count in seen.items():
-        check(f"{label}: the sweep saw {cls}", count > 0, True)
+    for what, n in [("slices compared", slices), *((f"{cls} seen", c) for cls, c in seen.items())]:
+        if complete:
+            check(f"{label}: {what}", n > 0, True)
+        else:
+            check_count(f"{label}: {what}", n)
 
 
 def main():
@@ -305,17 +402,15 @@ def main():
 
     print("== the sweep over the seed corpus, seed table ==")
     with seeded_table():
-        report_sweep(sweep_index([("seed corpus", SEED_CORPUS)]), "seed corpus")
+        report_sweep(sweep_index([("seed corpus", SEED_CORPUS)]), "seed corpus", complete=True)
 
     # The real corpus, as corroboration of the seeded cases: phi-system, when it is
     # checked out beside this repository.
     corpus = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "phi-system")
     print("== the sweep over phi-system, the real table ==")
-    if os.path.isdir(corpus):
-        report_sweep(sweep_index(theory_files(corpus)), "phi-system")
-    else:
-        print("  ----  NO DATA: no phi-system checkout beside this repository")
-        EMPTY.extend(["phi-system: whole files", "phi-system: lines"])
+    if not os.path.isdir(corpus):
+        print("  (no phi-system checkout beside this repository)")
+    report_sweep(sweep_index(theory_files(corpus)), "phi-system", complete=False)   # an absent root walks empty
 
     # The sweeps below assert the conversion itself. Checking only its fixed points
     # is what made the previous version of this file vacuous: a bare `\<name>` maps
@@ -388,6 +483,24 @@ MUTANTS = [
     ("the sub/superscript fold is skipped", UNICODE_PY,
      "    out, folds = _sub_recording(_FOLD, _fold, mid)",
      "    out, folds = mid, []"),
+    ("the fold takes an adjacent marker as its operand", UNICODE_PY,
+     '_FOLD = re.compile(f"[{_MARKERS}][^{_MARKERS}\\n]")',
+     '_FOLD = re.compile(f"[{_MARKERS}].")'),
+    ("the fold's inverse does not check injectivity", UNICODE_PY,
+     "    if len(inverse) != len(table):",
+     "    if False:"),
+    ("the 4-tuple is projected in the wrong order", UNICODE_PY,
+     "    return (t.symbols, t.reverse, t.trans, t.letters)",
+     "    return (t.symbols, t.reverse, t.letters, t.trans)"),
+    ("the letter class drops the greek group", UNICODE_PY,
+     "    LETTER_SYMBOLS = frozenset(s for s, g in GROUPS.items() if g in ('letter', 'greek'))",
+     "    LETTER_SYMBOLS = frozenset(s for s, g in GROUPS.items() if g == 'letter')"),
+    ("an earlier symbol file overrides a later one", UNICODE_PY,
+     "    for file in symbol_files:",
+     "    for file in reversed(symbol_files):"),
+    ("a name may begin with a digit", UNICODE_PY,
+     "            if j < n and text[j].isascii() and text[j].isalpha():",
+     "            if j < n and text[j].isascii() and text[j].isalnum():"),
     ("only the distribution's symbol file is read", UNICODE_PY,
      '        symbol_files = resolve_isabelle_path_list("ISABELLE_SYMBOLS")',
      '        symbol_files = []'),
@@ -421,9 +534,19 @@ MUTANTS = [
     ("line starts are not recorded", POSITION_PY,
      "        ascii_lines.extend(sym_ascii[i + 1] for i, sym in enumerate(symbols) if sym == '\\n')",
      "        pass"),
-    ("isabelle_to_unicode measures from the ASCII line start", POSITION_PY,
+    # `_line_start_unicode` serves the four conversions that read or take a unicode column.
+    ("the unicode line start is the ASCII line start", POSITION_PY,
      "        return self.sym_unicode_offsets[sym_idx]",
      "        return self.ascii_line_offsets[line - 1]"),
+    ("a column is counted from the file start", POSITION_PY,
+     "        return offset - line_start + 1",
+     "        return offset + 1"),
+    ("a column is read from the file start", POSITION_PY,
+     "        return line_start + column - 1",
+     "        return column - 1"),
+    ("an unknown offset is looked up", POSITION_PY,
+     "        if self.raw_offset < 1:\n            return UnicodePosition(self.line, 0, self.file)\n",
+     ""),
     ("symbol_explode stops a name at '_' and digits", UNICODE_PY,
      "                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in \"_'\")):",
      "                while j < n and (text[j].isascii() and text[j].isalpha()):"),
@@ -458,7 +581,7 @@ def self_check():
     # or no verdict below means anything.
     clean = run_copy()
     if clean.returncode != 0:
-        print(clean.stdout[-3000:])
+        print((clean.stdout + clean.stderr)[-3000:])
         print("SELF-CHECK ABORTED: the unmutated copy fails, so no mutant verdict is trustworthy")
         return 1
     survived = []
@@ -466,11 +589,18 @@ def self_check():
         if not anchored_once(file, old):
             print(f"  ????  {label}: mutation site not found — this self-check is stale")
             survived.append(label)
-        elif run_copy((file, old, new)).returncode == 0:
+            continue
+        r = run_copy((file, old, new))
+        # A kill is a check that failed, not any non-zero exit: a mutant copy that
+        # cannot even run says nothing about the suite.
+        if "FAIL" in r.stdout:
+            print(f"  killed    {label}")
+        elif r.returncode == 0:
             print(f"  SURVIVED  {label}")
             survived.append(label)
         else:
-            print(f"  killed    {label}")
+            print(f"  ????  {label}: the mutant copy did not run — {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'no output'}")
+            survived.append(label)
     print()
     if survived:
         print(f"SELF-CHECK FAILED: {len(survived)} mutant(s) survived: {', '.join(survived)}")

@@ -145,7 +145,9 @@ def get_LETTER_SYMBOLS():
     return _table().letters
 
 def get_SYMBOL_FILES():
-    """The symbol files the loaded table was actually built from, in load order.
+    """The symbol files the loaded table was asked for, in load order: a declared file
+    that does not exist contributes nothing and is still listed, so the tuple names the
+    declaration, not the bytes.
 
     Provenance, for anything that ships a compiled copy of the table: the set of files
     depends on which components are registered, so two machines can load different
@@ -187,12 +189,17 @@ SUBSUP_TRANS_TABLE = {
     "❙Y": "𝐘", "❙Z": "𝐙",
 }
 
-# The fold's inverse. The forward table must stay injective, or one folded character
-# would name two escapes; refuse to load rather than restore the wrong one.
-SUBSUP_RESTORE_TABLE = {folded: pair for pair, folded in SUBSUP_TRANS_TABLE.items()}
-if len(SUBSUP_RESTORE_TABLE) != len(SUBSUP_TRANS_TABLE):
-    raise RuntimeError("SUBSUP_TRANS_TABLE folds two different pairs to one character")
+def _invert_fold(table):
+    """The fold's inverse. The forward table must stay injective, or one folded character
+    would name two escapes; refuse to load rather than restore the wrong one."""
+    inverse = {folded: pair for pair, folded in table.items()}
+    if len(inverse) != len(table):
+        collided = sorted({folded for folded, n in
+                           ((f, sum(1 for v in table.values() if v == f)) for f in inverse) if n > 1})
+        raise RuntimeError(f"the fold table folds different pairs to one character: {collided}")
+    return inverse
 
+SUBSUP_RESTORE_TABLE = _invert_fold(SUBSUP_TRANS_TABLE)
 SUBSUP_RESTORE_TABLE_trans = str.maketrans(SUBSUP_RESTORE_TABLE)
 
 
@@ -260,13 +267,20 @@ def symbol_explode(text: str) -> list[str]:
 # Isabelle's own rule for what names a symbol (Pure/General/symbol.scala): a letter,
 # then letters, digits, `_` or `'`. A looser `\\<[^>]+>` scans to the next `>` wherever
 # it falls, so one malformed escape swallows the next valid one -- `\<alpha \<beta>`
-# converts nothing. Identical on well-formed input.
+# converts nothing. Identical on well-formed input. `symbol_explode` above scans the
+# same names, more permissively; its docstring states the relation the two must keep.
 _ESCAPE = re.compile(r"\\<\^?[A-Za-z][A-Za-z0-9_']*>")
 # A sub/superscript or bold marker (the fold table's own) and the character after it,
 # unless that is another marker or a line break: of two adjacent markers the later one
-# applies and the displaced one is emitted literally, as Isabelle renders them.
+# applies and the displaced one is emitted literally, as Isabelle renders them, and a
+# fold never spans a line boundary.
 _MARKERS = re.escape(''.join(sorted({pair[0] for pair in SUBSUP_TRANS_TABLE})))
 _FOLD = re.compile(f"[{_MARKERS}][^{_MARKERS}\n]")
+# The pattern, the marker set and the inverse all read the table as marker-plus-operand
+# pairs folding to one character; a table entry of another shape would fold nothing.
+if not all(_FOLD.fullmatch(pair) and len(folded) == 1 for pair, folded in SUBSUP_TRANS_TABLE.items()):
+    raise RuntimeError("the fold table has an entry that is not a marker and one operand "
+                       "folding to one character")
 
 # One match a replacement rewrote: its input span and its output length.
 _Record = namedtuple('_Record', 'start end out_len')
@@ -278,8 +292,9 @@ def _sub_recording(pattern, replace, text):
     records = []
 
     def callback(match):
-        out = replace(match.group(0))
-        if out != match.group(0):
+        text = match.group(0)
+        out = replace(text)
+        if out != text:
             records.append(_Record(match.start(), match.end(), len(out)))
         return out
 
@@ -297,7 +312,7 @@ def _fold(pair):
     return SUBSUP_TRANS_TABLE.get(pair, pair)
 
 
-def _render(text: str) -> tuple[str, tuple[list, list]]:
+def _render(text: str) -> tuple[str, tuple[list[_Record], list[_Record]]]:
     """The rendering of `text` and the records of its two passes: escapes to characters,
     then the sub/superscript fold. The one place that decides what a symbol renders as;
     `pretty_unicode` and `pretty_unicode_indexed` are views of it."""
@@ -326,9 +341,10 @@ def pretty_unicode(src: str) -> str:
 def _map_offsets(records, offsets):
     """Where each of the ascending `offsets` into a pass's input lands in its output.
 
-    Every offset moves with the length changes of the rewritten matches before it. One
-    strictly inside a rewritten match lands at that match's output start: the match is
-    one unit, so a fold operand shares the folded character's position."""
+    The pass's `records` are ascending and non-overlapping, and every offset moves with
+    the length changes of the rewritten matches before it. One strictly inside a
+    rewritten match lands at that match's output start: the match is one unit, so a
+    fold operand shares the folded character's position."""
     mapped = []
     shift = 0                 # output minus input offset, in the text between matches
     k = 0
