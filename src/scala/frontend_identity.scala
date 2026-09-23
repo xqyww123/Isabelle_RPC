@@ -36,8 +36,9 @@ object Frontend_Identity extends Scala.Fun("isabelle_rpc.frontend_identity", thr
       isabelle.jedit.PIDE._plugin != null         // the answering mechanism's own host
     val interactive: Option[Boolean] =
       if (dialogue_capable || cls.startsWith("isabelle.vscode.")) Some(true)
-      else if (cls.startsWith("isabelle.Build_Job") ||   // build (incl. Isa-REPL)
-               cls.startsWith("isabelle.Headless"))       // server / dump / update
+      else if (cls.startsWith("isabelle.Build_Job") ||   // build
+               cls.startsWith("isabelle.Headless") ||     // server / dump / update
+               cls.startsWith("isabelle.isa_repl."))      // isabelle REPL tool
         Some(false)
       else None                                   // unknown frontend: no verdict
     val body =
