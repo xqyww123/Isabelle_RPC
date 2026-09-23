@@ -177,10 +177,14 @@ elsewhere. 405 + 2,601 + 1,500 = 4,506 (on 2026-08-18 the counts were 352/323 an
 own number rather than this one; the diff's value is that it is 0, not that it is over
 a particular number of files.
 
-**The review evidence** is in `review-2026-08-18/`, with a README saying what each
-script established. `diagnosis/ref.py` is the instrument behind the §3 invariant (it
-replays the two regex passes with offset tracking); `remedy/sweep.py` is the
-symbol-driven prototype of Option C, which §4 rejects — evidence, not the shape to build.
+**The review evidence** — the scripts two reviewers wrote on 2026-08-18 and their
+outputs — was tracked as `review-2026-08-18/` until 2026-09-23, when the author ruled
+that experiment scripts and results are not committed ("ai-artifacts 下的或者 archives 下
+的临时数据、实验结果、实验脚本不能提交"); it is untracked since, and readable at commit
+`4424270` (`git show 4424270:review-2026-08-18/README.md` says what each script
+established). `diagnosis/ref.py` was the instrument behind the §3 invariant (it replays
+the two regex passes with offset tracking); `remedy/sweep.py` was the symbol-driven
+prototype of Option C, which §4 rejects — evidence, not the shape to build.
 
 ## 1. The defect
 
