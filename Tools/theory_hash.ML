@@ -40,8 +40,13 @@
   2. A second theory begun under a name already loaded.  Nothing checks for it:
      Resources.begin_theory -> Theory.begin_theory -> Context.begin_thy verify a
      non-empty name, non-empty imports, and ancestors with distinct base names, and
-     no more.  Isa-REPL builds theories this way and swallows the register_thy error
-     (Isa-REPL/library/REPL.ML:442, :686-690), so a collision there is silent.
+     no more.  Isa-REPL builds theories this way (its init_thy calls
+     Resources.begin_theory), producing a second value under an already-used long
+     name, so a collision there is silent -- before the theory-table layering change
+     it also swallowed a register_thy error at that point; that call is now gone, but
+     the collision is silent all the same.  Re-evaluating a theory under the same
+     base name is expected in the REPL, so this situation is now common, still
+     silent, and still unhandled.
 
   3. A source file edited after the heap was built.  hash_of reads the file at
      get_theory_path from DISK, not the content of the theory value handed to it, so
