@@ -11,7 +11,7 @@ name = "isabelle-rpc"
 dynamic = ["version"]
 description = "Isabelle RPC Host: call Python functions from Isabelle/ML"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"  # the `type` statement (PEP 695) in Isabelle_RPC_Host/universal_key.py and others
 license = "LGPL-2.1-or-later"
 # The GNU convention for a library under the LGPL 2.1, as glibc and the other GNU
 # libraries use it: COPYING carries the ordinary GPL v2, COPYING.LIB the Lesser one.
