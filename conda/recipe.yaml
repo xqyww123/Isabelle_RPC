@@ -10,7 +10,7 @@ schema_version: 1
 # For generic, conda installs every file at its literal path in the artifact
 # (conda/core/path_actions.py: target_short_path = source_path_data.path), so the build
 # machine's `lib/python3.12/site-packages/...` would be baked in and, installed into a
-# python 3.11 environment, would create a `lib/python3.12/` that no interpreter ever looks
+# python 3.13 environment, would create a `lib/python3.12/` that no interpreter ever looks
 # at: install succeeds, `conda list` shows it, `import Isabelle_RPC_Host` fails.
 # `run: python >=3.12` does not save it, because it PERMITS 3.13.  `noarch: python`
 # relocates site-packages paths at link time, which is exactly the missing piece.
