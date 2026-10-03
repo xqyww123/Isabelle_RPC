@@ -190,8 +190,12 @@ requirements:
     # keeps a constant name at a per-release version, so unbounded would let conda pair
     # this with a future Isabelle it was never built for.
     - isabelle >=2025.2,<2025.3
-    # ROOT:1 `session Isabelle_RPC = Performant_Isabelle_ML +`.
-    - isabelle-performant-ml >=0.1.0,<0.2.0
+    # ROOT:1 `session Isabelle_RPC = Performant_Isabelle_ML +`.  The bound names the
+    # performant-ml series this session is built and tested against; it moved from
+    # 0.1.x to 0.2.x with isabelle-rpc 0.5.0, together with every sibling package
+    # (auto-sledgehammer needs 0.2.0's Performant_Isabelle_HOL session, so a 0.1.x
+    # cap here would leave isabelle-minilang, which needs both, unsolvable).
+    - isabelle-performant-ml >=0.2.0,<0.3.0
     # The five pyproject dependencies under their CONDA names, which differ from PyPI's:
     #   lmdb    -> python-lmdb     (conda `lmdb` is the C library)
     #   msgpack -> msgpack-python
