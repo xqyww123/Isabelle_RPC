@@ -8,7 +8,7 @@ from .rpc import (
 from .unicode import (get_SYMBOLS, get_REVERSE_SYMBOLS, get_SYMBOLS_AND_REVERSED,
                       get_LETTER_SYMBOLS,
                       pretty_unicode, pretty_unicode_indexed, unicode_of_ascii, ascii_of_unicode,
-                      SUBSUP_TRANS_TABLE, SUBSUP_RESTORE_TABLE)
+                      SUBSUP_TRANS_TABLE, SUBSUP_RESTORE_TABLE, IsaTerm)
 from .position import IsabellePosition, Position
 from .universal_key import (
     EntityKind, Entity, destruct_key,

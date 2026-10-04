@@ -2,6 +2,7 @@ import os
 import re
 from collections import Counter, namedtuple
 from itertools import accumulate
+from typing import Any
 
 from .paths import resolve_isabelle_var, resolve_isabelle_path_list
 
@@ -387,3 +388,77 @@ def ascii_of_unicode(src):
     This method is the reverse of `pretty_unicode`.
     """
     return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(_table().trans)
+
+
+class IsaTerm:
+    """Dual-representation Isabelle string: Unicode (for LLM display) + ASCII (for Isabelle RPC).
+
+    Constructed at two boundaries:
+    - ``IsaTerm.from_isabelle(ascii_str)`` — when data arrives from Isabelle RPC
+    - ``IsaTerm.from_agent(unicode_str)`` — when the LLM provides a term via tool calls
+    """
+    __slots__ = ('unicode', 'ascii')
+
+    def __init__(self, unicode: str, ascii: str):
+        self.unicode = unicode
+        self.ascii = ascii
+
+    @classmethod
+    def from_isabelle(cls, ascii_str: str) -> 'IsaTerm':
+        """Create from Isabelle RPC output (ASCII notation)."""
+        return cls(pretty_unicode(ascii_str), ascii_str)
+
+    @classmethod
+    def from_agent(cls, unicode_str: str) -> 'IsaTerm':
+        """Create from LLM/agent input (Unicode)."""
+        return cls(unicode_str, ascii_of_unicode(unicode_str))
+
+    def __str__(self) -> str:
+        raise TypeError(
+            "str() on IsaTerm is ambiguous — use .unicode (for display) or .ascii (for Isabelle RPC) explicitly")
+    def __repr__(self) -> str: return f'IsaTerm({self.unicode!r})'
+
+    @staticmethod
+    def to_unicode(x: Any) -> str:
+        """Display (Unicode) string of *any* value, resolving an ``IsaTerm``
+        via ``.unicode``.
+
+        The sanctioned way to stringify a value of statically-unknown type at
+        a generic display / logging sink (e.g. an ``Interaction.answer()``
+        result, which is one of several payload types and is occasionally a
+        bare ``IsaTerm``).  A plain ``str(x)`` / f-string there would trip the
+        deliberately-forbidden ``IsaTerm.__str__``; this routes an ``IsaTerm``
+        to ``.unicode`` instead.  ``None`` renders as the empty string; every
+        other non-``IsaTerm`` value falls back to ``str(x)`` (containers are
+        safe — they format their elements via ``repr``, and
+        ``IsaTerm.__repr__`` is safe)."""
+        if x is None:
+            return ""
+        if isinstance(x, IsaTerm):
+            return x.unicode
+        return str(x)
+
+    @staticmethod
+    def to_ascii(x: Any) -> str:
+        """ASCII (Isabelle-RPC) string of *any* value, resolving an ``IsaTerm``
+        via ``.ascii`` — the wire-boundary counterpart of ``to_unicode``.
+
+        A non-``IsaTerm`` value is assumed to be a Unicode string and is
+        converted with ``ascii_of_unicode`` (a no-op on already-ASCII text);
+        ``None`` renders as the empty string."""
+        if x is None:
+            return ""
+        if isinstance(x, IsaTerm):
+            return x.ascii
+        return ascii_of_unicode(x if isinstance(x, str) else str(x))
+
+    def __hash__(self) -> int: return hash(self.ascii)
+    def __eq__(self, other) -> bool:
+        if isinstance(other, IsaTerm): return self.ascii == other.ascii
+        if isinstance(other, str): return self.ascii == other
+        return NotImplemented
+    def __len__(self) -> int: return len(self.unicode)
+    def __lt__(self, other) -> bool:
+        if isinstance(other, IsaTerm): return self.ascii < other.ascii
+        if isinstance(other, str): return self.ascii < other
+        return NotImplemented
