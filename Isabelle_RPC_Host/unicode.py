@@ -390,6 +390,33 @@ def ascii_of_unicode(src):
     return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(_table().trans)
 
 
+def is_identifier(ascii: str) -> bool:
+    """Isabelle's identifier grammar over an ASCII-form string (Pure's
+    `Symbol.is_letter` / `Lexicon.is_identifier`, over `get_LETTER_SYMBOLS()`):
+    a letter or a letter symbol, then letters, letter symbols, digits,
+    underscores, primes, and ``\\<^sub>`` before a letter or a digit."""
+    symbols = symbol_explode(ascii)
+    letters = get_LETTER_SYMBOLS()
+
+    def letter(s: str) -> bool:
+        return (len(s) == 1 and s.isascii() and s.isalpha()) or s in letters
+
+    def digit(s: str) -> bool:
+        return len(s) == 1 and s.isascii() and s.isdigit()
+    if not symbols or not letter(symbols[0]):
+        return False
+    i = 1
+    while i < len(symbols):
+        s = symbols[i]
+        if letter(s) or digit(s) or s in ("_", "'"):
+            i += 1
+        elif s == "\\<^sub>" and i + 1 < len(symbols) and (letter(symbols[i + 1]) or digit(symbols[i + 1])):
+            i += 2
+        else:
+            return False
+    return True
+
+
 class IsaTerm:
     """Dual-representation Isabelle string: Unicode (for LLM display) + ASCII (for Isabelle RPC).
 
