@@ -18,9 +18,21 @@
    produce the value a proof consumes.  The real read/op always runs on the PLAIN
    string; positioned input is used ONLY as a throwaway probe to locate a parse
    failure.  Only inner-syntax PARSE errors carry a position; type/check errors
-   and "unexpected end of input" do not, and are passed through unchanged. *)
+   and "unexpected end of input" do not, and are passed through unchanged.
+
+   The position markup, and hence the marker, appears only under the PIDE
+   print mode (Print_Mode.PIDE), which the REPL, PIDE and build all set. *)
 
 signature INNER_SYNTAX_ERROR = sig
+  (* The pieces for another reader that marks its own failures the same way
+     (AoA's reader of method text): the marker, which a caller also uses to
+     compare a marked message exactly; the window of the text around a 1-based
+     symbol range with the marker spliced in; and the LAST <position> of an
+     error message (an outer-syntax error names the cut's start first and the
+     offending token last). *)
+  val marker : string
+  val mark_window : string -> int * int -> string option
+  val last_offset : (string -> bool) -> string -> (int * int) option
   val sentinel_id : string
   val positioned_id : string -> string -> string
   val positioned : string -> string
@@ -91,24 +103,33 @@ fun ignored_prefix noun =
 
 (* --- offset extraction (filter by element NAME = position) --------------- *)
 
-(* First <position> element whose id satisfies id_ok and which carries an
-   offset; returns (id, offset, end_offset).  end_offset defaults to offset+1. *)
-fun parse_offset id_ok msg =
+(* A message that is not well-formed YXML -- one that quotes raw chr 5 / chr 6
+   from the text that failed -- decodes to its plain text: no position, no
+   markup, so locating a failure never raises. *)
+fun decode msg = YXML.parse_body msg handle Fail _ => [XML.Text msg]
+
+(* Every <position> element whose id satisfies id_ok and which carries an
+   offset, in document order, each as (id, offset, end_offset); end_offset
+   defaults to offset+1. *)
+fun parse_offsets id_ok msg =
   let
-    fun search [] = NONE
+    fun search [] = []
       | search (XML.Text _ :: rest) = search rest
       | search (XML.Elem ((name, props), body) :: rest) =
-          if name = Markup.positionN then
-            let val pos = Position.of_properties props in
-              case (Position.id_of pos, Position.offset_of pos) of
-                (SOME id, SOME off) =>
-                  if id_ok id
-                  then SOME (id, off, the_default (off + 1) (Position.end_offset_of pos))
-                  else search (body @ rest)
-              | _ => search (body @ rest)
-            end
-          else search (body @ rest)
-  in search (YXML.parse_body msg) end
+          (if name = Markup.positionN then
+             let val pos = Position.of_properties props in
+               case (Position.id_of pos, Position.offset_of pos) of
+                 (SOME id, SOME off) =>
+                   if id_ok id then [(id, off, the_default (off + 1) (Position.end_offset_of pos))] else []
+               | _ => []
+             end
+           else []) @ search (body @ rest)
+  in search (decode msg) end
+
+fun parse_offset id_ok msg = try hd (parse_offsets id_ok msg)
+
+fun last_offset id_ok msg =
+  Option.map (fn (_, off, eoff) => (off, eoff)) (try List.last (parse_offsets id_ok msg))
 
 (* --- clean prose: YXML text minus no_report/position subtrees ------------ *)
 
@@ -126,7 +147,7 @@ fun rstrip s =
 fun clean_prose msg =
   rstrip (String.concat (map (collect_text
             (fn n => n = Markup.no_reportN orelse n = Markup.positionN))
-          (YXML.parse_body msg)))
+          (decode msg)))
 
 (* --- unique window + 【 】 splice ---------------------------------------- *)
 
@@ -142,18 +163,19 @@ fun count_substr pat s =
 
 fun sublist (xs, a, b) = List.take (List.drop (xs, a), b - a)
 
-(* off/eoff are 1-based symbol indices; returns SOME marked-window or NONE
-   when out of range / empty (P15). *)
+(* off/eoff are 1-based symbol indices; returns SOME marked-window, or NONE
+   when off is out of range (P15).  off = n + 1 marks the end of the text,
+   where an outer-syntax reader finds its end-of-input failures. *)
 fun mark_window text (off, eoff) =
   let
     val syms = Symbol.explode text
     val n = length syms
     val lo = off - 1
   in
-    if lo < 0 orelse lo >= n then NONE
+    if lo < 0 orelse lo > n then NONE
     else
       let
-        val hi = Int.max (lo + 1, Int.min (eoff - 1, n))
+        val hi = Int.min (n, Int.max (lo + 1, eoff - 1))
         val full = implode syms
         fun uniq (a, b) = count_substr (implode (sublist (syms, a, b))) full = 1
         fun expand (a, b) =

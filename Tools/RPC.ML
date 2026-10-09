@@ -33,6 +33,8 @@ type ('a,'b) callback = {
   name: string,
   on_interrupt: on_interrupt,
   arg_schema: 'a MessagePackBinIO.Unpack.unpacker,
+    (*a raise here is answered to Python, then ends the command hosting the
+      call; a failure Python should survive belongs in `function`*)
   ret_schema: 'b MessagePackBinIO.Pack.packer,
   function: 'a -> 'b,
   timeout: Time.time option
@@ -467,11 +469,12 @@ fun get_global_callback (name : string) : callback' option =
   a callback that was entered answers exactly once.  An interrupt is answered
   with the error message "Interrupt" (Python raises IsabelleInterrupt); the
   interrupt the function's own capture catches is the one on_interrupt
-  governs, any other re-raises.  The answer to an interrupt that lands before
+  governs; whatever escapes the argument read, interrupt or not, re-raises
+  after its answer is written.  The answer to an interrupt that lands before
   Python has opened the phase-2 slot is best-effort: Python opens the slot
   only as it sends the request, and its reader drops a reply for a slot that
   is not open, so the procedure may learn of the cancellation as the closing
-  connection instead.  An interrupt to re-raise outranks a failed reply write
+  connection instead.  An exception to re-raise outranks a failed reply write
   (the final case below), the peer being possibly gone for the same reason.*)
 fun mk_callback ({name, on_interrupt, arg_schema, ret_schema, function, ...} : ('a,'b) callback) : callback' =
   {name = name,
@@ -487,14 +490,15 @@ fun mk_callback ({name, on_interrupt, arg_schema, ret_schema, function, ...} : (
              handle Unpack => error "Failed to unpack callback argument"
            (*one interruptible region: the argument read, then the function under
              its own capture.  Nothing that escapes the region has advanced the
-             stream, so the phase-2 message is still pending there and an
-             interrupt must re-raise, whatever on_interrupt says.*)
-           val (answer, interrupt) =
+             stream, so the phase-2 message is still pending there and whatever
+             escapes must re-raise, whatever on_interrupt says: the command ends
+             with that error and call_command closes the connection.*)
+           val (answer, reraise) =
              (case Exn.capture_body (run (fn () =>
                      let val ((_, cb_arg), cin') = read_argument ()
                       in (cin', Exn.capture_body (fn () => function cb_arg)) end)) of
                 Exn.Exn exn =>
-                  if Exn.is_interrupt exn then (interrupted, SOME exn) else (failed exn, NONE)
+                  (if Exn.is_interrupt exn then interrupted else failed exn, SOME exn)
               | Exn.Res (cin', outcome) =>
                   (cin := cin';
                    case outcome of
@@ -507,7 +511,7 @@ fun mk_callback ({name, on_interrupt, arg_schema, ret_schema, function, ...} : (
              (doPack (packPair (packInt, packPair (packOption ret_schema, packOption packString)))
                      (cb_id, answer) cout;
               BinIO.StreamIO.flushOut cout))
-        in (case interrupt of SOME exn => Exn.reraise exn | NONE => Exn.release written) end)}
+        in (case reraise of SOME exn => Exn.reraise exn | NONE => Exn.release written) end)}
 
 fun register_global_callback (callback : ('a,'b) callback) : Context.generic -> Context.generic =
   register_global_callback' (mk_callback callback)

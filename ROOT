@@ -8,3 +8,4 @@ session Isabelle_RPC_Test in "test" = "HOL-Library" +
     Test_Name_Spaces
     Test_Cache_Scope
     Test_Term_Codec
+    Test_Callback_Argument

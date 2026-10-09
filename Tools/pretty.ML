@@ -100,8 +100,7 @@ fun unpack_raw_term s =
 
 end
 
-(*The BytesIO twin, for a payload held in memory (BinIO's instream cannot be fed
-  from a string).*)
+(*The BytesIO twin, for a payload held in memory.*)
 structure RPC_Pretty_Bytes = RPC_Term_Codec(MessagePackBytesIO)
 
 structure RPC_Pretty : RPC_PRETTY = struct
