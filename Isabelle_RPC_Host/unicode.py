@@ -390,31 +390,73 @@ def ascii_of_unicode(src):
     return src.translate(SUBSUP_RESTORE_TABLE_trans).translate(_table().trans)
 
 
-def is_identifier(ascii: str) -> bool:
-    """Isabelle's identifier grammar over an ASCII-form string (Pure's
-    `Symbol.is_letter` / `Lexicon.is_identifier`, over `get_LETTER_SYMBOLS()`):
-    a letter or a letter symbol, then letters, letter symbols, digits,
-    underscores, primes, and ``\\<^sub>`` before a letter or a digit."""
-    symbols = symbol_explode(ascii)
-    letters = get_LETTER_SYMBOLS()
+# Explicit enumeration from symbol.ML lines 246-386. Not unicode.get_LETTER_SYMBOLS():
+# that set is the symbol files' `letter` and `greek` groups, so it is wider and grows
+# with whatever components are registered, while the lexer's letter class is fixed in
+# the ML file.
+# NOTE: \<lambda> is intentionally excluded (it is an operator, not a letter).
+_LETTER_SYMBOLS: frozenset[str] = frozenset([
+    # Latin variants \<A>..\<Z>, \<a>..\<z>
+    *[f"\\<{c}>" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"],
+    # Double-letter variants \<AA>..\<ZZ>, \<aa>..\<zz>
+    *[f"\\<{c}{c}>" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"],
+    # Greek lowercase (without lambda)
+    "\\<alpha>", "\\<beta>", "\\<gamma>", "\\<delta>", "\\<epsilon>",
+    "\\<zeta>", "\\<eta>", "\\<theta>", "\\<iota>", "\\<kappa>",
+    "\\<mu>", "\\<nu>", "\\<xi>", "\\<pi>", "\\<rho>",
+    "\\<sigma>", "\\<tau>", "\\<upsilon>", "\\<phi>", "\\<chi>",
+    "\\<psi>", "\\<omega>",
+    # Greek uppercase
+    "\\<Gamma>", "\\<Delta>", "\\<Theta>", "\\<Lambda>", "\\<Xi>",
+    "\\<Pi>", "\\<Sigma>", "\\<Upsilon>", "\\<Phi>", "\\<Psi>", "\\<Omega>",
+])
 
-    def letter(s: str) -> bool:
-        return (len(s) == 1 and s.isascii() and s.isalpha()) or s in letters
 
-    def digit(s: str) -> bool:
-        return len(s) == 1 and s.isascii() and s.isdigit()
-    if not symbols or not letter(symbols[0]):
-        return False
-    i = 1
-    while i < len(symbols):
-        s = symbols[i]
-        if letter(s) or digit(s) or s in ("_", "'"):
-            i += 1
-        elif s == "\\<^sub>" and i + 1 < len(symbols) and (letter(symbols[i + 1]) or digit(symbols[i + 1])):
-            i += 2
+def _is_letter(sym: str) -> bool:
+    if len(sym) == 1 and sym.isascii():
+        return sym.isalpha()
+    return sym in _LETTER_SYMBOLS
+
+
+def _is_digit(sym: str) -> bool:
+    return len(sym) == 1 and sym.isascii() and sym.isdigit()
+
+
+def _is_letdig(sym: str) -> bool:
+    if _is_letter(sym):
+        return True
+    if len(sym) == 1 and sym.isascii():
+        return sym.isdigit() or sym in "_'"
+    return False
+
+
+def _is_sub(sym: str) -> bool:
+    return sym == "\\<^sub>"
+
+
+def _scan_ident_tail(symbols: list[str], pos: int) -> int:
+    """Consume letdigs and \\<^sub>-letdig groups after the initial letter."""
+    n = len(symbols)
+    while pos < n:
+        if _is_letdig(symbols[pos]):
+            pos += 1
+        elif _is_sub(symbols[pos]) and pos + 1 < n and _is_letdig(symbols[pos + 1]):
+            pos += 1  # consume \<^sub>
+            while pos < n and _is_letdig(symbols[pos]):
+                pos += 1
         else:
-            return False
-    return True
+            break
+    return pos
+
+
+def is_identifier(ascii: str) -> bool:
+    """Isabelle's identifier grammar over an ASCII-form string, exactly
+    `Symbol_Pos.scan_ident`'s: a letter, then letters, digits, underscores,
+    primes, and ``\\<^sub>`` before one of those; the letters Isabelle's own
+    list (``_LETTER_SYMBOLS``, from symbol.ML), not the symbol files' letter
+    and greek groups of ``get_LETTER_SYMBOLS()``."""
+    symbols = symbol_explode(ascii)
+    return bool(symbols) and _is_letter(symbols[0]) and _scan_ident_tail(symbols, 1) == len(symbols)
 
 
 class IsaTerm:

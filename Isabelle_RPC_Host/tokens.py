@@ -9,69 +9,11 @@ Reuses :func:`Isabelle_RPC_Host.unicode.symbol_explode` and
 :func:`Isabelle_RPC_Host.unicode.ascii_of_unicode`.
 """
 
-from .unicode import ascii_of_unicode, symbol_explode
-
-# Explicit enumeration from symbol.ML lines 246-386. Not unicode.get_LETTER_SYMBOLS():
-# that set is the symbol files' `letter` and `greek` groups, so it is wider and grows
-# with whatever components are registered, while the lexer's letter class is fixed in
-# the ML file.
-# NOTE: \<lambda> is intentionally excluded (it is an operator, not a letter).
-_LETTER_SYMBOLS: frozenset[str] = frozenset([
-    # Latin variants \<A>..\<Z>, \<a>..\<z>
-    *[f"\\<{c}>" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"],
-    # Double-letter variants \<AA>..\<ZZ>, \<aa>..\<zz>
-    *[f"\\<{c}{c}>" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"],
-    # Greek lowercase (without lambda)
-    "\\<alpha>", "\\<beta>", "\\<gamma>", "\\<delta>", "\\<epsilon>",
-    "\\<zeta>", "\\<eta>", "\\<theta>", "\\<iota>", "\\<kappa>",
-    "\\<mu>", "\\<nu>", "\\<xi>", "\\<pi>", "\\<rho>",
-    "\\<sigma>", "\\<tau>", "\\<upsilon>", "\\<phi>", "\\<chi>",
-    "\\<psi>", "\\<omega>",
-    # Greek uppercase
-    "\\<Gamma>", "\\<Delta>", "\\<Theta>", "\\<Lambda>", "\\<Xi>",
-    "\\<Pi>", "\\<Sigma>", "\\<Upsilon>", "\\<Phi>", "\\<Psi>", "\\<Omega>",
-])
-
-
-def _is_letter(sym: str) -> bool:
-    if len(sym) == 1 and sym.isascii():
-        return sym.isalpha()
-    return sym in _LETTER_SYMBOLS
-
-
-def _is_digit(sym: str) -> bool:
-    return len(sym) == 1 and sym.isascii() and sym.isdigit()
-
-
-def _is_letdig(sym: str) -> bool:
-    if _is_letter(sym):
-        return True
-    if len(sym) == 1 and sym.isascii():
-        return sym.isdigit() or sym in "_'"
-    return False
-
+from .unicode import (
+    _is_digit, _is_letdig, _is_letter, _is_sub, _scan_ident_tail, ascii_of_unicode, symbol_explode)
 
 def _is_blank(sym: str) -> bool:
     return sym in (" ", "\t", "\n", "\x0b", "\f", "\r")
-
-
-def _is_sub(sym: str) -> bool:
-    return sym == "\\<^sub>"
-
-
-def _scan_ident_tail(symbols: list[str], pos: int) -> int:
-    """Consume letdigs and \\<^sub>-letdig groups after the initial letter."""
-    n = len(symbols)
-    while pos < n:
-        if _is_letdig(symbols[pos]):
-            pos += 1
-        elif _is_sub(symbols[pos]) and pos + 1 < n and _is_letdig(symbols[pos + 1]):
-            pos += 1  # consume \<^sub>
-            while pos < n and _is_letdig(symbols[pos]):
-                pos += 1
-        else:
-            break
-    return pos
 
 
 def tokenize_isabelle_line(ascii_text: str) -> list[tuple[str, int, int]]:
