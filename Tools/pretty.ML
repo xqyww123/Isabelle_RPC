@@ -3,6 +3,8 @@ signature RPC_PRETTY = sig
 type pp_name = string
 
 val trim_markup : string -> string
+(*plain text, no markup written; one line except for forced breaks*)
+val plain_string : Pretty.T -> string
 
 val pack_raw_term : term MessagePackBinIO.Pack.packer
 val unpack_raw_term : term MessagePackBinIO.Unpack.unpacker
@@ -116,6 +118,10 @@ exception XML_DUMP_FAIL of XML.tree
 (* the visible text of a string carrying markup (hidden bodies, such as a
    typing element's type, are not text) *)
 val trim_markup = Protocol_Message.clean_output
+
+(* Pure's plain output: no markup is written, so no hidden body (a typing
+   element's type) can leak into the text; the width as large as possible *)
+val plain_string = Pretty.string_of_ops (Pretty.pure_output_ops (SOME 99999999))
 
 fun is_number s =
   if s = "."
@@ -406,7 +412,7 @@ fun pos_packer pos =
   end
 
 fun term_string ctxt =
-  packString o trim_markup o Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
+  packString o plain_string o Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
 
 fun s_expr_typ (TFree (name, sort)) ret = "(var " :: name :: fold_rev (fn C => fn L => " "::C::L) sort (")"::ret)
   | s_expr_typ (TVar  (name, sort)) ret = "(var " :: string_of_var name :: fold_rev (fn C => fn L => " "::C::L) sort (")"::ret)
@@ -504,8 +510,8 @@ val s_expression_packer = packString o s_expression
 fun string_of_term "sexpr" = (fn _ => s_expression)
   | string_of_term "natural" = (fn ctxt =>
       let val ctxt = Config.put_generic Printer.show_markup false ctxt
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end)
   | string_of_term "oridinary" = (fn ctxt =>
       let val ctxt = ctxt
@@ -516,8 +522,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end)
   | string_of_term "pretty" = string_of_term "oridinary"
   | string_of_term "type" = (fn ctxt =>
@@ -529,8 +535,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end)
   | string_of_term "typed_pretty" = string_of_term "type"
   | string_of_term "type_sort" = (fn ctxt =>
@@ -542,8 +548,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end)
   | string_of_term "type_nv" = (fn ctxt =>
       let val ctxt = ctxt
@@ -554,8 +560,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end)
   | string_of_term "typed-nv_pretty" = string_of_term "type_nv"
   | string_of_term "T4S4" =
@@ -571,8 +577,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end
       end
   | string_of_term "T4S4nv" =
@@ -588,8 +594,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end
       end
   | string_of_term "T2S3" =
@@ -605,8 +611,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end
       end
   | string_of_term "T2S3nv" =
@@ -622,8 +628,8 @@ fun string_of_term "sexpr" = (fn _ => s_expression)
                 |> Config.put_generic Printer.show_structs false
                 |> Config.put_generic Printer.show_question_marks true
              (* |> Config.put_generic Printer.show_brackets false *)
-       in Context.cases Syntax.string_of_term_global Syntax.string_of_term ctxt
-       #> trim_markup
+       in Context.cases Syntax.pretty_term_global Syntax.pretty_term ctxt
+       #> plain_string
       end
       end
   | string_of_term name = (fn _ =>
@@ -647,7 +653,7 @@ fun term_packer "sexpr" _ = s_expression_packer
               ^ ". Known printers: ['sexpr', 'pretty', 'typed_pretty']")
 
 fun pretty_typ ctxt =
-      packString o trim_markup o Context.cases Syntax.string_of_typ_global Syntax.string_of_typ ctxt
+      packString o plain_string o Context.cases Syntax.pretty_typ_global Syntax.pretty_typ ctxt
 
 fun typ_packer "sexpr" _ = (fn typ => packString (String.concat (s_expr_typ typ [])))
   | typ_packer "pretty" ctxt = pretty_typ ctxt
