@@ -76,13 +76,9 @@ end
 
 structure Remote_Procedure_Calling : REMOTE_PROCEDURE_CALLING = struct
 
-fun trim_markup msg =
-  let fun auto _ [] = []
-        | auto acc (#"\005" :: L) = auto (not acc) L
-        | auto true (x :: L) = x :: auto true L
-        | auto false (_ :: L) = auto false L
-   in String.implode (auto true (String.explode msg))
-  end
+(* the visible text of a string carrying markup (hidden bodies, such as a
+   typing element's type, are not text) *)
+val trim_markup = Protocol_Message.clean_output
 
 type connection = BinIO.StreamIO.instream Unsynchronized.ref
                 * BinIO.StreamIO.outstream

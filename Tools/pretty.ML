@@ -113,13 +113,9 @@ type printing_config = {
      }
 exception XML_DUMP_FAIL of XML.tree
 
-fun trim_markup msg =
-  let fun auto _ [] = []
-        | auto acc (#"\005" :: L) = auto (not acc) L
-        | auto true (x :: L) = x :: auto true L
-        | auto false (_ :: L) = auto false L
-   in String.implode (auto true (String.explode msg))
-  end
+(* the visible text of a string carrying markup (hidden bodies, such as a
+   typing element's type, are not text) *)
+val trim_markup = Protocol_Message.clean_output
 
 fun is_number s =
   if s = "."
