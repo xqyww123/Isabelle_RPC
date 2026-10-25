@@ -4,7 +4,7 @@
 earlier ones:
 
 ```
-RPC.ML  UUID.ML  Term_Digest.ML  theory_hash.ML  Universal_Key.ML
+RPC.ML  UUID.ML  theory_hash.ML  Universal_Key.ML
 config.ML  pretty.ML  inner_syntax_error.ML  context.ML
 run_python.ML  tracing.ML  dialogue.ML
 ```
@@ -59,7 +59,10 @@ Also `read` / `write` / `write_error` / `write_error'` for raw stream access, an
 
 ---
 
-## `Tools/Term_Digest.ML` — `Term_Digest : TERM_DIGEST`
+## `Term_Digest : TERM_DIGEST` — lives in Performant_Isabelle_ML (`library/term_digest.ML`)
+
+Relocated to the base session; in scope here because `Remote_Procedure_Calling` imports it.
+`theory_hash.ML` and `Universal_Key.ML` build on it.
 
 FNV-1a structural hashing, pure ML, no I/O. 64-bit `digest` and 128-bit
 `digest128 = Word64.word * Word64.word`.
