@@ -459,6 +459,13 @@ def is_identifier(ascii: str) -> bool:
     return bool(symbols) and _is_letter(symbols[0]) and _scan_ident_tail(symbols, 1) == len(symbols)
 
 
+def is_malformed(symbol: str) -> bool:
+    """Isabelle's `Symbol.is_malformed` (symbol.ML) on one symbol `symbol_explode` cut:
+    a ``\\<`` that names no symbol by `_ESCAPE`'s rule, as ``\\<^>``, ``\\<>`` and
+    ``\\<foo`` do."""
+    return symbol.startswith("\\<") and _ESCAPE.fullmatch(symbol) is None
+
+
 class IsaTerm:
     """Dual-representation Isabelle string: Unicode (for LLM display) + ASCII (for Isabelle RPC).
 

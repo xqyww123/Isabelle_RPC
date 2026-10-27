@@ -29,7 +29,7 @@ from itertools import accumulate
 from Isabelle_RPC_Host import unicode as unicode_module
 from Isabelle_RPC_Host.unicode import (
     pretty_unicode, pretty_unicode_indexed, symbol_explode, ascii_of_unicode,
-    is_private_use, get_SYMBOLS, get_REVERSE_SYMBOLS, get_LETTER_SYMBOLS,
+    is_malformed, is_private_use, get_SYMBOLS, get_REVERSE_SYMBOLS, get_LETTER_SYMBOLS,
     get_SYMBOLS_AND_REVERSED, get_SYMBOL_FILES, SUBSUP_TRANS_TABLE, _load_symbols,
     _invert_fold)
 from Isabelle_RPC_Host.paths import resolve_isabelle_path_list
@@ -109,6 +109,16 @@ SYMBOL_SCANNING = [
     (r"\<ab-c>", [r"\<ab", "-", "c", ">"]),                    # nor run through a non-letdig
     ("\\<\u00e9x>", [r"\<", "\u00e9", "x", ">"]),                   # nor begin with a non-ASCII letter
     (r"\<alpha \<beta>", [r"\<alpha", " ", r"\<beta>"]),      # a missing `>` is tolerated
+]
+
+# `is_malformed` on what `symbol_explode` cuts, as Isabelle's `Symbol.is_malformed` judges it.
+MALFORMED = [
+    (r"\<alpha>\<^bold>\<beta_2'>", [False, False, False]),
+    (r"\<^>", [True]),                                          # no name
+    (r"\<>", [True]),
+    (r"\<foo", [True]),                                         # no `>`
+    (r"\<1>", [True, False, False]),                            # a name may not begin with a digit
+    ("\\aα>", [False, False, False, False]),                    # no `\<`
 ]
 
 # A table of our own, so that every rendering class below is exercised on every
@@ -209,6 +219,10 @@ def check_indexed_cases():
     print("== symbol_explode bounds a name by Isabelle's rule ==")
     for src, expected in SYMBOL_SCANNING:
         check(repr(src), symbol_explode(src), expected)
+
+    print("== is_malformed is Isabelle's Symbol.is_malformed ==")
+    for src, expected in MALFORMED:
+        check(repr(src), [is_malformed(s) for s in symbol_explode(src)], expected)
 
     print("== _load_symbols does not share state between calls ==")
     first_file, second_file = seed_file(), seed_file(OTHER_SEED)
@@ -573,6 +587,9 @@ MUTANTS = [
     ("an unknown offset is looked up", POSITION_PY,
      "        if self.raw_offset < 1:\n            return UnicodePosition(self.line, 0, self.file)\n",
      ""),
+    ("is_malformed accepts a symbol with no name", UNICODE_PY,
+     '    return symbol.startswith("\\\\<") and _ESCAPE.fullmatch(symbol) is None',
+     '    return symbol.startswith("\\\\<") and not symbol.endswith(">")'),
     ("symbol_explode stops a name at '_' and digits", UNICODE_PY,
      "                while j < n and (text[j].isascii() and (text[j].isalnum() or text[j] in \"_'\")):",
      "                while j < n and (text[j].isascii() and text[j].isalpha()):"),
