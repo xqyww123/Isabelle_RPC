@@ -132,7 +132,9 @@ structure UK_Table : HASH_TABLE where type key = universal_key
 
 val key_of_theory'  : theory -> universal_key
 val key_of_theory   : Context.generic -> xstring -> universal_key * string
-val key_of_constant : Context.generic -> xstring -> universal_key * string
+(* The third component of the six name-kind functions: the position of the
+   name-space entry the key comes from; NONE for a fixed variable. *)
+val key_of_constant : Context.generic -> xstring -> universal_key * string * Position.T option
 type thm_uk_cache
 val new_thm_uk_cache : unit -> thm_uk_cache
 (* The fifth component is the DISPLAY name: full_name with the selected
@@ -145,11 +147,11 @@ val new_thm_uk_cache : unit -> thm_uk_cache
 val key_of_theorem  : thm_uk_cache option -> Context.generic -> xstring
                     -> universal_key * thm * bool * string * string
 val key_of_theorem' : thm_uk_cache option -> Context.generic -> thm -> universal_key
-val key_of_type     : Context.generic -> xstring -> universal_key * string
-val key_of_class    : Context.generic -> xstring -> universal_key * string
-val key_of_locale   : Context.generic -> xstring -> universal_key * string
-val key_of_theorem_collection : Context.generic -> xstring -> universal_key * string
-val key_of_method   : Context.generic -> xstring -> universal_key * string
+val key_of_type     : Context.generic -> xstring -> universal_key * string * Position.T option
+val key_of_class    : Context.generic -> xstring -> universal_key * string * Position.T option
+val key_of_locale   : Context.generic -> xstring -> universal_key * string * Position.T option
+val key_of_theorem_collection : Context.generic -> xstring -> universal_key * string * Position.T option
+val key_of_method   : Context.generic -> xstring -> universal_key * string * Position.T option
 val key_of_introduction_rule  : thm_uk_cache option -> Context.generic -> xstring
                               -> universal_key * string
 val key_of_introduction_rule' : thm_uk_cache option -> Context.generic -> thm -> universal_key
@@ -779,7 +781,7 @@ fun key_of_ns_entity tag make_ck space context xname =
       cached_key ck (fn () =>
         build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                   tag (ent_string fq_name))
-  in (uk, fq_name) end
+  in (uk, fq_name, SOME (#pos ns_entry)) end
 
 fun key_of_theory' thy = Theory_Hash.hash_of thy
 
@@ -800,7 +802,7 @@ fun key_of_constant context xname =
             SOME fq_name =>
               let val thy = Proof_Context.theory_of ctxt
               in (build_key (Theory_Hash.hash_of thy) 0wx01 (ent_string fq_name),
-                  fq_name) end
+                  fq_name, NONE) end
           | NONE => error ("Undefined constant: " ^ quote xname))
         context
   end
@@ -1046,21 +1048,23 @@ fun make_universal_key_callback' (cache : thm_uk_cache option)
                    (MessagePackBinIO.Pack.packBytes,
                     MessagePackBinIO.Pack.packString),
     function = fn (context, (kind, name)) =>
-      case kind of
-        0 => key_of_theory context name
-      | 1 => key_of_constant context name
-      | 2 => let val (uk, _, _, _, disp_name) = key_of_theorem cache context name
-             in (uk, disp_name) end
-      | 3 => key_of_type context name
-      | 4 => key_of_class context name
-      | 5 => key_of_locale context name
-      | 6 => key_of_theorem_collection context name
-      | 7 => key_of_method context name
-      | 18 (* 0x12 *) => key_of_introduction_rule cache context name
-      | 34 (* 0x22 *) => key_of_elimination_rule cache context name
-      | 50 (* 0x32 *) => key_of_induction_rule cache context name
-      | 66 (* 0x42 *) => key_of_case_split_rule cache context name
-      | _ => error ("Unknown entity kind: " ^ Int.toString kind),
+      let fun no_pos (uk, n, _) = (uk, n) in
+        (case kind of
+          0 => key_of_theory context name
+        | 1 => no_pos (key_of_constant context name)
+        | 2 => let val (uk, _, _, _, disp_name) = key_of_theorem cache context name
+               in (uk, disp_name) end
+        | 3 => no_pos (key_of_type context name)
+        | 4 => no_pos (key_of_class context name)
+        | 5 => no_pos (key_of_locale context name)
+        | 6 => no_pos (key_of_theorem_collection context name)
+        | 7 => no_pos (key_of_method context name)
+        | 18 (* 0x12 *) => key_of_introduction_rule cache context name
+        | 34 (* 0x22 *) => key_of_elimination_rule cache context name
+        | 50 (* 0x32 *) => key_of_induction_rule cache context name
+        | 66 (* 0x42 *) => key_of_case_split_rule cache context name
+        | _ => error ("Unknown entity kind: " ^ Int.toString kind))
+      end,
     timeout = NONE
   }
 

@@ -194,6 +194,14 @@ no such constructor, and `unpack_entity_kind` raises `Unpack` on 8. Do not send 
 Read-only enumeration of a context's entities, exposed as per-command callbacks. Registers
 nothing itself.
 
+**By-name resolution.** The resolver `entry_of_name : Context.generic -> entity_kind * string ->
+{uk, name, pos, is_local} option` resolves one name of one kind by name only: no infra filter,
+no rule-kind membership test. A dynamic-collection member has `pos = ("", 0, 0)`. It is `NONE`
+when the name does not resolve, and for a fixed variable asked as a constant. The callback
+`Context.entries_of_names` (`make_entries_of_names_callback : context_unpacker -> callback'`)
+answers a list of `(kind, name)` with one `(uk, name, pos, is_local) option` each, in order. It
+touches no enumeration callback.
+
 Common arg (`unpackTuple9`, preceded by the context):
 
 ```
@@ -371,6 +379,8 @@ match inside `xs`) and skipping `(* … *)` comments. Also `ascii_line(line)` an
 `end_of_line_offset(line)`.
 
 `IsabellePosition(line, raw_offset, file)` is offset-based and is what ML emits.
+`IsabellePosition.from_def_pos(triple)` is the one decoder of ML's `def_pos` triple
+`(file, line, offset)`: an empty file or a zero offset gives `None`.
 `Position(line, column, file)` (and `AsciiPosition` / `UnicodePosition`) is column-based.
 Convert between the families through a `FileIndex`, which needs the file on disk.
 `Position.offset_of` is a *different*, naive char offset that reads the file as latin-1 — don't

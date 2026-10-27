@@ -60,6 +60,7 @@ Constructed by `make_*_callback` functions. None of them self-register.
 | `Context.introduction_rules` / `.elimination_rules` / `.induction_rules` / `.case_split_rules` | `make_*_rules_callback` |
 | `Context.the_theory_long_name` | `make_theory_long_name_callback` |
 | `Context.theory_long_name_and_path` | `make_theory_long_name_and_path_callback` |
+| `Context.entries_of_names` | `Context_Callbacks.make_entries_of_names_callback` |
 | `Context.loaded_theory_hashes` | `make_loaded_theory_hashes_callback` |
 | `Experience.constituents` | `make_experience_constituents_callback` |
 | `Context.experiences` | `make_experiences_callback` |

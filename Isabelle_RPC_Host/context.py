@@ -57,13 +57,6 @@ type entity_entry = tuple[universal_key, str, IsabellePosition | None]
 #     return _debug_key_names.get(uk)
 
 
-def _mk_pos(file: str, line: int, offset: int) -> IsabellePosition | None:
-    """Convert ML position triple to IsabellePosition, or None if unknown."""
-    if not file or not offset:
-        return None
-    return IsabellePosition(line, offset, file)
-
-
 async def _call(connection: Connection, callback_name: str,
           theory: str | None, the_theory_only: bool,
           exclude: list[str],
@@ -86,8 +79,8 @@ async def _call(connection: Connection, callback_name: str,
                  term_patterns, type_patterns, theories_include,
                  [ascii_of_unicode(p) for p in name_contains], limit, target_type)))
     entries: list[entity_entry] = []
-    for k_raw, name, (file, line, offset) in entries_raw:
-        entries.append((bytes(k_raw), name, _mk_pos(file, line, offset)))
+    for k_raw, name, pos in entries_raw:
+        entries.append((bytes(k_raw), name, IsabellePosition.from_def_pos(pos)))
     return entries, list(warnings)
 
 
@@ -111,9 +104,9 @@ async def _call_thm(connection: Connection, callback_name: str,
                  [ascii_of_unicode(p) for p in name_contains], limit, target_type)))
     entries: list[entity_entry] = []
     is_local: dict[universal_key, bool] = {}
-    for k_raw, name, (file, line, offset), loc in entries_raw:
+    for k_raw, name, pos, loc in entries_raw:
         k = bytes(k_raw)
-        entries.append((k, name, _mk_pos(file, line, offset)))
+        entries.append((k, name, IsabellePosition.from_def_pos(pos)))
         is_local[k] = bool(loc)
     return entries, is_local, list(warnings)
 

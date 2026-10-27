@@ -44,6 +44,7 @@ signature CONTEXT_CALLBACKS = sig
      line is the 1-based line number (0 if unknown).
      symbol_offset is the Isabelle symbol offset from file start (0 if unknown). *)
   type def_pos = string * int * int
+  val pack_pos : def_pos MessagePackBinIO.Pack.packer
 
   (* Name of a cached theorem entry. `Fixed`: a static fact's name+index
      (stable). `Member_of_Dynamic`: a member of a dynamic collection, carrying
@@ -86,7 +87,8 @@ signature CONTEXT_CALLBACKS = sig
      kept in step with Pure by hand. *)
   type name_space_entry = {pos: Position.T, serial: serial, group: serial,
     suppress: bool list, theory_long_name: string, concealed: bool}
-  val entry_def_pos : name_space_entry -> def_pos
+  (* The def_pos of a name-space entry's position *)
+  val entry_def_pos : Position.T -> def_pos
   (* THE shared spelling of "fetch the fact space's name-space entry" (NONE if
      absent).  The fact space is derived from the Facts.T PARAMETER -- which
      space a caller passes is its whole scoping decision (e.g. the global
@@ -94,6 +96,13 @@ signature CONTEXT_CALLBACKS = sig
      guards live here: concealed/hidden tests stay at the call sites, or
      inside is_infra_thm, which already carries them. *)
   val entry_of_fact : Facts.T -> string -> name_space_entry option
+  (* The resolver: one (kind, name) in a context, resolved by name only -- no
+     infra filter, no rule-kind membership test, no dynamic-fact test of its
+     own.  A member of a dynamic fact has no declaration: pos ("", 0, 0).  NONE
+     when the name does not resolve, and for a fixed variable asked as a
+     constant. *)
+  val entry_of_name : Context.generic -> Universal_Key.entity_kind * string ->
+    {uk: Universal_Key.universal_key, name: string, pos: def_pos, is_local: bool} option
   val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
   val mk_name_filter : string list -> string -> bool
   (* First arg = the expensive-match budget (caps full-prop subterm matching to bound
@@ -134,6 +143,8 @@ signature CONTEXT_CALLBACKS = sig
     -> Remote_Procedure_Calling.callback'
   val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
+  (* Context.entries_of_names: entry_of_name of each (kind, name), in order *)
+  val make_entries_of_names_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_and_path_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* Experience memory: goal_patterns -> minimal-antichain constituent theories
      [(theory long name, 16-byte theory hash)].  Raises on any unparseable
@@ -241,16 +252,50 @@ type name_space_entry = {pos: Position.T, serial: serial, group: serial,
 fun entry_of_fact facts name : name_space_entry option =
   try (Name_Space.the_entry (Facts.space_of facts)) name
 
-(* Extract definition position (file, line, symbol_offset) from a Name_Space entry.
-   File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
+(* Extract definition position (file, line, symbol_offset) from a Name_Space entry's
+   position.  File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
    Returns ("", 0, 0) when the position is unknown (e.g. ID-based positions from live PIDE). *)
-fun entry_def_pos entry =
-  let val pos = #pos entry
-      val file = the_default "" (Position.file_of pos)
+fun entry_def_pos pos =
+  let val file = the_default "" (Position.file_of pos)
       val file' = if file = "" then "" else File.standard_path (Path.explode file)
   in (file',
       the_default 0 (Position.line_of pos),
       the_default 0 (Position.offset_of pos))
+  end
+
+fun entry_of_name context (kind, name) =
+  let
+    fun theorem rekey =
+      let
+        val (uk, thm, is_global, full_name, disp_name) =
+          Universal_Key.key_of_theorem NONE context name
+        val facts = Context.cases Global_Theory.facts_of Proof_Context.facts_of context
+        val pos =
+          if Facts.is_dynamic facts full_name then ("", 0, 0)
+          else (case entry_of_fact facts full_name of
+                  SOME e => entry_def_pos (#pos e)
+                | NONE => ("", 0, 0))
+      in SOME {uk = rekey uk thm, name = disp_name, pos = pos, is_local = not is_global} end
+    fun rule key_of' _ thm = key_of' NONE context thm
+    fun name_space key_of =
+      (case key_of context name of
+        (uk, full_name, SOME pos) =>
+          SOME {uk = uk, name = full_name, pos = entry_def_pos pos, is_local = false}
+      | (_, _, NONE) => NONE)
+  in
+    (case kind of
+      Universal_Key.TheoremK => theorem (fn uk => fn _ => uk)
+    | Universal_Key.IntroductionRuleK => theorem (rule Universal_Key.key_of_introduction_rule')
+    | Universal_Key.EliminationRuleK => theorem (rule Universal_Key.key_of_elimination_rule')
+    | Universal_Key.InductionRuleK => theorem (rule Universal_Key.key_of_induction_rule')
+    | Universal_Key.CaseSplitRuleK => theorem (rule Universal_Key.key_of_case_split_rule')
+    | Universal_Key.ConstantK => name_space Universal_Key.key_of_constant
+    | Universal_Key.TypeK => name_space Universal_Key.key_of_type
+    | Universal_Key.ClassK => name_space Universal_Key.key_of_class
+    | Universal_Key.LocaleK => name_space Universal_Key.key_of_locale
+    | Universal_Key.Theorem_CollectionK => name_space Universal_Key.key_of_theorem_collection
+    | Universal_Key.MethodK => name_space Universal_Key.key_of_method)
+    handle ERROR _ => NONE
   end
 
 fun resolve_ctx context target_thy_opt =
@@ -1036,7 +1081,7 @@ fun ns_filter limit key_of space target_name exclude_set include_pred extra_filt
                        let val pass_filter = case filter_opt of
                                NONE => true | SOME f => f name
                        in if not pass_filter then NONE
-                          else SOME (key_of name, name, entry_def_pos entry)
+                          else SOME (key_of name, name, entry_def_pos (#pos entry))
                        end
                   end
              end) handle ERROR _ => NONE
@@ -1354,7 +1399,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
                 if #concealed e
                    orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
                 then []
-                else let val epos = entry_def_pos e
+                else let val epos = entry_def_pos (#pos e)
                      in map (fn thm => (name, name, Thm.transfer thy thm, epos, true)) thms end)
           uncached
        end)
@@ -1523,6 +1568,21 @@ fun make_theory_long_name_callback (ctxt_unpack : context_unpacker)
     timeout = NONE
   }
 
+fun make_entries_of_names_callback (ctxt_unpack : context_unpacker)
+    : Remote_Procedure_Calling.callback' =
+  Remote_Procedure_Calling.mk_callback {
+    name = "Context.entries_of_names",
+    on_interrupt = Remote_Procedure_Calling.Reraise,
+    arg_schema = unpackPair (ctxt_unpack,
+                   unpackList (unpackPair (Universal_Key.unpack_entity_kind, unpackString))),
+    ret_schema = packList (packOption (packTuple4 (Universal_Key.pack_universal_key,
+                   packString, pack_pos, packBool))),
+    function = fn (context, items) =>
+      map (Option.map (fn {uk, name, pos, is_local} => (uk, name, pos, is_local))
+           o entry_of_name context) items,
+    timeout = NONE
+  }
+
 fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
@@ -1575,7 +1635,7 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
                       else
                         (Strhashtab.update seen (name_str, ());
                          let val epos = case entry_of_fact facts (#1 nm) of
-                               SOME e => entry_def_pos e | NONE => ("", 0, 0)
+                               SOME e => entry_def_pos (#pos e) | NONE => ("", 0, 0)
                          in SOME (name_str, name_str, thm, epos, false) end)
                    end
                end)
@@ -1593,7 +1653,7 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
                       orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
                    then []
                    else
-                     let val epos = entry_def_pos e
+                     let val epos = entry_def_pos (#pos e)
                          (* empty owning theory => genuinely proof-context-local *)
                          val is_local = (case #theory_long_name e of "" => true | _ => false)
                          (* index over the FULL thm list (shape drop AFTER indexing),

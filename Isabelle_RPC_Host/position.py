@@ -291,6 +291,13 @@ class IsabellePosition:
         label, file, id = tup3
         return cls(line, offset, file)
 
+    @classmethod
+    def from_def_pos(cls, def_pos) -> "IsabellePosition | None":
+        """ML's `Context_Callbacks.def_pos` triple ``(file, line, offset)``; None
+        when the file is empty or the offset is 0 (unknown)."""
+        file, line, offset = def_pos
+        return cls(line, offset, file) if file and offset else None
+
     def pack(self):
         return (self.line, self.raw_offset, 0, (b'', self.file, 0))
 
