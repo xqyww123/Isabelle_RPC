@@ -194,14 +194,6 @@ no such constructor, and `unpack_entity_kind` raises `Unpack` on 8. Do not send 
 Read-only enumeration of a context's entities, exposed as per-command callbacks. Registers
 nothing itself.
 
-**By-name resolution.** The resolver `entry_of_name : Context.generic -> entity_kind * string ->
-{uk, name, pos, is_local} option` resolves one name of one kind by name only: no infra filter,
-no rule-kind membership test. A dynamic-collection member has `pos = ("", 0, 0)`. It is `NONE`
-when the name does not resolve, and for a fixed variable asked as a constant. The callback
-`Context.entries_of_names` (`make_entries_of_names_callback : context_unpacker -> callback'`)
-answers a list of `(kind, name)` with one `(uk, name, pos, is_local) option` each, in order. It
-touches no enumeration callback.
-
 Common arg (`unpackTuple9`, preceded by the context):
 
 ```
@@ -248,6 +240,14 @@ this way is **kept**, with a warning. Diagnostics are marked up by `Inner_Syntax
 **Two opposite failure policies over the same parser:** the query path *ignores* an
 unparseable pattern (warn + drop); `Experience.constituents` **fail-fasts** with an `error`,
 because silently ignoring a goal pattern would write a wrong experience record.
+
+**By-name resolution.** The resolver `entry_of_name : Context.generic -> entity_kind * string ->
+{uk, name, pos, is_local} option` resolves one name of one kind by name only: no infra filter,
+no rule-kind membership test. A dynamic-collection member has `pos = ("", 0, 0)`. It is `NONE`
+when the name does not resolve, and for a fixed variable asked as a constant. The callback
+`Context.entries_of_names` (`make_entries_of_names_callback : context_unpacker -> callback'`)
+takes `(ctxt, [(kind, name)])` and returns one `(uk, name, pos, is_local) option` per item, in
+order. It touches no enumeration callback.
 
 **Experience memory.** `Experience.constituents` maps goal patterns to the maximal antichain
 of defining theories (Python XORs those hashes into the key prefix). `Context.experiences`

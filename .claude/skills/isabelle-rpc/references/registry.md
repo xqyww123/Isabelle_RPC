@@ -66,7 +66,8 @@ Constructed by `make_*_callback` functions. None of them self-register.
 | `Context.experiences` | `make_experiences_callback` |
 
 They are wired up in [`semantic_store.ML`](https://github.com/xqyww123/Premise_Embedding/blob/master/Tools/semantic_store.ML)
-(`make_entity_callbacks`, ~line 1014) and [`agent_server.ML:1391`](https://github.com/xqyww123/Isa-Mini/blob/main/Agent/agent_server.ML#L1391).
+(`make_entity_callbacks`; `interpret_file_callbacks` carries `Context.theory_long_name_and_path` and
+`Context.entries_of_names`) and [`agent_server.ML`](https://github.com/xqyww123/Isa-Mini/blob/main/Agent/agent_server.ML).
 **Nothing in `Isabelle_RPC` itself registers them** — without that layer the names do not
 exist on the wire.
 

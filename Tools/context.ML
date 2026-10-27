@@ -97,10 +97,9 @@ signature CONTEXT_CALLBACKS = sig
      inside is_infra_thm, which already carries them. *)
   val entry_of_fact : Facts.T -> string -> name_space_entry option
   (* The resolver: one (kind, name) in a context, resolved by name only -- no
-     infra filter, no rule-kind membership test, no dynamic-fact test of its
-     own.  A member of a dynamic fact has no declaration: pos ("", 0, 0).  NONE
-     when the name does not resolve, and for a fixed variable asked as a
-     constant. *)
+     infra filter, no rule-kind membership test.  A member of a dynamic fact
+     has no declaration: pos ("", 0, 0).  NONE when the name does not resolve,
+     and for a fixed variable asked as a constant. *)
   val entry_of_name : Context.generic -> Universal_Key.entity_kind * string ->
     {uk: Universal_Key.universal_key, name: string, pos: def_pos, is_local: bool} option
   val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
