@@ -105,6 +105,13 @@ class Connection:
         # here, whichever of the two close paths is taken first.
         self.on_close: list[Callable[[], None]] = []
         self._closed = False
+        # What belongs to the request this connection serves now: a fresh dict at
+        # the start and at the end of every request (handle_client).  Isabelle
+        # sends one request at a time per connection and binds its callbacks to
+        # it, so anything derived from those callbacks (Semantic_Embedding's
+        # retrieval closure, the enumeration mirrors) lives here and can never
+        # outlive them into a later request.
+        self.request_state: dict[str, Any] = {}
 
     async def _feed_and_unpack(self) -> Any:
         """Read bytes from StreamReader, feed to Unpacker, return next msgpack object."""
@@ -343,6 +350,7 @@ class Server:
                         self.logger.error(f"From {client_addr}, invalid RPC request: {err_details}")
                         await connection.write_error("Invalid RPC request")
                         return
+                    connection.request_state = {}
                     try:
                         func = Remote_Procedures[func_name]
                     except KeyError:
@@ -406,6 +414,9 @@ class Server:
                     else:
                         self.logger.error(f"From {client_addr}, error handling RPC request: {e}")
                         return
+                finally:
+                    # drop the request's state (e.g. enumeration mirrors) on every exit
+                    connection.request_state = {}
         finally:
             connection._stop_reader()
             _connection_var.reset(token)

@@ -1,18 +1,19 @@
 """Context entity enumeration over RPC.
 
-Each function enumerates entities from the Isabelle context where the RPC
-was initiated, or from a specific theory if ``theory`` is given.
+``entities_of`` enumerates entities from the Isabelle context where the RPC was
+initiated, or from a specific theory if ``theory`` is given.
 
-Every call enumerates the LIVE context — there is no caching layer.  One
-existed here (per-connection, keyed on "no filters, no ctxt") and was retired
-2026-08-26 by owner ruling: it had no invalidation while the ML side
-enumerates a name space that changes with every proved lemma, so a hit could
-only return stale entities — and the retrieval path never hit it anyway (it
-always passes an exclusion list and usually a ctxt).  See
-Semantic_Embedding/INFRA_FILTER_REWORK_PLAN.md §18.  A future cache needs a
-staleness token designed first.
+Every call enumerates the LIVE context.  What travels is only new: each kind's
+callback owns a catalog on the ML side (Entity_Catalog), the append-only
+numbering of the entries its replies have returned in this request.  Python
+keeps a mirror of it in ``connection.request_state`` and sends its length
+(``synced_length``); a reply carries the indices of its results, as a bitmap or
+an index list, and the catalog entries the mirror lacks.  Mirror and catalog both
+end with the request.  (A per-connection cache keyed on "no filters, no ctxt"
+was retired 2026-08-26: it had no invalidation; see
+Semantic_Embedding/INFRA_FILTER_REWORK_PLAN.md §18.)
 
-Args common to all entity functions:
+Args of ``entities_of``:
     theory: Long theory name (e.g. ``'HOL.List'``) to target. If ``None``,
         uses the context where the RPC was initiated.
     the_theory_only: If ``True``, return only entities defined in the target
@@ -38,287 +39,96 @@ Additional filtering (only on applicable entity kinds):
         Applicable to all entity kinds.
 """
 
+import asyncio
 from typing import Any
 
 from .rpc import Connection
-from .position import IsabellePosition
 from .unicode import ascii_of_unicode
 from .universal_key import (EntityKind, universal_key,
                             RULE_ONLY_KINDS, RULE_ONLY_TAG_BYTES, theorem_sibling_key)
 
-# (universal_key, full_name, definition_position_or_None)
-type entity_entry = tuple[universal_key, str, IsabellePosition | None]
+# (universal_key, full_name, is_local); is_local = proof-context-local, which
+# drives the no-embedding default score downstream (always False outside the
+# theorem and rule kinds)
+type entity_entry = tuple[universal_key, str, bool]
 
-# # Debug reverse map: universal_key → readable name
-# _debug_key_names: dict[bytes, str] = {}
-#
-# def debug_key_name(uk: universal_key) -> str | None:
-#     """Look up readable name for a universal key (debug only)."""
-#     return _debug_key_names.get(uk)
-
-
-async def _call(connection: Connection, callback_name: str,
-          theory: str | None, the_theory_only: bool,
-          exclude: list[str],
-          term_patterns: list[str] = [],
-          type_patterns: list[str] = [],
-          theories_include: list[str] = [],
-          name_contains: list[str] = [],
-          limit: int = -1,
-          target_type: str = "",
-          ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Returns (entries, warnings). limit<0 means no limit.
-    Each entry is (universal_key, IsabellePosition | None).
-    target_type: only honoured by induction/case-split rule callbacks; "" = no filter.
-    Each ``name_contains`` pattern is normalized via ``ascii_of_unicode`` (the ML
-    filter compares bytes against ASCII-notation names), so patterns may be given
-    in either form.
-    """
-    entries_raw, warnings = await connection.callback(callback_name,
-                (ctxt, (theory, the_theory_only, exclude,
-                 term_patterns, type_patterns, theories_include,
-                 [ascii_of_unicode(p) for p in name_contains], limit, target_type)))
-    entries: list[entity_entry] = []
-    for k_raw, name, pos in entries_raw:
-        entries.append((bytes(k_raw), name, IsabellePosition.from_def_pos(pos)))
-    return entries, list(warnings)
-
-
-async def _call_thm(connection: Connection, callback_name: str,
-          theory: str | None, the_theory_only: bool,
-          exclude: list[str],
-          term_patterns: list[str] = [],
-          type_patterns: list[str] = [],
-          theories_include: list[str] = [],
-          name_contains: list[str] = [],
-          limit: int = -1,
-          target_type: str = "",
-          ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Like _call but for the theorem-like callbacks (Context.theorems and the four
-    rule kinds), whose entries carry a 4th element is_local (true = proof-context-
-    local). Returns (entries, is_local, warnings), where is_local maps each uk -> bool.
-    limit<0 means no limit.  ``name_contains`` is normalized as in ``_call``."""
-    entries_raw, warnings = await connection.callback(callback_name,
-                (ctxt, (theory, the_theory_only, exclude,
-                 term_patterns, type_patterns, theories_include,
-                 [ascii_of_unicode(p) for p in name_contains], limit, target_type)))
-    entries: list[entity_entry] = []
-    is_local: dict[universal_key, bool] = {}
-    for k_raw, name, pos, loc in entries_raw:
-        k = bytes(k_raw)
-        entries.append((k, name, IsabellePosition.from_def_pos(pos)))
-        is_local[k] = bool(loc)
-    return entries, is_local, list(warnings)
-
-
-async def constants(connection: Connection, theory: str | None = None,
-              the_theory_only: bool = False,
-              theories_not_include: list[str] = [],
-              type_patterns: list[str] = [],
-              theories_include: list[str] = [],
-              name_contains: list[str] = [],
-              limit: int = -1,
-              ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all constants.
-    Only type_patterns apply (constants have no proposition; term patterns are ignored).
-    """
-    return await _call(connection, "Context.constants",
-                           theory, the_theory_only, theories_not_include,
-                           [], type_patterns, theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def theorems(connection: Connection, theory: str | None = None,
-             the_theory_only: bool = False,
-             theories_not_include: list[str] = [],
-             term_patterns: list[str] = [],
-             type_patterns: list[str] = [],
-             theories_include: list[str] = [],
-             name_contains: list[str] = [],
-             limit: int = -1,
-             ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Return (entries, is_local, warnings) for all theorems. is_local maps each
-    uk -> whether the theorem is proof-context-local (drives the no-embedding
-    default score downstream)."""
-    return await _call_thm(connection, "Context.theorems",
-                           theory, the_theory_only, theories_not_include,
-                           term_patterns, type_patterns, theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def types(connection: Connection, theory: str | None = None,
-          the_theory_only: bool = False,
-          theories_not_include: list[str] = [],
-          theories_include: list[str] = [],
-          name_contains: list[str] = [],
-          limit: int = -1,
-          ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all types.
-    Pattern parameters are not applicable to types.
-    """
-    return await _call(connection, "Context.types",
-                           theory, the_theory_only, theories_not_include,
-                           [], [], theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def classes(connection: Connection, theory: str | None = None,
-            the_theory_only: bool = False,
-            theories_not_include: list[str] = [],
-            theories_include: list[str] = [],
-            name_contains: list[str] = [],
-            limit: int = -1,
-            ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all type classes.
-    Pattern parameters are not applicable to classes.
-    """
-    return await _call(connection, "Context.classes",
-                           theory, the_theory_only, theories_not_include,
-                           [], [], theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def locales(connection: Connection, theory: str | None = None,
-            the_theory_only: bool = False,
-            theories_not_include: list[str] = [],
-            theories_include: list[str] = [],
-            name_contains: list[str] = [],
-            limit: int = -1,
-            ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all locales.
-    Pattern parameters are not applicable to locales.
-    """
-    return await _call(connection, "Context.locales",
-                           theory, the_theory_only, theories_not_include,
-                           [], [], theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def theorem_collection(connection: Connection, theory: str | None = None,
-            the_theory_only: bool = False,
-            theories_not_include: list[str] = [],
-            term_patterns: list[str] = [],
-            type_patterns: list[str] = [],
-            theories_include: list[str] = [],
-            name_contains: list[str] = [],
-            limit: int = -1,
-            ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all theorem collections (dynamic facts:
-    named_theorems and raw add_thms_dynamic collections like derivative_eq_intros).
-    term_patterns/type_patterns keep a collection only when >= half of its non-infra
-    members have a proposition matching the pattern (ML-side, see
-    make_theorem_collection_callback); empty patterns are a no-op.
-    """
-    return await _call(connection, "Context.theorem_collection",
-                           theory, the_theory_only, theories_not_include,
-                           term_patterns, type_patterns, theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def methods(connection: Connection, theory: str | None = None,
-            the_theory_only: bool = False,
-            theories_not_include: list[str] = [],
-            theories_include: list[str] = [],
-            name_contains: list[str] = [],
-            limit: int = -1,
-            ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
-    """Return (entries, warnings) for all proof methods.
-    Pattern parameters are not applicable to methods.
-    """
-    return await _call(connection, "Context.methods",
-                           theory, the_theory_only, theories_not_include,
-                           [], [], theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def introduction_rules(connection: Connection, theory: str | None = None,
-                       the_theory_only: bool = False,
-                       theories_not_include: list[str] = [],
-                       term_patterns: list[str] = [],
-                       type_patterns: list[str] = [],
-                       theories_include: list[str] = [],
-                       name_contains: list[str] = [],
-                       limit: int = -1,
-                       ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Return (entries, is_local, warnings) for all introduction rules. is_local maps
-    each uk -> whether the rule is proof-context-local (drives the no-embedding
-    default score downstream)."""
-    return await _call_thm(connection, "Context.introduction_rules",
-                           theory, the_theory_only, theories_not_include,
-                           term_patterns, type_patterns, theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def elimination_rules(connection: Connection, theory: str | None = None,
-                      the_theory_only: bool = False,
-                      theories_not_include: list[str] = [],
-                      term_patterns: list[str] = [],
-                      type_patterns: list[str] = [],
-                      theories_include: list[str] = [],
-                      name_contains: list[str] = [],
-                      limit: int = -1,
-                      ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Return (entries, is_local, warnings) for all elimination rules. is_local maps
-    each uk -> whether the rule is proof-context-local."""
-    return await _call_thm(connection, "Context.elimination_rules",
-                           theory, the_theory_only, theories_not_include,
-                           term_patterns, type_patterns, theories_include,
-                           name_contains, limit, ctxt=ctxt)
-
-
-async def induction_rules(connection: Connection, theory: str | None = None,
-                    the_theory_only: bool = False,
-                    theories_not_include: list[str] = [],
-                    term_patterns: list[str] = [],
-                    type_patterns: list[str] = [],
-                    theories_include: list[str] = [],
-                    name_contains: list[str] = [],
-                    limit: int = -1,
-                    target_type: str = "",
-                    ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Return (entries, is_local, warnings) for all induction rules. is_local maps
-    each uk -> whether the rule is proof-context-local.
-    target_type: if non-empty, restrict to rules whose target type unifies with it
-    (bidirectional Sign.typ_instance; wildcards allowed)."""
-    return await _call_thm(connection, "Context.induction_rules",
-                           theory, the_theory_only, theories_not_include,
-                           term_patterns, type_patterns, theories_include,
-                           name_contains, limit, target_type, ctxt=ctxt)
-
-
-async def case_split_rules(connection: Connection, theory: str | None = None,
-                     the_theory_only: bool = False,
-                     theories_not_include: list[str] = [],
-                     term_patterns: list[str] = [],
-                     type_patterns: list[str] = [],
-                     theories_include: list[str] = [],
-                     name_contains: list[str] = [],
-                     limit: int = -1,
-                     target_type: str = "",
-                     ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Return (entries, is_local, warnings) for all case-split rules. is_local maps
-    each uk -> whether the rule is proof-context-local.
-    target_type: if non-empty, restrict to rules whose target type unifies with it
-    (bidirectional Sign.typ_instance; wildcards allowed)."""
-    return await _call_thm(connection, "Context.case_split_rules",
-                           theory, the_theory_only, theories_not_include,
-                           term_patterns, type_patterns, theories_include,
-                           name_contains, limit, target_type, ctxt=ctxt)
-
-
-_KIND_TO_FUNC = {
-    EntityKind.CONSTANT: constants,
-    EntityKind.THEOREM: theorems,
-    EntityKind.TYPE: types,
-    EntityKind.CLASS: classes,
-    EntityKind.LOCALE: locales,
-    EntityKind.THEOREM_COLLECTION: theorem_collection,
-    EntityKind.METHOD: methods,
-    EntityKind.INTRODUCTION_RULE: introduction_rules,
-    EntityKind.ELIMINATION_RULE: elimination_rules,
-    EntityKind.INDUCTION_RULE: induction_rules,
-    EntityKind.CASE_SPLIT_RULE: case_split_rules,
+# kind -> (callback, whether it takes term_patterns, type_patterns, target_type)
+_CALLBACKS: dict[EntityKind, tuple[str, bool, bool, bool]] = {
+    EntityKind.CONSTANT: ("Context.constants", False, True, False),
+    EntityKind.THEOREM: ("Context.theorems", True, True, False),
+    EntityKind.TYPE: ("Context.types", False, False, False),
+    EntityKind.CLASS: ("Context.classes", False, False, False),
+    EntityKind.LOCALE: ("Context.locales", False, False, False),
+    EntityKind.THEOREM_COLLECTION: ("Context.theorem_collection", True, True, False),
+    EntityKind.METHOD: ("Context.methods", False, False, False),
+    EntityKind.INTRODUCTION_RULE: ("Context.introduction_rules", True, True, False),
+    EntityKind.ELIMINATION_RULE: ("Context.elimination_rules", True, True, False),
+    EntityKind.INDUCTION_RULE: ("Context.induction_rules", True, True, True),
+    EntityKind.CASE_SPLIT_RULE: ("Context.case_split_rules", True, True, True),
 }
+
+_MIRRORS = "Isabelle_RPC_Host.context.mirrors"   # key in connection.request_state
+
+# per byte value: the positions of its set bits, MSB first
+_SET_BITS: tuple[tuple[int, ...], ...] = tuple(
+    tuple(j for j in range(8) if b & (0x80 >> j)) for b in range(256))
+
+
+class _Mirror:
+    """The entries [0, len(entries)) of one kind's catalog; ``lock`` serializes the
+    calls of that kind, so a reply is applied before the next one is asked for."""
+    __slots__ = ("entries", "lock")
+
+    def __init__(self) -> None:
+        self.entries: list[entity_entry] = []
+        self.lock = asyncio.Lock()
+
+
+def _decode_indices(index_set: bytes | list[int]) -> list[int]:
+    """A bitmap (bytes, MSB-first in a byte) or an index list, as indices."""
+    if not isinstance(index_set, (bytes, bytearray)):
+        return list(index_set)
+    indices: list[int] = []
+    for n, byte in enumerate(index_set):
+        if byte:
+            indices.extend(8 * n + j for j in _SET_BITS[byte])
+    return indices
+
+
+async def _enumerate(connection: Connection, kind: EntityKind, theory: str | None,
+                     the_theory_only: bool, exclude: list[str], term_patterns: list[str],
+                     type_patterns: list[str], theories_include: list[str],
+                     name_contains: list[str], limit: int, target_type: str,
+                     ctxt: Any) -> tuple[list[entity_entry], list[str]]:
+    """One kind's entities and warnings, through its mirror.  The only reader and
+    writer of the mirrors.  Each ``name_contains`` pattern is normalized via
+    ``ascii_of_unicode`` (the ML filter compares ASCII-notation names)."""
+    callback, terms, types, target = _CALLBACKS[kind]
+    # created with no await in between, so concurrent first calls share one
+    mirrors: dict[EntityKind, _Mirror] = connection.request_state.setdefault(_MIRRORS, {})
+    mirror = mirrors.get(kind)
+    if mirror is None:
+        mirror = mirrors[kind] = _Mirror()
+    async with mirror.lock:
+        synced_length = len(mirror.entries)
+        index_set, delivered, warnings = await connection.callback(callback,
+            (ctxt, (theory, the_theory_only, exclude,
+                    term_patterns if terms else [], type_patterns if types else [],
+                    theories_include, [ascii_of_unicode(p) for p in name_contains],
+                    limit, target_type if target else "", synced_length)))
+        if any(index != expected
+               for expected, (_, _, _, index) in enumerate(delivered, synced_length)):
+            raise RuntimeError(f"{callback}: the delivered entries do not continue the "
+                               f"mirror at {synced_length} without a gap")
+        mirror.entries.extend((bytes(uk), name, bool(is_local))
+                              for uk, name, is_local, _ in delivered)
+        if (isinstance(index_set, (bytes, bytearray))
+                and len(index_set) != (len(mirror.entries) + 7) // 8):
+            raise RuntimeError(f"{callback}: a bitmap of {len(index_set)} bytes over a "
+                               f"catalog of {len(mirror.entries)} entries")
+        entries = mirror.entries
+        return [entries[i] for i in _decode_indices(index_set)], list(warnings)
+
 
 async def entities_of(connection: Connection, kinds: list[EntityKind],
                 theory: str | None = None,
@@ -330,14 +140,14 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
                 name_contains: list[str] = [],
                 limit: int = -1,
                 target_type: str = "",
-                ctxt: Any = None) -> tuple[list[entity_entry], dict[universal_key, bool], list[str]]:
-    """Return (entries, is_local, warnings) for all entities of the given kinds.
+                ctxt: Any = None) -> tuple[list[entity_entry], list[str]]:
+    """Return (entries, warnings) for all entities of the given kinds.
 
-    Each entry is (universal_key, IsabellePosition | None).  The position is
-    None for entities with unknown positions (e.g. from live PIDE with
-    ID-based positions).  is_local maps a uk -> whether it is proof-context-local;
-    theorems AND all four rule kinds populate it (a library/classical-net rule is
-    false; a proof-local theorem or an empty-owning-theory rule fact is true).
+    Each entry is (universal_key, full name, is_local).  is_local is whether the
+    entity is proof-context-local; theorems AND all four rule kinds set it (a
+    library/classical-net rule is False; a proof-local theorem or an
+    empty-owning-theory rule fact is True); every other kind gives False.
+    The entries form a set: their order carries no meaning.
 
     Pattern parameters are forwarded only to entity kinds that support them:
     term_patterns → theorems, all four rule kinds (intro/elim/induction/case-split),
@@ -353,65 +163,15 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     _perf_log = _logging.getLogger("perf.entities_of")
     _t_total = _time.perf_counter()
     result: list[entity_entry] = []
-    is_local: dict[universal_key, bool] = {}
     all_warnings: list[str] = []
     for kind in kinds:
-        func = _KIND_TO_FUNC.get(kind)
-        if func is None:
+        if kind not in _CALLBACKS:
             continue
         _t_kind = _time.perf_counter()
-        # Pass only the parameters each function accepts
-        if kind in (EntityKind.TYPE, EntityKind.CLASS, EntityKind.LOCALE,
-                    EntityKind.METHOD):
-            entries, warnings = await func(connection, theory, the_theory_only,
-                                  theories_not_include,
-                                  theories_include=theories_include,
-                                  name_contains=name_contains,
-                                  limit=limit,
-                                  ctxt=ctxt)
-        elif kind == EntityKind.THEOREM_COLLECTION:
-            # Collections take term/type patterns (half-member-match gate) but, unlike
-            # the THEOREM/rule kinds, return a 2-tuple with no is_local map.
-            entries, warnings = await func(connection, theory, the_theory_only,
-                                  theories_not_include,
-                                  term_patterns=term_patterns,
-                                  type_patterns=type_patterns,
-                                  theories_include=theories_include,
-                                  name_contains=name_contains,
-                                  limit=limit,
-                                  ctxt=ctxt)
-        elif kind == EntityKind.CONSTANT:
-            entries, warnings = await func(connection, theory, the_theory_only,
-                                  theories_not_include,
-                                  type_patterns=type_patterns,
-                                  theories_include=theories_include,
-                                  name_contains=name_contains,
-                                  limit=limit,
-                                  ctxt=ctxt)
-        elif kind in (EntityKind.INDUCTION_RULE, EntityKind.CASE_SPLIT_RULE):
-            # induction/case-split rules return the per-uk is_local map and take target_type
-            entries, kind_is_local, warnings = await func(connection, theory, the_theory_only,
-                                  theories_not_include,
-                                  term_patterns=term_patterns,
-                                  type_patterns=type_patterns,
-                                  theories_include=theories_include,
-                                  name_contains=name_contains,
-                                  limit=limit,
-                                  target_type=target_type,
-                                  ctxt=ctxt)
-            is_local.update(kind_is_local)
-        else:
-            # THEOREM, INTRODUCTION_RULE, ELIMINATION_RULE: all return the per-uk
-            # is_local map; none take target_type
-            entries, kind_is_local, warnings = await func(connection, theory, the_theory_only,
-                                  theories_not_include,
-                                  term_patterns=term_patterns,
-                                  type_patterns=type_patterns,
-                                  theories_include=theories_include,
-                                  name_contains=name_contains,
-                                  limit=limit,
-                                  ctxt=ctxt)
-            is_local.update(kind_is_local)
+        entries, warnings = await _enumerate(connection, kind, theory, the_theory_only,
+                                             theories_not_include, term_patterns,
+                                             type_patterns, theories_include,
+                                             name_contains, limit, target_type, ctxt)
         _perf_log.info("entities_of: kind=%s %.3fs (%d entries)",
                        kind.name, _time.perf_counter() - _t_kind, len(entries))
         result.extend(entries)
@@ -427,16 +187,14 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
     # => nothing suppressed; theorems-only or rules-only queries are untouched.
     if EntityKind.THEOREM in kinds and any(k in kinds for k in RULE_ONLY_KINDS):
         suppress: set[universal_key] = set()
-        for uk, _name, _pos in result:
+        for uk, _name, _is_local in result:
             if len(uk) == 32 and uk[16] in RULE_ONLY_TAG_BYTES:
                 suppress.add(theorem_sibling_key(uk))
         if suppress:
             result = [e for e in result if e[0] not in suppress]
-            for uk in suppress:
-                is_local.pop(uk, None)
 
     _perf_log.info("entities_of: total %.3fs (%d entries)", _time.perf_counter() - _t_total, len(result))
-    return result, is_local, all_warnings
+    return result, all_warnings
 
 
 async def theory_long_name(connection: Connection, ctxt: Any = None) -> str:

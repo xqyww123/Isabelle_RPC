@@ -4,7 +4,7 @@
 earlier ones:
 
 ```
-RPC.ML  UUID.ML  theory_hash.ML  Universal_Key.ML
+RPC.ML  UUID.ML  theory_hash.ML  Universal_Key.ML  entity_catalog.ML
 config.ML  pretty.ML  inner_syntax_error.ML  context.ML
 run_python.ML  tracing.ML  dialogue.ML
 ```
@@ -194,23 +194,33 @@ no such constructor, and `unpack_entity_kind` raises `Unpack` on 8. Do not send 
 Read-only enumeration of a context's entities, exposed as per-command callbacks. Registers
 nothing itself.
 
-Common arg (`unpackTuple9`, preceded by the context):
+Common arg (`unpackTuple10`, preceded by the context):
 
 ```
 (target_theory : string option, the_theory_only : bool, exclude : string list,
  term_patterns : string list, type_patterns : string list,
  theories_include : string list, name_contains : string list,
  limit : int,               (* < 0 = unlimited *)
- target_type : string)      (* "" = no filter *)
+ target_type : string,      (* "" = no filter *)
+ synced_length : int)       (* the caller's mirror holds catalog entries [0, synced_length) *)
 ```
 
-Two return shapes: `([(uk, name, (file,line,offset))], warnings)`, or — for `theorems` and the
-four rule kinds — `([(uk, name, pos, is_local)], warnings)`.
+One reply shape for all eleven (`Entity_Catalog.pack_reply`):
+`(index set, [(uk, name, is_local, index)], warnings)`. Each callback owns a **catalog**
+(`Entity_Catalog`, `Tools/entity_catalog.ML`): the append-only numbering of the
+`(uk, name, is_local)` entries its replies have returned, created when the callback is built
+and living as long as it. The index set lists this call's results as catalog indices — a
+bitmap (`bin`, ⌈len/8⌉ bytes, MSB-first in a byte) or an index list, whichever is smaller;
+the entries are the catalog from `synced_length` on. `is_local` is `false` outside the theorem
+and rule kinds. No position travels; positions come from the resolver (below). Python's
+`entities_of` keeps the mirror per kind in `connection.request_state` and returns
+`(entries, warnings)` with entries `(uk, name, is_local)`.
 
 Behavioural traps:
 
-- **`theorem_collection` returns a 2-tuple** (no `is_local`); `theorems` and the rule kinds
-  return 3.
+- **Build the callbacks once per `call_command`.** A callback reused by a later request still
+  answers correctly (the new request's mirror starts at 0 and ML re-delivers the catalog), but
+  sends it all again. A `synced_length` beyond the catalog is a protocol error.
 - **`target_type` is honoured only by `induction_rules` and `case_split_rules`.** Silently
   ignored elsewhere; a bad value warns rather than errors.
 - **`term_patterns` do nothing for constants** (only `type_patterns`, matched against the
@@ -219,8 +229,6 @@ Behavioural traps:
   `theories_include` substrings are ORed.
 - `the_theory_only = true` makes `exclude` / `theories_not_include` inert.
 - `limit` caps **per kind**, not the aggregate.
-- Python caches only the *fully default* query (no filters, `limit < 0`, `ctxt is None`);
-  any filter bypasses the cache.
 - Cross-kind dedup: a dynamic-collection rule member is stored under both a Theorem key
   (`0x02`) and a rule key. When a query asks for `THEOREM` **and** ≥1 rule kind, the Theorem
   face is suppressed.
@@ -229,8 +237,7 @@ Behavioural traps:
 (`named_theorems`, `add_thms_dynamic` collections such as `derivative_eq_intros`). With
 patterns present, a bundle survives iff **at least one** member's proposition matches. (It was
 originally "≥ half"; loosened because bundles like `continuous_intros` have 313 heterogeneous
-members and a proportional gate hid exactly the useful ones.) The Python docstring in
-`context.py` still says "≥ half" — **stale; the ML is authoritative.**
+members and a proportional gate hid exactly the useful ones.)
 
 **`parse_patterns`** parses each pattern individually, so one bad pattern doesn't sink the
 rest. Cascade per term pattern: raw, then `(s)`, `s('a)`, `s ?x`, `?x s ?y`. Last resort,

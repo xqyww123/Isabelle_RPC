@@ -24,6 +24,7 @@ class Connection:
     _user_channel: asyncio.Queue[Any]
     _reader_task: asyncio.Task[None] | None
     _write_lock: asyncio.Lock
+    request_state: dict[str, Any]
 
     @staticmethod
     def current() -> 'Connection | None': ...
