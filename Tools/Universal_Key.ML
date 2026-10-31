@@ -31,6 +31,7 @@
       0x01 = Constant, 0x02 = Theorem,
       0x03 = Type, 0x04 = Class, 0x05 = Locale,
       0x06 = Theorem_Collection, 0x07 = Method,
+      0x08 = Experience (Python side only),
       0x12 = Introduction_Rule, 0x22 = Elimination_Rule,
       0x32 = Induction_Rule, 0x42 = Case_Split_Rule
   - entity: variable-length payload identifying the entity within its theory.
@@ -135,6 +136,7 @@ val key_of_theory   : Context.generic -> xstring -> universal_key * string
 (* The third component of the six name-kind functions: the position of the
    name-space entry the key comes from; NONE for a fixed variable. *)
 val key_of_constant : Context.generic -> xstring -> universal_key * string * Position.T option
+(* Propositions matched exactly, bound-variable names included. *)
 type thm_uk_cache
 val new_thm_uk_cache : unit -> thm_uk_cache
 (* The fifth component is the DISPLAY name: full_name with the selected
@@ -233,6 +235,10 @@ val compute_constituents : Context.generic -> term
    (populated as a side effect of key construction); NONE for any other key
    shape, or a thm/rule key not yet built in this session. *)
 val constituents_of : universal_key -> constituent list option
+(* The XOR/WIP fold shared by every XOR-prefixed kind: XOR of the hashes, then
+   byte 0's LSB forced to the OR of the hashes' LSBs (WIP iff any is WIP).
+   Mirrored by xor_theory_prefix in universal_key.py — keep the two in sync. *)
+val xor_theory_prefix : Theory_Hash.hash list -> Theory_Hash.hash
 
 (* Resolve an xname that may already be a declared full internal name (whose
    accesses are all shadowed): prefer it verbatim; otherwise intern normally.
@@ -247,6 +253,10 @@ val pack_universal_key : universal_key MessagePackBinIO.Pack.packer
 val unpack_universal_key : universal_key MessagePackBinIO.Unpack.unpacker
 
 val entity_kind_int : entity -> int
+(* The wire kind-int of a kind, and its inverse (NONE for an unknown int); the
+   single source of truth that pack_entity_kind' and unpack_entity_kind use. *)
+val int_of_entity_kind : entity_kind -> int
+val entity_kind_of_int : int -> entity_kind option
 val pack_entity_kind : entity MessagePackBinIO.Pack.packer
 val pack_entity_kind' : entity_kind MessagePackBinIO.Pack.packer
 val unpack_entity_kind : entity_kind MessagePackBinIO.Unpack.unpacker
@@ -383,38 +393,32 @@ fun cached_key ck compute =
     | NONE => let val k = compute ()
               in CacheTab.update cache (ck, k); (k, ()) end)
 
-(* --- Thm prop cache (for theorems without derivation_id) --- *)
+(* --- Theorem and rule key cache --- *)
 
-type thm_uk_cache = (term * universal_key) Net.net Synchronized.var
+(* Keyed by the key's tag byte and the proposition, matched exactly
+   (syntax_term_ord is EQUAL iff =): term128 hashes bound-variable names, so an
+   alpha-variant has a key of its own.  The tag is part of the entry because one
+   proposition may be keyed as a theorem (0x02) and as rule kinds
+   (0x12/0x22/0x32/0x42) in the same cache. *)
+structure Thm_UK_Tab = Table(
+  type key = Word8.word * term
+  val ord = prod_ord Word8.compare Term_Ord.syntax_term_ord)
 
-fun new_thm_uk_cache () : thm_uk_cache =
-  Synchronized.var "thm_uk_cache" Net.empty
+type thm_uk_cache = universal_key Thm_UK_Tab.table Synchronized.var
 
-(* Entries are discriminated by the key's tag byte as well as the prop: the
-   same proposition may legitimately be keyed as a theorem (0x02) and as one
-   or more rule kinds (0x12/0x22/0x32/0x42) in the same cache. *)
-fun inet_lookup (cache : thm_uk_cache) (tag : Word8.word) (prop : term) : universal_key option =
-  List.find (fn (p, k) => Word8Vector.sub (k, 16) = tag andalso p aconv prop)
-    (Net.match_term (Synchronized.value cache) prop)
-  |> Option.map snd
+fun new_thm_uk_cache () : thm_uk_cache = Synchronized.var "thm_uk_cache" Thm_UK_Tab.empty
 
-fun inet_store (cache : thm_uk_cache) (prop : term) (k : universal_key) : unit =
-  Synchronized.change cache
-    (Net.insert_term_safe
-       (fn ((p1, k1), (p2, k2)) =>
-          p1 aconv p2 andalso Word8Vector.sub (k1, 16) = Word8Vector.sub (k2, 16))
-       (prop, (prop, k)))
-
+(* computed outside the lock; the first writer wins *)
 fun cached_thm_key (cache : thm_uk_cache option) (tag : Word8.word) (thm : thm)
                    (compute : unit -> universal_key) =
   case cache of
     NONE => compute ()
   | SOME c =>
-      let val prop = Thm.prop_of thm
-      in case inet_lookup c tag prop of
+      let val entry = (tag, Thm.prop_of thm)
+      in case Thm_UK_Tab.lookup (Synchronized.value c) entry of
            SOME k => k
          | NONE => let val k = compute ()
-                   in inet_store c prop k; k end
+                   in Synchronized.change c (Thm_UK_Tab.default (entry, k)); k end
       end
 
 (* --- Key construction helpers --- *)
@@ -516,6 +520,27 @@ fun note_report {skipped = s, empty_name_fallback = f} =
       {skipped = skipped + s,
        empty_name_fallback = empty_name_fallback + (if f then 1 else 0)})
 
+(* XOR all 16 bytes uniformly; the final `acc[0] |= wip` forces the LSB to the
+   OR of the hashes' LSBs, which dominates the LSB's XOR parity (parity = 1
+   implies some LSB = 1 implies wip = 1), so masking byte 0's LSB before XORing
+   would be redundant.  The one fold every XOR-prefixed kind uses. *)
+fun xor_theory_prefix (hashes : Theory_Hash.hash list) : Theory_Hash.hash =
+  let
+    val acc = Word8Array.array (16, 0w0)
+    val wip = fold (fn h => fn wip =>
+        let
+          fun loop i = if i >= 16 then ()
+            else (Word8Array.update (acc, i,
+                    Word8.xorb (Word8Array.sub (acc, i), Word8Vector.sub (h, i)));
+                  loop (i + 1))
+        in loop 0; Word8.orb (wip, Word8.andb (Word8Vector.sub (h, 0), 0w1)) end)
+      hashes (0w0 : Word8.word)
+    val _ = Word8Array.update (acc, 0, Word8.orb (Word8Array.sub (acc, 0), wip))
+  in Word8Array.vector acc end
+
+(* The constituent theories of a proposition: the defining theories of its
+   constants and type constructors, deduplicated by theory long name before
+   the XOR, so a theory met twice does not cancel out. *)
 fun compute_constituents (context : Context.generic) (prop : term)
     : Theory_Hash.hash * constituent list * constituents_report =
   let
@@ -567,26 +592,12 @@ fun compute_constituents (context : Context.generic) (prop : term)
       | walk (Bound _) = ()
     val _ = walk prop
 
-    (* XOR all 16 bytes uniformly; the final `acc[0] |= wip` below forces the
-       LSB to the OR of constituents' LSBs, which dominates the LSB's XOR
-       parity (parity = 1 implies some LSB = 1 implies wip = 1), so masking
-       byte 0's LSB before XORing would be redundant. *)
-    val acc = Word8Array.array (16, 0w0)
-    val wip = Strhashtab.fold (fn (_, (_, h)) => fn wip =>
-        let
-          fun loop i = if i >= 16 then ()
-            else (Word8Array.update (acc, i,
-                    Word8.xorb (Word8Array.sub (acc, i), Word8Vector.sub (h, i)));
-                  loop (i + 1))
-        in loop 0; Word8.orb (wip, Word8.andb (Word8Vector.sub (h, 0), 0w1)) end)
-      thys (0w0 : Word8.word)
-    val _ = Word8Array.update (acc, 0, Word8.orb (Word8Array.sub (acc, 0), wip))
     val provenance =
       Strhashtab.fold (fn (_, c) => fn cs => c :: cs) thys []
       |> sort (string_ord o apply2 #1)
     val report = {skipped = ! skipped, empty_name_fallback = ! fallback}
     val _ = note_report report
-  in (Word8Array.vector acc, provenance, report) end
+  in (xor_theory_prefix (map #2 provenance), provenance, report) end
 
 (* --- The constituents cache, and the population that may share one ---
 
@@ -1108,10 +1119,30 @@ local open MessagePackBinIO.Pack MessagePackBinIO.Unpack in
 (*  1 = Constant, 2 = Theorem/Named_Theorem,
     3 = Type, 4 = Class, 5 = Locale, 6 = Theorem_Collection, 7 = Method,
     0x12 = Introduction_Rule, 0x22 = Elimination_Rule  *)
-(* The wire kind-int of an entity (single source of truth; pack_entity_kind
-   derives from it so they cannot drift).  Several constructors collapse to the
-   same int (Theorem/Named_Theorem -> 2; each rule and its Named_ variant share
-   a tag), exactly as the Python side keys its prompt label — so two entries
+(* The wire kind-int of a kind, the single source of truth the three functions
+   below derive from so they cannot drift.  Python's EntityKind lists the same
+   ints (8 is its EXPERIENCE, which has no ML entity). *)
+fun int_of_entity_kind ConstantK            = 1
+  | int_of_entity_kind TheoremK             = 2
+  | int_of_entity_kind TypeK                = 3
+  | int_of_entity_kind ClassK               = 4
+  | int_of_entity_kind LocaleK              = 5
+  | int_of_entity_kind Theorem_CollectionK  = 6
+  | int_of_entity_kind MethodK              = 7
+  | int_of_entity_kind IntroductionRuleK    = 0x12
+  | int_of_entity_kind EliminationRuleK     = 0x22
+  | int_of_entity_kind InductionRuleK       = 0x32
+  | int_of_entity_kind CaseSplitRuleK       = 0x42
+
+val all_entity_kinds =
+  [ConstantK, TheoremK, TypeK, ClassK, LocaleK, Theorem_CollectionK, MethodK,
+   IntroductionRuleK, EliminationRuleK, InductionRuleK, CaseSplitRuleK]
+
+fun entity_kind_of_int k = find_first (fn kind => int_of_entity_kind kind = k) all_entity_kinds
+
+(* The wire kind-int of an entity.  Several constructors collapse to the same
+   int (Theorem/Named_Theorem -> 2; each rule and its Named_ variant share a
+   tag), exactly as the Python side keys its prompt label — so two entries
    share an agent-facing label iff they share (entity_kind_int, name). *)
 fun entity_kind_int (Constant _)               = 1
   | entity_kind_int (Theorem _)                = 2
@@ -1132,28 +1163,11 @@ fun entity_kind_int (Constant _)               = 1
 
 val pack_entity_kind = packInt o entity_kind_int
 
-fun pack_entity_kind' ConstantK         = packInt 1
-  | pack_entity_kind' TheoremK          = packInt 2
-  | pack_entity_kind' TypeK             = packInt 3
-  | pack_entity_kind' ClassK            = packInt 4
-  | pack_entity_kind' LocaleK           = packInt 5
-  | pack_entity_kind' Theorem_CollectionK    = packInt 6
-  | pack_entity_kind' MethodK           = packInt 7
-  | pack_entity_kind' IntroductionRuleK = packInt 0x12
-  | pack_entity_kind' EliminationRuleK  = packInt 0x22
-  | pack_entity_kind' InductionRuleK    = packInt 0x32
-  | pack_entity_kind' CaseSplitRuleK    = packInt 0x42
+val pack_entity_kind' = packInt o int_of_entity_kind
 
 val unpack_entity_kind : entity_kind unpacker = fn ins =>
   let val (k, ins') = unpackInt ins
-  in (case k of
-        1 => ConstantK | 2 => TheoremK | 3 => TypeK
-      | 4 => ClassK | 5 => LocaleK
-      | 6 => Theorem_CollectionK | 7 => MethodK
-      | 0x12 => IntroductionRuleK | 0x22 => EliminationRuleK
-      | 0x32 => InductionRuleK | 0x42 => CaseSplitRuleK
-      | _ => raise Unpack, ins')
-  end
+  in (case entity_kind_of_int k of SOME kind => kind | NONE => raise Unpack, ins') end
 
 fun pack_thm_entity tag thm =
   if Thm.has_name_hint thm

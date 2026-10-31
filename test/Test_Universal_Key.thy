@@ -103,6 +103,23 @@ val _ =
   check "A2 forked although it collides with nothing"
     (Universal_Key.cache_scope_id thy_a2 = Universal_Key.cache_scope_id thy_a)
 
+(* 7. The XOR/WIP fold, on the byte vectors test_universal_key_prefix.py pins for
+      Python's xor_theory_prefix: the two folds must agree, since Python re-keys
+      stored records with its own (semantics.py's migration). *)
+fun bytes l = Word8Vector.fromList (map Word8.fromInt l)
+val _ =
+  check "the fold of two WIP-free hashes is not their byte-wise XOR"
+    (Universal_Key.xor_theory_prefix
+       [bytes (0x02 :: replicate 15 0xAA), bytes (0x04 :: replicate 15 0x55)]
+     = bytes (0x06 :: replicate 15 0xFF))
+val _ =
+  check "two WIP hashes lost the WIP bit"
+    (Word8Vector.sub (Universal_Key.xor_theory_prefix
+       [bytes (0x03 :: replicate 15 0), bytes (0x05 :: replicate 15 0)], 0) = 0wx07)
+val _ =
+  check "the fold of no hash is not the zero hash"
+    (Universal_Key.xor_theory_prefix [] = bytes (replicate 16 0))
+
 in
 val _ = writeln "Test_Universal_Key: all checks passed"
 end

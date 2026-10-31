@@ -96,8 +96,8 @@ signature CONTEXT_CALLBACKS = sig
      absent).  The fact space is derived from the Facts.T PARAMETER -- which
      space a caller passes is its whole scoping decision (e.g. the global
      space rejects proof-local labels with no test written anywhere).  No
-     guards live here: concealed/hidden tests stay at the call sites, or
-     inside is_infra_thm, which already carries them. *)
+     guards live here: accessible_entry_of_fact adds the concealed/hidden
+     test, and is_infra_thm already carries it. *)
   val entry_of_fact : Facts.T -> string -> name_space_entry option
   (* The resolver: one (kind, name) in a context, resolved by name only -- no
      infra filter, no rule-kind membership test.  A member of a dynamic fact
@@ -105,6 +105,11 @@ signature CONTEXT_CALLBACKS = sig
      and for a fixed variable asked as a constant. *)
   val entry_of_name : Context.generic -> Universal_Key.entity_kind * string ->
     {uk: Universal_Key.universal_key, name: string, pos: def_pos, is_local: bool} option
+  (* THE accessibility test of every enumeration: the entry is neither
+     concealed nor hidden in its space *)
+  val is_accessible : Name_Space.T -> string -> name_space_entry -> bool
+  (* entry_of_fact, NONE also when the fact is not accessible *)
+  val accessible_entry_of_fact : Facts.T -> string -> name_space_entry option
   val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
   val mk_name_filter : string list -> string -> bool
   (* First arg = the expensive-match budget (caps full-prop subterm matching to bound
@@ -252,6 +257,14 @@ type name_space_entry = {pos: Position.T, serial: serial, group: serial,
    space passed in is the caller's whole scoping decision (signature comment). *)
 fun entry_of_fact facts name : name_space_entry option =
   try (Name_Space.the_entry (Facts.space_of facts)) name
+
+fun is_accessible space name (entry : name_space_entry) =
+  not (#concealed entry orelse Long_Name.is_hidden (Name_Space.intern space name))
+
+fun accessible_entry_of_fact facts name =
+  (case entry_of_fact facts name of
+    SOME e => if is_accessible (Facts.space_of facts) name e then SOME e else NONE
+  | NONE => NONE)
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry's
    position.  File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
@@ -1068,8 +1081,7 @@ fun ns_filter limit key_of space target_name exclude_set include_pred extra_filt
       | collect (name :: rest) acc remaining =
           let val result =
             (let val entry = Name_Space.the_entry space name
-             in if #concealed entry
-                   orelse Long_Name.is_hidden (Name_Space.intern space name) then NONE
+             in if not (is_accessible space name entry) then NONE
                 else
                   let val thy_name = #theory_long_name entry
                       val pass = case exclude_set of
@@ -1301,7 +1313,6 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
         val thy = Context.theory_of ctx
         val target_name = Context.theory_long_name thy
         val facts = Context.cases Global_Theory.facts_of Proof_Context.facts_of ctx
-        val fact_space = Facts.space_of facts
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
@@ -1325,8 +1336,7 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
 
         (* --- LIVE pass --- *)
         val snapshot = Option.map #2 cache_opt
-        val live = mk_live {ctx = ctx, thy = thy, facts = facts,
-                            fact_space = fact_space, snapshot = snapshot}
+        val live = mk_live {ctx = ctx, thy = thy, facts = facts, snapshot = snapshot}
         val (live_entries, _) =
           fold (fn (disp, filt_name, thm, is_local) => fn (acc, remaining) =>
             (* filters ordered cheap-to-expensive: filter_opt (infra: name + blacklist)
@@ -1383,18 +1393,14 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
 fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   make_thm_like_callback "Context.theorems" (Universal_Key.key_of_theorem' NONE)
-    (fn {ctx = _, thy, facts, fact_space, snapshot} =>
+    (fn {ctx = _, thy, facts, snapshot} =>
        let val uncached = case snapshot of
                NONE => Facts.dest_static false [] facts
              | SOME cf => Facts.dest_static false [cf] facts
        in maps (fn (name, thms) =>
-            case entry_of_fact facts name of
+            case accessible_entry_of_fact facts name of
               NONE => []
-            | SOME e =>
-                if #concealed e
-                   orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
-                then []
-                else map (fn thm => (name, name, Thm.transfer thy thm, true)) thms)
+            | SOME _ => map (fn thm => (name, name, Thm.transfer thy thm, true)) thms)
           uncached
        end)
     filter_opt cache_opt ctxt_unpack
@@ -1584,7 +1590,7 @@ local
 fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
     filter_opt cache_opt ctxt_unpack =
   make_thm_like_callback cb_name (key_of NONE)
-    (fn {ctx, thy, facts, fact_space, snapshot} =>
+    (fn {ctx, thy, facts, snapshot} =>
        let
          val seen : unit Strhashtab.table = Strhashtab.empty 128
          (* Source-1: classical / Induct net (full each query) *)
@@ -1608,13 +1614,9 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
          val src2 = delta
            |> maps (fn (name, thms) =>
                if not (name_pred name) then []
-               else case entry_of_fact facts name of
+               else case accessible_entry_of_fact facts name of
                  NONE => []
                | SOME e =>
-                   if #concealed e
-                      orelse Long_Name.is_hidden (Name_Space.intern fact_space name)
-                   then []
-                   else
                      let (* empty owning theory => genuinely proof-context-local *)
                          val is_local = (case #theory_long_name e of "" => true | _ => false)
                          (* index over the FULL thm list (shape drop AFTER indexing),
