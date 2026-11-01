@@ -42,6 +42,9 @@
 
   An optional filter parameter allows callers to further restrict which entities
   are returned, applied after exclude_set/target_thy/the_theory_only filtering.
+  It takes the query context (the target theory's when target_theory is given)
+  and is applied to it once per invocation: an entity of a context derived after
+  the callback was built must be judged in that context.
 *)
 
 signature CONTEXT_CALLBACKS = sig
@@ -130,25 +133,26 @@ signature CONTEXT_CALLBACKS = sig
      Mutable hash table — populate at session setup time via Strhashtab.update. *)
   val coercion_ignores : unit Strhashtab.table
 
-  val make_constants_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_constants_callback : (Context.generic -> string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   (* cache_opt: when SOME (entries, facts), uses cached entries for global theorems
-     and only runs the full pipeline on facts not in the cached Facts.T. *)
+     and only runs the full pipeline on facts not in the cached Facts.T; the
+     filter judges only the latter (the cached entries were filtered when built). *)
   val make_theorems_callback :
-    (string * thm -> bool) option ->
+    (Context.generic -> string * thm -> bool) option ->
     (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
-  val make_types_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
-  val make_classes_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
-  val make_locales_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_types_callback : (Context.generic -> string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_classes_callback : (Context.generic -> string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_locales_callback : (Context.generic -> string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   (* First arg = bundle long-name -> its non-infra member thms (see semantic_store.ML),
      wrapped in Lazy so the (one-off) build is paid only when a patterned bundle query
      actually forces it.  When term/type patterns are supplied, a bundle is kept when
      ANY (>= 1) of its members' props match the pattern; the map is forced ONLY then,
      so empty patterns leave behaviour unchanged and cost nothing. *)
   val make_theorem_collection_callback :
-    thm list Strhashtab.table Lazy.lazy -> (string -> bool) option -> context_unpacker
-    -> Remote_Procedure_Calling.callback'
-  val make_methods_callback : (string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
+    thm list Strhashtab.table Lazy.lazy -> (Context.generic -> string -> bool) option ->
+    context_unpacker -> Remote_Procedure_Calling.callback'
+  val make_methods_callback : (Context.generic -> string -> bool) option -> context_unpacker -> Remote_Procedure_Calling.callback'
   val make_theory_long_name_callback : context_unpacker -> Remote_Procedure_Calling.callback'
   (* Context.entries_of_names: entry_of_name of each (kind, name), in order *)
   val make_entries_of_names_callback : context_unpacker -> Remote_Procedure_Calling.callback'
@@ -177,22 +181,22 @@ signature CONTEXT_CALLBACKS = sig
          kind, plus the snapshot Facts.T whose complement is the live Source-2 delta. *)
   val make_introduction_rules_callback :
     (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
-    (string * thm -> bool) option ->
+    (Context.generic -> string * thm -> bool) option ->
     (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
   val make_elimination_rules_callback :
     (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
-    (string * thm -> bool) option ->
+    (Context.generic -> string * thm -> bool) option ->
     (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
   val make_induction_rules_callback :
     (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
-    (string * thm -> bool) option ->
+    (Context.generic -> string * thm -> bool) option ->
     (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
   val make_case_split_rules_callback :
     (Context.generic -> thm list) -> (string -> bool) -> (thm -> bool) ->
-    (string * thm -> bool) option ->
+    (Context.generic -> string * thm -> bool) option ->
     (cached_thm_entry list * Facts.T) option ->
     context_unpacker -> Remote_Procedure_Calling.callback'
 end
@@ -265,6 +269,9 @@ fun accessible_entry_of_fact facts name =
   (case entry_of_fact facts name of
     SOME e => if is_accessible (Facts.space_of facts) name e then SOME e else NONE
   | NONE => NONE)
+
+(* proof-context-local: no theory owns the fact's entry *)
+fun is_local_entry (e : name_space_entry) = #theory_long_name e = ""
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry's
    position.  File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
@@ -1072,8 +1079,9 @@ fun dynamic_fact_members context facts name =
 
 (* --- ns_filter: shared for constants, types, classes, locales --- *)
 
-fun ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt =
+fun ns_filter ctx limit key_of space target_name exclude_set include_pred extra_filter filter_opt =
   let
+    val keep = Option.map (fn f => f ctx) filter_opt
     val names = Name_Space.get_names space
     val seen = Bytehashtab.empty 128
     fun collect [] acc _ = rev acc
@@ -1091,7 +1099,7 @@ fun ns_filter limit key_of space target_name exclude_set include_pred extra_filt
                   in if not pass orelse not pass_include then NONE
                      else if not (extra_filter name) then NONE
                      else
-                       let val pass_filter = case filter_opt of
+                       let val pass_filter = case keep of
                                NONE => true | SOME f => f name
                        in if not pass_filter then NONE
                           else SOME {uk = key_of name, name = name, is_local = false}
@@ -1287,7 +1295,7 @@ fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
         val (_, type_pats, warnings) = parse_patterns context ([], type_pat_strs)
         val const_pat_filter = mk_const_pattern_matcher ctx type_pats
         val name_filter = mk_name_filter name_contains
-        val entries = ns_filter limit key_of space target_name exclude_set include_pred
+        val entries = ns_filter ctx limit key_of space target_name exclude_set include_pred
                     (fn name => const_pat_filter name andalso name_filter name) filter_opt
       in (entries, include_warnings @ warnings) end)
 
@@ -1295,8 +1303,9 @@ fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
    Two passes over a single key_seen / name_memo:
      (1) LIVE: candidates produced by `mk_live` (a (display, filter_name, thm,
          is_local) 4-tuple list; no position).  Folded first so a live hit wins the uk on overlap
-         (live-first), seeding key_seen.  filter_opt + constituent scope + prop/type
-         pattern + target_type are applied here per candidate.
+         (live-first), seeding key_seen.  filter_opt (applied to ctx once per
+         invocation) + constituent scope + prop/type pattern + target_type are
+         applied here per candidate.
      (2) CACHED: cache_opt's pre-filtered cached_thm_entry list (infra already removed
          at build time, so filter_opt is NOT re-applied), with the query-specific
          filters + resolve_name (drops stale dynamic members), is_local = false.
@@ -1322,6 +1331,7 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
         val (target_type_opt, target_type_warnings) = parse_target_type ctx target_type_str
         val target_type_filter = mk_target_type_filter ctx target_type_opt
         val name_filter = mk_name_filter name_contains
+        val live_filter = Option.map (fn f => f ctx) filter_opt
         val key_seen = Bytehashtab.empty 128
         (* per-query memo for live display-name resolution: coll -> member thms *)
         val name_memo : thm list Strhashtab.table = Strhashtab.empty 16
@@ -1345,7 +1355,7 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
             else if not (name_filter disp) then (acc, remaining)
             else if not (scope_ok (map #1 (#2 (Universal_Key.thm_constituents ctx thm))))
                  then (acc, remaining)
-            else if not (case filter_opt of NONE => true | SOME f => f (filt_name, thm))
+            else if not (case live_filter of NONE => true | SOME f => f (filt_name, thm))
                  then (acc, remaining)
             else if not (prop_matches (Thm.full_prop_of thm)) then (acc, remaining)
             else if not (target_type_filter thm) then (acc, remaining)
@@ -1388,8 +1398,9 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
       in (entries, include_warnings @ warnings @ target_type_warnings) end)
 
 (* theorems: live = the uncached delta (facts in the query context not in the prep
-   snapshot, i.e. proof-context-local, is_local = true); display name = filter name =
-   the bare fact name (existing behaviour). *)
+   snapshot, i.e. proof-context-local, is_local = true); display name = name(i) for a
+   member of a fact with several theorems (Thm_Name.make_list), filter name = the bare
+   fact name. *)
 fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   make_thm_like_callback "Context.theorems" (Universal_Key.key_of_theorem' NONE)
@@ -1400,7 +1411,9 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
        in maps (fn (name, thms) =>
             case accessible_entry_of_fact facts name of
               NONE => []
-            | SOME _ => map (fn thm => (name, name, Thm.transfer thy thm, true)) thms)
+            | SOME _ =>
+                Thm_Name.make_list (name, thms)
+                |> map (fn (nm, thm) => (Thm_Name.print nm, name, Thm.transfer thy thm, true)))
           uncached
        end)
     filter_opt cache_opt ctxt_unpack
@@ -1417,7 +1430,7 @@ fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
+      in (ns_filter ctx limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
 
 fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
@@ -1431,7 +1444,7 @@ fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
+      in (ns_filter ctx limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
 
 fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
@@ -1445,7 +1458,7 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
+      in (ns_filter ctx limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
 
 fun make_theorem_collection_callback collection_member_thms filter_opt
     (ctxt_unpack : context_unpacker)
@@ -1509,7 +1522,7 @@ fun make_theorem_collection_callback collection_member_thms filter_opt
            runs last and consults only the prep-built map (no live collection eval). *)
         val extra_filter = fn name =>
           name_filter name andalso Facts.is_dynamic facts name andalso any_member_matches name
-      in (ns_filter limit key_of space target_name exclude_set include_pred extra_filter filter_opt,
+      in (ns_filter ctx limit key_of space target_name exclude_set include_pred extra_filter filter_opt,
           include_warnings @ pattern_warnings) end)
 
 fun make_methods_callback filter_opt (ctxt_unpack : context_unpacker)
@@ -1524,7 +1537,7 @@ fun make_methods_callback filter_opt (ctxt_unpack : context_unpacker)
         val exclude_set = if the_theory_only then NONE
                           else SOME (Strhashtab.make_set exclude)
         val (include_pred, include_warnings) = mk_include_filter context theories_include
-      in (ns_filter limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
+      in (ns_filter ctx limit key_of space target_name exclude_set include_pred (mk_name_filter name_contains) filter_opt, include_warnings) end)
 
 fun make_theory_long_name_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
@@ -1575,15 +1588,16 @@ fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
 (* Introduction / elimination / induction / case-split rule callbacks, sharing the
    theorems engine (make_thm_like_callback).  The live source has two sub-sources
    folded in pinned order (Source-1 before Source-2) so a classical-net hit wins the
-   uk and pins is_local=false on overlap:
+   uk on overlap:
      Source-1 = the classical / Induct net (extract_net), bare thms named by their
-       name hint (no-hint thms dropped — ~330 anonymous claset rules), is_local=false
-       unconditionally (the net is a library/global structure).  extract_net is given
-       by the caller because Classical requires HOL (not available Pure-level).
+       name hint (no-hint thms dropped — ~330 anonymous claset rules); the filter
+       judges the hint's fact name (the printed `name(i)` names no fact), and
+       is_local is Source-2's, false when no fact has that name.  extract_net is
+       given by the caller because Classical requires HOL (not available Pure-level).
      Source-2 = the live DELTA of static rule facts not in the prep snapshot (i.e.
        proof-context-local rule facts), name-suffix matched by name_pred and shape-
        gated by shape_ok, fact-position named Thm_Name.print(name,i), is_local derived
-       from theory ownership (empty owning theory => proof-local => true).
+       from theory ownership (is_local_entry: empty owning theory => proof-local).
    The bulk of static rule facts live in cache_opt (built once at prep), surfaced by
    make_thm_like_callback's cached pass; the snapshot Facts.T pins Source-2's delta. *)
 local
@@ -1599,12 +1613,16 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
                let val thm = Thm.transfer thy thm in
                  if not (Thm.has_name_hint thm) then NONE
                  else
-                   let val nm = Thm.get_name_hint thm
-                       val name_str = Thm_Name.print nm
+                   let val (name, i) = Thm.get_name_hint thm
+                       val name_str = Thm_Name.print (name, i)
+                       val is_local =
+                         (case entry_of_fact facts name of
+                           SOME e => is_local_entry e
+                         | NONE => false)
                    in if Strhashtab.defined seen name_str then NONE
                       else
                         (Strhashtab.update seen (name_str, ());
-                         SOME (name_str, name_str, thm, false))
+                         SOME (name_str, name, thm, is_local))
                    end
                end)
          (* Source-2: live delta of static rule facts (proof-local), name+shape gated *)
@@ -1617,8 +1635,7 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
                else case accessible_entry_of_fact facts name of
                  NONE => []
                | SOME e =>
-                     let (* empty owning theory => genuinely proof-context-local *)
-                         val is_local = (case #theory_long_name e of "" => true | _ => false)
+                     let val is_local = is_local_entry e
                          (* index over the FULL thm list (shape drop AFTER indexing),
                             matching the collect side so coll/query names align. *)
                          val n = length thms

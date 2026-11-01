@@ -145,8 +145,8 @@ async def entities_of(connection: Connection, kinds: list[EntityKind],
 
     Each entry is (universal_key, full name, is_local).  is_local is whether the
     entity is proof-context-local; theorems AND all four rule kinds set it (a
-    library/classical-net rule is False; a proof-local theorem or an
-    empty-owning-theory rule fact is True); every other kind gives False.
+    library rule is False; a proof-local theorem or an empty-owning-theory rule
+    fact is True); every other kind gives False.
     The entries form a set: their order carries no meaning.
 
     Pattern parameters are forwarded only to entity kinds that support them:
