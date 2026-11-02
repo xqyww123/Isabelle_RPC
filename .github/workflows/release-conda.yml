@@ -28,7 +28,7 @@ on:
         type: boolean
         default: false
       smoke_only:
-        description: "Run the smoke job against the ALREADY-PUBLISHED channel package without publishing (pairs with dry_run=true; useful with windows_e2e)"
+        description: "Run the smoke job against the ALREADY-PUBLISHED build of ./VERSION and build_number without publishing (pairs with dry_run=true; useful with windows_e2e)"
         type: boolean
         default: false
   push:
@@ -217,13 +217,14 @@ jobs:
           set -euo pipefail
           # Unlike the base repo we have no local `isabelle` artifact to solve against, so
           # the run dependency comes from the published channel while the package under
-          # test comes from the local one.  --override-channels pins the channel list
-          # exactly; conda-forge is REQUIRED in it: this package run-depends on python and
-          # five python libraries, none of which live on conda.qiyuan.me.  Dropping it
-          # makes the solve fail outright.
+          # test comes from the local one -- named with it, because by bare name conda
+          # silently installs the published build whenever this one cannot be solved.
+          # --override-channels pins the channel list exactly; conda-forge is REQUIRED in it:
+          # this package run-depends on python and five python libraries, none of which
+          # live on conda.qiyuan.me.  Dropping it makes the solve fail outright.
           conda create -y -n v \
             -c "file://$CH" -c https://conda.qiyuan.me -c conda-forge --override-channels \
-            isabelle-rpc
+            "file://$CH::isabelle-rpc"
           conda activate v
           conda list isabelle
 
@@ -341,11 +342,13 @@ jobs:
   # isabelle-packaging-ci's smoke-logic-probe.
   smoke:
     name: "Smoke: conda install from conda.qiyuan.me (${{ matrix.os }})"
-    needs: publish
+    needs: [build, publish]
     # always() overrides the default skipped-needs propagation: with smoke_only the
-    # publish job is skipped (dry_run) and smoke tests whatever the channel ALREADY
-    # serves -- a re-smoke of the live package, no republish.
-    if: ${{ always() && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.smoke_only)) }}
+    # publish job is skipped (dry_run) and smoke tests the build of this VERSION and
+    # build_number the channel ALREADY serves -- a re-smoke of the live package, no
+    # republish.  Without a version from `build` there is nothing to pin, and an empty
+    # version would turn the pin into a version glob that installs another build.
+    if: ${{ always() && needs.build.outputs.version != '' && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.smoke_only)) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -367,9 +370,11 @@ jobs:
       - name: "conda install -c https://conda.qiyuan.me isabelle-rpc"
         run: |
           set -euo pipefail
+          # Pinned to this VERSION and build_number: by bare name conda would install
+          # another build whenever this one cannot be solved.
           conda create -y -n t \
             -c https://conda.qiyuan.me -c conda-forge --override-channels \
-            isabelle-rpc
+            "isabelle-rpc==${{ needs.build.outputs.version }}=*_${{ inputs.build_number || '0' }}"
           conda activate t
           conda list isabelle-rpc
 
