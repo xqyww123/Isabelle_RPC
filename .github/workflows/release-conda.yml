@@ -18,7 +18,7 @@ on:
       dry_run:
         description: "Build and verify only -- do NOT publish to the channel"
         type: boolean
-        default: false
+        default: true
       build_number:
         description: "conda build number - BUMP if republishing the same VERSION with changed content"
         type: string
@@ -92,8 +92,6 @@ jobs:
       - name: Install rattler-build
         run: |
           set -euo pipefail
-          # Downloaded directly: installing it through conda goes via a proxy that
-          # intercepts conda-forge and fails TLS.
           curl -fsSL -o /tmp/rattler-build \
             https://github.com/prefix-dev/rattler-build/releases/download/v0.69.1/rattler-build-x86_64-unknown-linux-musl
           chmod +x /tmp/rattler-build
@@ -220,11 +218,9 @@ jobs:
           # Unlike the base repo we have no local `isabelle` artifact to solve against, so
           # the run dependency comes from the published channel while the package under
           # test comes from the local one.  --override-channels pins the channel list
-          # exactly; conda-forge IS in it for this package (see below), unlike the
-          # pure-session components which need nothing from it.
-          # conda-forge is REQUIRED here, unlike the pure-session component packages:
-          # this one run-depends on python and five python libraries, none of which live
-          # on conda.qiyuan.me.  Dropping it makes the solve fail outright.
+          # exactly; conda-forge is REQUIRED in it: this package run-depends on python and
+          # five python libraries, none of which live on conda.qiyuan.me.  Dropping it
+          # makes the solve fail outright.
           conda create -y -n v \
             -c "file://$CH" -c https://conda.qiyuan.me -c conda-forge --override-channels \
             isabelle-rpc
