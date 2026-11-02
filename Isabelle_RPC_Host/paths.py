@@ -5,15 +5,15 @@ databases (`semantic_DB_dir`).
 On Windows, Isabelle's settings layer runs inside a bundled Cygwin, so the values it
 exports are a mix of forms::
 
-    ISABELLE_ROOT      = C:\\isa\\Isabelle2025-2                             [native]
-    CYGWIN_ROOT        = C:\\isa\\Isabelle2025-2\\contrib\\cygwin            [native]
-    ISABELLE_HOME      = /cygdrive/c/isa/Isabelle2025-2                      [POSIX]
-    ISABELLE_HOME_USER = /cygdrive/c/Users/x/.isabelle/Isabelle2025-2        [POSIX]
+    ISABELLE_ROOT      = C:\\isa\\Isabelle2026                               [native]
+    CYGWIN_ROOT        = C:\\isa\\Isabelle2026\\contrib\\cygwin              [native]
+    ISABELLE_HOME      = /cygdrive/c/isa/Isabelle2026                        [POSIX]
+    ISABELLE_HOME_USER = /cygdrive/c/Users/x/.isabelle/Isabelle2026          [POSIX]
 
 A *native* Windows Python — which is what the ML launcher spawns — cannot hand the
 POSIX ones to ``open`` or ``os.path``: they silently resolve to nothing, so RPC
 components fail to register and the symbol table comes up empty.  Turning such a
-value into ``C:\\isa\\Isabelle2025-2`` is all the conversion functions do.
+value into ``C:\\isa\\Isabelle2026`` is all the conversion functions do.
 
 On Linux and macOS the conversion functions are no-ops.
 """

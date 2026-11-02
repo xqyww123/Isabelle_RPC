@@ -4,11 +4,12 @@ Monkey-patches ``Connection`` with a ``dialogue`` method that displays
 a question with clickable options in Isabelle's output panel and blocks
 until the user clicks one.
 
-The only frontend that can ever answer such a dialog is Isabelle/jEdit;
-the ML side probes the attached frontend first and returns the
-no-responder sentinel (``None`` here) when nobody could answer -- under
-Isa-REPL, ``isabelle build``, VSCode, headless PIDE or a bare ML process
-the question is never even displayed, instead of hanging forever.
+Isabelle/jEdit can answer such a dialog, and so can Isabelle/VSCode when
+its client renders HTML output (vscode_html_output); the ML side does not
+check that, so it counts only jEdit.  It probes the attached frontend first
+and returns the no-responder sentinel (``None`` here) otherwise -- under
+Isa-REPL, ``isabelle build``, VSCode, headless PIDE or a bare ML process the
+question is never even displayed, instead of hanging forever.
 
 Usage::
 

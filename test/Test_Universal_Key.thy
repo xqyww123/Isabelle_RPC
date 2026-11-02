@@ -33,8 +33,8 @@ fun mk_foo long_name =
         ((Binding.name "c", Term.Type (Sign.full_name thy1 (Binding.name "t"), [])), NoSyn) thy1
   in (thy2, const) end
 
-val (thy_a, const_a) = mk_foo "UK_Test_A.Foo"
-val (thy_b, const_b) = mk_foo "UK_Test_B.Foo"
+val (thy_a, const_a) = mk_foo \<^unchecked_name>\<open>UK_Test_A.Foo\<close>
+val (thy_b, const_b) = mk_foo \<^unchecked_name>\<open>UK_Test_B.Foo\<close>
 
 fun names_of thy t = map #1 (#2 (Universal_Key.compute_constituents (Context.Theory thy) t))
 fun report_of thy t = #3 (Universal_Key.compute_constituents (Context.Theory thy) t)
@@ -44,14 +44,14 @@ fun prefix_of thy t = #1 (Universal_Key.compute_constituents (Context.Theory thy
 val _ =
   check "the two theories do not share the constant's internal name"
     (case (const_a, const_b) of
-       (Const (na, _), Const (nb, _)) => na = nb andalso na = "Foo.c"
+       (Const (na, _), Const (nb, _)) => na = nb andalso na = \<^unchecked_name>\<open>Foo.c\<close>
      | _ => false)
 
 (* 1. Regression.  A's cone is read first, which under the old code pinned the base
       name `Foo` to UK_Test_A.Foo for the whole process; B's constituents then came
       back naming A.  Each context must now name its own theory. *)
-val _ = check "A's constituents are not UK_Test_A.Foo" (names_of thy_a const_a = ["UK_Test_A.Foo"])
-val _ = check "B's constituents are not UK_Test_B.Foo" (names_of thy_b const_b = ["UK_Test_B.Foo"])
+val _ = check "A's constituents are not UK_Test_A.Foo" (names_of thy_a const_a = [\<^unchecked_name>\<open>UK_Test_A.Foo\<close>])
+val _ = check "B's constituents are not UK_Test_B.Foo" (names_of thy_b const_b = [\<^unchecked_name>\<open>UK_Test_B.Foo\<close>])
 
 (* 2. The two prefixes differ, so the two theories' analogous facts get different keys. *)
 val _ =
@@ -62,19 +62,19 @@ val _ =
       check above the reading theory IS the declaring theory, so the empty-name
       fallback (default_thy_long_name) would return the asserted string too.  Read
       A's constant from a theory that merely imports A and the two answers part. *)
-val thy_a2 = Theory.begin_theory ("UK_Test_A2.Bar", Position.none) [thy_a]
+val thy_a2 = Theory.begin_theory (\<^unchecked_name>\<open>UK_Test_A2.Bar\<close>, Position.none) [thy_a]
 val _ =
   check "A's constituents follow the reading context rather than the name space"
-    (names_of thy_a2 const_a = ["UK_Test_A.Foo"])
+    (names_of thy_a2 const_a = [\<^unchecked_name>\<open>UK_Test_A.Foo\<close>])
 
 (* 4. Order independence.  Two cones untouched so far, read youngest first: a memo
       keyed on anything but the cone would answer with whichever was read first. *)
-val (thy_c, const_c) = mk_foo "UK_Test_C.Foo"
-val (thy_d, const_d) = mk_foo "UK_Test_D.Foo"
+val (thy_c, const_c) = mk_foo \<^unchecked_name>\<open>UK_Test_C.Foo\<close>
+val (thy_d, const_d) = mk_foo \<^unchecked_name>\<open>UK_Test_D.Foo\<close>
 val _ =
   check "the answers depend on the order the cones are read in"
-    (names_of thy_d const_d = ["UK_Test_D.Foo"] andalso
-     names_of thy_c const_c = ["UK_Test_C.Foo"])
+    (names_of thy_d const_d = [\<^unchecked_name>\<open>UK_Test_D.Foo\<close>] andalso
+     names_of thy_c const_c = [\<^unchecked_name>\<open>UK_Test_C.Foo\<close>])
 
 (* 5. Exactness: no name was left out of the XOR, and no entry fell back to the
       reading context's own theory. *)

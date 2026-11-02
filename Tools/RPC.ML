@@ -242,7 +242,7 @@ fun parse_addr (h,p) =
     in INetSock.toAddr (NetHostDB.addr host, port)
    end
 
-val launch_lock : unit Synchronized.var = Synchronized.var "RPC.launch_lock" ()
+val launch_lock : unit Synchronized.var = Synchronized.var \<^unchecked_name>\<open>RPC.launch_lock\<close> ()
 
 (** Ephemeral attached-host state (RPC_EPHEMERAL_HOST_PLAN.md v3.3, §3.4)
 
@@ -254,7 +254,7 @@ val launch_lock : unit Synchronized.var = Synchronized.var "RPC.launch_lock" ()
   concrete socket type.
 
   Heap inheritance: this var's contents get saved into session heaps.  The pid stamp
-  (ML_Pid.get () of the LAUNCHING process) detects that: a mismatch means the record
+  (PolyML.ml_pid () of the LAUNCHING process) detects that: a mismatch means the record
   was inherited -- treat as absent, and NEVER close its socket (the embedded fd number
   may alias an unrelated open file in this process). **)
 
@@ -263,13 +263,13 @@ type attached_host =
    lifeline_desc: Socket.sock_desc, close_lifeline: unit -> unit}
 
 val attached_host : attached_host option Synchronized.var =
-  Synchronized.var "RPC.attached_host" NONE
+  Synchronized.var \<^unchecked_name>\<open>RPC.attached_host\<close> NONE
 
 (* Not a credential (threat model: accidental cross-connection on localhost).  The pid
    field doubles as the log-sweep liveness key (launch script) and makes heap-sibling
    serial collisions harmless. *)
 fun new_token () =
-  string_of_int (ML_Pid.get ()) ^ "-" ^ serial_string () ^ "-" ^
+  string_of_int (PolyML.ml_pid ()) ^ "-" ^ serial_string () ^ "-" ^
   LargeInt.toString (Time.toMicroseconds (Time.now ()))
 
 fun attached_file ext token =
@@ -278,19 +278,19 @@ fun attached_file ext token =
 fun read_attached_state () =
   (case Synchronized.value attached_host of
     NONE => NONE
-  | SOME s => if #pid s = ML_Pid.get () then SOME s else NONE)
+  | SOME s => if #pid s = PolyML.ml_pid () then SOME s else NONE)
 
 fun install_attached (s : attached_host) =
   Synchronized.change attached_host (fn prev =>
     ( (case prev of
-        SOME p => if #pid p = ML_Pid.get () then #close_lifeline p () else ()
+        SOME p => if #pid p = PolyML.ml_pid () then #close_lifeline p () else ()
       | NONE => ())
     ; SOME s))
 
 fun invalidate_attached_if token =
   Synchronized.change attached_host (fn
       SOME s =>
-        if #token s = token andalso #pid s = ML_Pid.get ()
+        if #token s = token andalso #pid s = PolyML.ml_pid ()
         then (#close_lifeline s (); NONE)
         else SOME s   (*stale invalidation: a newer record must survive untouched*)
     | NONE => NONE)
@@ -449,7 +449,7 @@ type callback' = {name: string, action: connection -> int -> unit}
   (* action conn callback_id: read Phase 2 arg, execute, send tagged response *)
 
 val global_callbacks : callback' Strhashtab.table = Strhashtab.empty 64
-val global_callbacks_lock = Synchronized.var "RPC.global_callbacks" ()
+val global_callbacks_lock = Synchronized.var \<^unchecked_name>\<open>RPC.global_callbacks\<close> ()
 
 fun register_global_callback' (cb : callback') : Context.generic -> Context.generic =
   (Synchronized.change global_callbacks_lock (fn () =>
@@ -526,7 +526,7 @@ val heartbeat_callback : (unit, string) callback = {
 }
 
 val symbol_explode_callback : (string, string list) callback = {
-  name = "position.symbol_explode",
+  name = \<^unchecked_name>\<open>position.symbol_explode\<close>,
   on_interrupt = Reraise,
   arg_schema = unpackString,
   ret_schema = packList packString,
@@ -704,7 +704,7 @@ fun do_launch_attached () : connection =
     val cmd_conn : connection option Unsynchronized.ref = Unsynchronized.ref NONE
     val installed = Unsynchronized.ref false
     val holder_outcome : Process_Result.T Exn.result option Synchronized.var =
-          Synchronized.var "RPC.holder_outcome" NONE
+          Synchronized.var \<^unchecked_name>\<open>RPC.holder_outcome\<close> NONE
 
     val script = String.concat
       [ (*created at EVERY launch: log_dir's make_directory side effect is heap-frozen*)
@@ -794,7 +794,7 @@ fun do_launch_attached () : connection =
               if File.exists ready_file then ()
               else if is_some (Synchronized.value holder_outcome)
               then fail_diagnosis "the launched python exited before binding"
-              else (OS.Process.sleep (Time.fromSeconds 1); poll (n - 1))
+              else (Time.sleep (Time.fromSeconds 1); poll (n - 1))
         val _ = poll 40
         val (port, token') =
           (case File.read ready_file |> String.tokens Char.isSpace of
@@ -815,7 +815,7 @@ fun do_launch_attached () : connection =
                else ();
                case try_connect addr of
                  SOME s => s
-               | NONE => (OS.Process.sleep (Time.fromSeconds 1);
+               | NONE => (Time.sleep (Time.fromSeconds 1);
                           connect_after_ready (n - 1)))
         val sock = connect_after_ready 20
         val conn = mk_conn sock
@@ -837,7 +837,7 @@ fun do_launch_attached () : connection =
                     SOME s => s
                   | NONE => raise Fail "lifeline connect failed")
                 val host : attached_host =
-                  {pid = ML_Pid.get (), addr = addr, token = token,
+                  {pid = PolyML.ml_pid (), addr = addr, token = token,
                    lifeline_desc = Socket.sockDesc s,
                    close_lifeline = fn () => Socket.close s handle OS.SysErr _ => ()}
              in acquired := SOME host; s end) ()
@@ -914,7 +914,7 @@ fun make_connection () : connection =
 (** Connection Pool **)
 
 val connection_pool : connection list Synchronized.var
-      = Synchronized.var "RPC.connection_pool" []
+      = Synchronized.var \<^unchecked_name>\<open>RPC.connection_pool\<close> []
 
 fun get_connection () =
   case Synchronized.change_result connection_pool (

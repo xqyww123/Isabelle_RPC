@@ -23,28 +23,21 @@
   Callers key caches on the theory's LONG NAME instead -- Universal_Key.cache on
   (entity, long name), a constituent list on (long name, hash) pairs.  That is sound
   only while a long name determines a content hash within one process.  It usually
-  does.  Three situations break it; all three are reachable and MEASURED (probed
-  2026-08-13), and NONE is handled.  Their preconditions are things a normal
-  workflow does not do, and the requirement is that they are not done.
+  does.  Three situations threaten it.  The first cannot arise; the other two are
+  reachable and MEASURED (2026-11-02), and NEITHER is handled.  Their preconditions
+  are things a normal workflow does not do, and the requirement is that they are not
+  done.
 
-  1. A theory of the session being built, loaded twice with different content.
-     Thy_Info.remove errors only for a name Thy_Info's graph holds as finished
-     (Pure/Thy/thy_info.ML:183-192), while the branch above is chosen by
-     Resources.loaded_theory alone -- and a session's own theories are in that name
-     list from the first instant yet never enter the graph, because the build path
-     never calls Thy_Info.register_thy.  A plain Thy_Info.use_theories then reloads
-     one, and the old theory value and the new one both live on, with different
-     hashes.  Theories from a heap image are NOT exposed: they are in the graph, so
-     register_thy and remove both refuse.
+  1. A theory of the session being built, loaded a second time with different
+     content.  It cannot arise: Build loads no theory on request and refuses a
+     second commit of a loaded name (build.ML:64-67 in check_new).
 
   2. A second theory begun under a name already loaded.  Nothing checks for it:
      Resources.begin_theory -> Theory.begin_theory -> Context.begin_thy verify a
      non-empty name, non-empty imports, and ancestors with distinct base names, and
      no more.  Isa-REPL builds theories this way (its init_thy calls
      Resources.begin_theory), producing a second value under an already-used long
-     name, so a collision there is silent -- before the theory-table layering change
-     it also swallowed a register_thy error at that point; that call is now gone, but
-     the collision is silent all the same.  Re-evaluating a theory under the same
+     name, so a collision there is silent.  Re-evaluating a theory under the same
      base name is expected in the REPL, so this situation is now common, still
      silent, and still unhandled.
 
@@ -58,8 +51,8 @@ signature THEORY_HASH = sig
   type hash = Word8Vector.vector  (* 16 bytes, xxhash128 *)
   exception Cannot_Hash of theory
   val hash_of : theory -> hash
-  (* Hash of a theory given by its LONG name.  Prefers Thy_Info's registry of
-     loaded theories (a Symtab lookup) over resolve_theory, whose Context.get_theory
+  (* Hash of a theory given by its LONG name.  Prefers Build's registry of
+     loaded theories (a graph lookup) over resolve_theory, whose Context.get_theory
      is a linear scan of the context's ancestors.  See hash_of_long below for why
      the two routes cannot disagree on the hash. *)
   val hash_of_long : Context.generic -> string -> hash
@@ -116,7 +109,7 @@ val xxhash128_cmd : (string * string * hash list, hash) Remote_Procedure_Calling
 }
 
 val store_cmd : ((hash * string) list, unit) Remote_Procedure_Calling.command = {
-  name = "Theory_Hash.store",
+  name = \<^unchecked_name>\<open>Theory_Hash.store\<close>,
   arg_schema = packList (packPair (packBytes, packString)),
   ret_schema = unpackUnit,
   callback = [],
@@ -129,7 +122,7 @@ val hasher = Hashers.bitvec
 
 (* Cache: theory identifier -> hash *)
 val cache : hash Inttab.table Synchronized.var =
-  Synchronized.var "Theory_Hash.cache" Inttab.empty
+  Synchronized.var \<^unchecked_name>\<open>Theory_Hash.cache\<close> Inttab.empty
 
 (* Reverse map: hash -> theory *)
 structure Hash_Tab = Hash_Table(
@@ -138,7 +131,7 @@ structure Hash_Tab = Hash_Table(
   val eq = op = : hash * hash -> bool)
 
 val hash_to_thy : theory Hash_Tab.table Synchronized.var =
-  Synchronized.var "Theory_Hash.hash_to_thy" (Hash_Tab.empty 64)
+  Synchronized.var \<^unchecked_name>\<open>Theory_Hash.hash_to_thy\<close> (Hash_Tab.empty 64)
 
 fun theory_of h =
   Synchronized.change_result hash_to_thy (fn tab => (Hash_Tab.lookup tab h, tab))
@@ -204,10 +197,11 @@ fun hash_of thy =
                    Do not be tempted to move the conversion out.  File.platform_path ends
                    in ML_System.platform_path, which raises Fail "Unknown environment
                    variable CYGWIN_ROOT" for an absolute path not under /cygdrive when
-                   that variable is unset (ml_system.ML:50-52).  File.is_file can raise
-                   the same way, and NOT because the syscall is unguarded -- File.exists
-                   is `can OS.FileSys.fileId o platform_path` (file.ML:92), so `can`
-                   protects the syscall while platform_path runs outside it.
+                   that variable is unset (ml_system.ML:50-52 in val platform_path).
+                   File.is_file can raise the same way, and NOT because the syscall is
+                   unguarded -- File.exists is `can OS.FileSys.fileId o platform_path`
+                   (file.ML:89 in val exists), so `can` protects the syscall while
+                   platform_path runs outside it.
 
                    The Windows fix proper is that no Path.explode remains: the old code
                    built a platform string and immediately exploded it back, which
@@ -263,9 +257,12 @@ fun hash_of thy =
   end
 
 (* Long theory name -> hash.  No memo of its own: hash_of memoizes on the theory
-   identifier, and Thy_Info.lookup_theory is a Symtab lookup in Isabelle's own
-   registry of loaded theories.  resolve_theory is the fallback for a theory under
-   construction, which is not in that registry yet.
+   identifier, and Build.lookup_theory is a graph lookup in Isabelle's own
+   registry, which holds only theories from heaps and from session builds; a build
+   commits the theories of a ROOT theories section together when that section
+   finishes (build.ML:185-187 in schedule_theories).  resolve_theory is the route
+   for every other theory: the unfinished theory, a theory of a theories section
+   still being built, or one loaded by PIDE or by Isa-REPL.
 
    The two routes may hand back different theory VALUES for one long name, with no
    key divergence: hash_of reads only the name (Resources.loaded_theory picks the
@@ -276,9 +273,9 @@ fun hash_of thy =
    resolve_theory infers long-vs-short by String.isSubstring ".", so the dotless
    global names (Pure, Main, Complex_Main, ML_Bootstrap, the AFP (global) theories)
    take its base-name branch.  Harmless: no loaded theory shares a base name with
-   them, and the path is reached only on a Thy_Info miss. *)
+   them, and the path is reached only on a Build registry miss. *)
 fun hash_of_long context long =
-  hash_of (case Thy_Info.lookup_theory long of
+  hash_of (case Build.lookup_theory long of
              SOME thy => thy
            | NONE => resolve_theory context long)
 
@@ -295,7 +292,7 @@ fun store_theory_hash thy =
    theory serial to cause even one false skip. *)
 local
   val id_var : string option Synchronized.var =
-    Synchronized.var "Theory_Hash.process_id" NONE
+    Synchronized.var \<^unchecked_name>\<open>Theory_Hash.process_id\<close> NONE
 in
 fun process_id () =
   Synchronized.change_result id_var (fn
@@ -310,7 +307,7 @@ end
 
 val _ = Theory.setup (Context.theory_map (
   Remote_Procedure_Calling.register_global_callback {
-    name = "Theory_Hash.theory_name_of",
+    name = \<^unchecked_name>\<open>Theory_Hash.theory_name_of\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = MessagePackBinIO.Unpack.unpackBytes,
     ret_schema = MessagePackBinIO.Pack.packOption MessagePackBinIO.Pack.packString,
@@ -327,7 +324,7 @@ val _ = Theory.setup (Context.theory_map (
        is the value whose entities the pipeline enumerated; interpret-side ML
        callers do not use this callback at all -- they read the serial off the
        theory value already in hand. *)
-    name = "Theory_Hash.process_serial_of",
+    name = \<^unchecked_name>\<open>Theory_Hash.process_serial_of\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = MessagePackBinIO.Unpack.unpackBytes,
     ret_schema = MessagePackBinIO.Pack.packOption

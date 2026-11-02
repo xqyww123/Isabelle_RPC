@@ -33,19 +33,19 @@ def check_idempotent(label, value):
 
 
 CYGDRIVE_CASES = [
-    ("plain", "/cygdrive/c/isa/Isabelle2025-2", "C:\\isa\\Isabelle2025-2"),
+    ("plain", "/cygdrive/c/isa/Isabelle2026", "C:\\isa\\Isabelle2026"),
     # The reason this module exists: ISABELLE_HOME_USER is C:\Users\<name>\..., and a
     # non-ASCII user name must survive. It does here precisely because we convert by
     # string rules rather than decoding a subprocess's output with the ANSI code page.
-    ("non-ascii user", "/cygdrive/c/Users/张三/.isabelle/Isabelle2025-2",
-     "C:\\Users\\张三\\.isabelle\\Isabelle2025-2"),
+    ("non-ascii user", "/cygdrive/c/Users/张三/.isabelle/Isabelle2026",
+     "C:\\Users\\张三\\.isabelle\\Isabelle2026"),
     ("bare drive root", "/cygdrive/c", "C:\\"),
     ("uppercase drive", "/cygdrive/D/x", "D:\\x"),
     ("trailing slash", "/cygdrive/c/isa/", "C:\\isa\\"),
 ]
 
 NON_POSIX_CASES = [
-    ("already native", "C:\\isa\\Isabelle2025-2"),
+    ("already native", "C:\\isa\\Isabelle2026"),
     ("empty", ""),
     ("relative", "etc/symbols"),
 ]

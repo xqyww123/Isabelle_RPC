@@ -4,14 +4,15 @@
 Interactive dialogue via PIDE Active.dialog -- Python can ask users questions
 with clickable options in the output panel.
 
-The only mechanism in the whole Isabelle tree that ever answers an
-Active.dialog is Isabelle/jEdit's click handler, so before asking we probe the
-attached frontend (Scala function "isabelle_rpc.frontend_identity", shipped by
-this component's jar) and return NONE -- the no-responder sentinel -- when
-nobody could answer: under Isa-REPL, isabelle build, VSCode, headless PIDE or
-a bare ML process the old unconditional Future.join hung forever
-(DIALOGUE_RESPONDER_DETECTION_PLAN.md).  The Python caller maps NONE to None
-and falls back to its warning path.
+Two frontends can answer an Active.dialog: Isabelle/jEdit's click handler,
+and Isabelle/VSCode's output panel when its client renders HTML output
+(vscode_html_output), which the probe does not check -- so only jEdit counts.
+Before asking we probe the attached frontend (Scala function
+"isabelle_rpc.frontend_identity", shipped by this component's jar) and return
+NONE -- the no-responder sentinel -- when it is not jEdit: under Isa-REPL,
+isabelle build, VSCode, headless PIDE or a bare ML process the old
+unconditional Future.join hung forever (DIALOGUE_RESPONDER_DETECTION_PLAN.md).
+The Python caller maps NONE to None and falls back to its warning path.
 
 Policy override: the system option isabelle_rpc_dialogue (etc/options of this
 component; "auto" | "present" | "absent") is read fresh on every call --
@@ -32,7 +33,7 @@ fun frontend_identity () : bool * bool option * string =
      be folded into "not capable" (Exn.capture normalizes but still returns
      interrupts as Exn). *)
   case Exn.result (fn () =>
-         Scala.function1 "isabelle_rpc.frontend_identity" "") () of
+         Scala.function1 \<^unchecked_name>\<open>isabelle_rpc.frontend_identity\<close> "") () of
     Exn.Res reply =>
       let
         val (capable, (interactive, cls)) =

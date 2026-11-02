@@ -68,7 +68,8 @@
     The key is therefore a function of the proposition and of the CONE it is read
     in, not of the path the thm was reached along.  Within one cone a theory base
     name is unique by construction — Context.eq_thy_consistent
-    (Pure/context.ML:380-391) rejects two ancestors that share one — so two
+    (Pure/context.ML:380-383 in eq_thy_consistent, 385-388 in extend_ancestors,
+    390 in val merge_ancestors) rejects two ancestors that share one — so two
     contexts over the same ancestor set agree, in either resolution order.
     (See compute_constituents below.)
 
@@ -384,7 +385,7 @@ end)
 (* --- Key cache --- *)
 
 val cache : universal_key CacheTab.table = CacheTab.empty 1024
-val cache_lock = Synchronized.var "Universal_Key.cache" ()
+val cache_lock = Synchronized.var \<^unchecked_name>\<open>Universal_Key.cache\<close> ()
 
 fun cached_key ck compute =
   Synchronized.change_result cache_lock (fn () =>
@@ -504,10 +505,10 @@ end)
 (* theorem/rule universal key -> sorted constituent list, for record writers.
    Process-global, and sound as such: the key embeds the XOR and the WIP OR of
    exactly the list stored, so the key determines the value. *)
-val registry_lock = Synchronized.var "Universal_Key.constituents_registry" ()
+val registry_lock = Synchronized.var \<^unchecked_name>\<open>Universal_Key.constituents_registry\<close> ()
 val constituents_registry : constituent list UK_Table.table = UK_Table.empty 1024
 
-val totals = Synchronized.var "Universal_Key.constituents_totals"
+val totals = Synchronized.var \<^unchecked_name>\<open>Universal_Key.constituents_totals\<close>
   {skipped = 0, empty_name_fallback = 0}
 
 fun constituents_totals () = Synchronized.value totals
@@ -618,10 +619,10 @@ fun compute_constituents (context : Context.generic) (prop : term)
    Checking the whole cone is what the hook must do, because a theory can join the
    population without any of its cone running the hook: Context.merge_data skips
    the merge function entirely when only one parent carries the data
-   (Pure/context.ML:454), so a theory inherits the pair from one parent while
-   dragging in the cones of its other parents.  Theory.ancestors_of is a
-   materialised field (Pure/context.ML:323), so the walk is one Symtab lookup per
-   ancestor, not a graph traversal.
+   (Pure/context.ML:454 in merge_data), so a theory inherits the pair from one
+   parent while dragging in the cones of its other parents.  Theory.ancestors_of
+   is a materialised field (Pure/context.ML:323 in val ancestors_of), so the walk
+   is one Symtab lookup per ancestor, not a graph traversal.
 
    The pair's Synchronized.var is the lock for every read and write of the cache
    it holds: a fork's `dest` must not walk a table being rehashed in place. *)
@@ -638,17 +639,18 @@ datatype cache_scope = No_Cache | Cache of shared_pair
 
 fun make_pair cache claims : cache_scope =
   {id = serial (),
-   var = Synchronized.var "Universal_Key.cache_scope" {cache = cache, claims = claims}}
+   var = Synchronized.var \<^unchecked_name>\<open>Universal_Key.cache_scope\<close> {cache = cache, claims = claims}}
   |> Cache
 
 structure Cache_Scope = Theory_Data'(
   type T = cache_scope
   (* No_Cache is load-bearing.  THEORY_DATA'_ARGS' `empty` is a VALUE, evaluated
      once and handed by get_data to every theory without an entry of its own
-     (Pure/context.ML:441-444, :744-749), so a Cache-valued default would be ONE
-     cache shared by all 10,614 theories of a heap built before this code — the
-     defect this scoping exists to prevent.  thm_constituents bypasses the cache
-     entirely on No_Cache, so such a heap runs uncached. *)
+     (Pure/context.ML:442-445 in get_data, 744-749 in signature
+     THEORY_DATA'_ARGS), so a Cache-valued default would be ONE cache shared by
+     all 10,614 theories of a heap built before this code — the defect this
+     scoping exists to prevent.  thm_constituents bypasses the cache entirely on
+     No_Cache, so such a heap runs uncached. *)
   val empty = No_Cache
   (* Any parent's pair will do.  claim_cache_scope then checks the beginning
      theory's WHOLE cone — which subsumes every parent's — against that pair's
@@ -669,13 +671,14 @@ structure Cache_Scope = Theory_Data'(
    - maps its base name to a DIFFERENT long name: a collision.
 
    With no collision the theory value is unchanged, so the hook returns NONE and
-   Theory.apply_wrappers' loop (theory.ML:83, library.ML:334-340) need not run
-   again on our account.  With collisions it forks: a copy of the cache keeping
-   exactly the entries whose constituent list names no theory of any colliding base
-   name, and the claims map with this cone's answers written over the colliding
-   ones.  A re-application then finds the whole cone accounted for and returns
-   NONE, which is what stops the fork from repeating forever inside the critical
-   section (semantic_store's update_thm_cache forces at least one extra pass). *)
+   Theory.apply_wrappers' loop (theory.ML:83 in apply_wrappers, library.ML:334-340
+   in perhaps_loop) need not run again on our account.  With collisions it forks:
+   a copy of the cache keeping exactly the entries whose constituent list names no
+   theory of any colliding base name, and the claims map with this cone's answers
+   written over the colliding ones.  A re-application then finds the whole cone
+   accounted for and returns NONE, which is what stops the fork from repeating
+   forever inside the critical section (semantic_store's update_thm_cache forces at
+   least one extra pass). *)
 fun claim_cache_scope thy =
   let
     val cone =
@@ -792,7 +795,7 @@ fun key_of_ns_entity tag make_ck space context xname =
       cached_key ck (fn () =>
         build_key (Theory_Hash.hash_of (resolve_theory context thy_long_name))
                   tag (ent_string fq_name))
-  in (uk, fq_name, SOME (#pos ns_entry)) end
+  in (uk, fq_name, SOME (Name_Space.entry_pos ns_entry)) end
 
 fun key_of_theory' thy = Theory_Hash.hash_of thy
 

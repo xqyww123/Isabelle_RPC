@@ -5,9 +5,13 @@ Frontend identity: two INDEPENDENT properties of the frontend attached to this
 Isabelle/ML process (DIALOGUE_RESPONDER_DETECTION_PLAN.md).
 
   Q2 dialogue_capable: can an Active.dialog question ever be answered here?
-     The only sender of Document.dialog_result in the whole Isabelle tree is
-     jEdit's click handler (Tools/jEdit/src/active.scala), owned by the PIDE
-     plugin instance -- so the answer is exact: jEdit attached, or not.
+     Isabelle2026 has two senders of Document.dialog_result: jEdit's click
+     handler (Tools/jEdit/src/active.scala:102-103 in Misc_Handler), owned by
+     the PIDE plugin instance, and VSCode's output panel
+     (Tools/VSCode/src/language_server.scala:571-588 in markup_action).  VSCode
+     answers only when its client renders HTML output (system option
+     vscode_html_output), which this probe does not check; asking needs
+     certainty, so only jEdit counts: jEdit attached, or not.
 
   Q1 interactive: is an interactive EDITOR driving this process?  Three-valued
      (Option[Boolean]): Some only on positive identification, None when the
@@ -30,10 +34,10 @@ object Frontend_Identity extends Scala.Fun("isabelle_rpc.frontend_identity", thr
   val here = Scala_Project.here
 
   override def invoke(session: Session, args: List[Bytes]): List[Bytes] = {
-    val cls = session.getClass.getName
+    val cls = session.getClass.getName.nn
     val dialogue_capable =
       cls.startsWith("isabelle.jedit.") ||       // anonymous subclass stays in-package
-      isabelle.jedit.PIDE._plugin != null         // the answering mechanism's own host
+      isabelle.jedit.PIDE.get_plugin.isDefined    // the answering mechanism's own host
     val interactive: Option[Boolean] =
       if (dialogue_capable || cls.startsWith("isabelle.vscode.")) Some(true)
       else if (cls.startsWith("isabelle.Build_Job") ||   // build

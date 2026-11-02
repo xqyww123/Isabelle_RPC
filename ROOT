@@ -11,3 +11,4 @@ session Isabelle_RPC_Test in "test" = "HOL-Library" +
     Test_Callback_Argument
     Test_Entity_Catalog
     Test_Thm_Key_Cache
+    Test_Print_Term

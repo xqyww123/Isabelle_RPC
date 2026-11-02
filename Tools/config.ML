@@ -17,7 +17,7 @@ structure Config : CONFIG = struct
 
   (* Global registry: option name -> value T *)
   val registry : Config.value Config.T Strhashtab.table = Strhashtab.empty 32
-  val registry_lock = Synchronized.var "Config.rpc_registry" ()
+  val registry_lock = Synchronized.var \<^unchecked_name>\<open>Config.rpc_registry\<close> ()
 
   fun register_rpc_option (name : string) (config : Config.value Config.T) : unit =
     Synchronized.change registry_lock (fn () =>
@@ -35,7 +35,7 @@ structure Config : CONFIG = struct
   fun make_config_lookup_callback (ctxt_unpack : Universal_Key.context_unpacker)
       : Remote_Procedure_Calling.callback' =
     Remote_Procedure_Calling.mk_callback {
-      name = "Config.lookup",
+      name = \<^unchecked_name>\<open>Config.lookup\<close>,
       on_interrupt = Remote_Procedure_Calling.Reraise,
       arg_schema = MessagePackBinIO.Unpack.unpackPair (ctxt_unpack,
                      MessagePackBinIO.Unpack.unpackString),

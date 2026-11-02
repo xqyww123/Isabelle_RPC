@@ -190,7 +190,7 @@ treat a cancellation as a failure (CALLBACK_MECHANISM.md, Error Handling).
   `callback` list. Anything calling `conn.config_lookup` from a command that omits it will
   fail — including `run_python`, which passes `[]` by default.
 - **`run_python` is an unsandboxed `exec`** of ML-supplied source in the host process.
-- **`dialogue` returns `None`** when no frontend can answer (Isa-REPL, `isabelle build`, VSCode, headless PIDE, bare ML) — distinct from the user declining. It blocks only with a responder attached, or under the `present` policy.
+- **`dialogue` returns `None`** unless Isabelle/jEdit is attached (Isa-REPL, `isabelle build`, VSCode, headless PIDE, bare ML) — distinct from the user declining. VSCode could answer when its client renders HTML output, but the probe does not check that, so it counts as no responder. It blocks only with jEdit attached, or under the `present` policy.
 - **The pooled connection is heartbeated** before reuse; a dead one purges the whole pool.
 
 ## Where to look next

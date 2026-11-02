@@ -185,15 +185,21 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
                   | CLASS of {name: string, full_name: string}
                   | TYPE  of {name: string, full_name: string}
 
-      (* Isabelle2025-2 nests inner-syntax markup (Markup.tconst/const/...)
-         inside entity/tfree/... wrappers, e.g.
+      (* Isabelle nests inner-syntax markup (Markup.tconst/const/...) inside
+         entity/tfree/... wrappers, e.g.
          <entity kind="type_name" ...><tconst>nat</tconst></entity>.
          Unwrap the whole Markup family (tclass tconst tfree tvar const
-         free skolem bound var improper numeral) transparently. *)
+         free skolem bound var improper numeral) transparently.  Since
+         Isabelle2026 a name carries one entity element per position of its
+         history (name_space.ML:126 in markups_entry, syntax_phases.ML:51-52 in
+         markup_const), e.g. a constant made by a locale interpretation:
+         <entity ...><entity ... def_label="interpreted"><const>sum.F</const>
+         </entity></entity>.  dump_xml reads name and kind off the outer one;
+         the inner ones are unwrapped here. *)
       val transparent_wrappers =
         ["block", "delimiter", "literal", "tclass", "tconst", "tfree",
          "tvar", "const", "free", "skolem", "bound", "var", "improper",
-         "numeral"]
+         "numeral", "entity"]
       fun one_str (x as Elem ((name, _), [y])) =
             if member (op =) transparent_wrappers name then one_str y
             else raise XML_DUMP_FAIL x
@@ -222,9 +228,8 @@ fun print_xml {bv_typ, num_typ, free_typ, constant_typ, all_typ, sorting, show_t
                       | _ => CONSTANT {name = name, full_name = lookup' attrs "name"}
                     end
                | SOME "type_name" => TYPE {name = one_str x, full_name = lookup' attrs "name"}
-               (* Isabelle2025-2 wraps fixed variables in entity markup
-                  (<entity kind="fixed"><free>x</free></entity>); 2024 emitted
-                  the bare <free> element. *)
+               (* fixed variables come wrapped in entity markup
+                  (<entity kind="fixed"><free>x</free></entity>) *)
                | SOME "fixed" => FREE (one_str x)
                | _ => raise XML_DUMP_FAIL origin
            ) :: ret
@@ -335,7 +340,7 @@ fun floating_info t =
       val floating = map fst floating0
       (* a sort is trivial iff it is a subset of {type} (the universal HOL sort) *)
       val sort_names =
-        map fst (filter (fn (_,s) => not (subset (op =) (s, ["HOL.type"]))) floating0)
+        map fst (filter (fn (_,s) => not (subset (op =) (s, [\<^unchecked_name>\<open>HOL.type\<close>]))) floating0)
       fun inter' xs ys = filter (fn x => member (op =) ys x) xs
       (* carrier constant occurrences in L-to-R order, tagged with whether THIS
          occurrence sits in function/head position (applied to >= 1 argument). *)

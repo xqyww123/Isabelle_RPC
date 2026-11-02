@@ -11,10 +11,10 @@ begin
 
 ML \<open>
 local
-  val symT = Type ("SSymb.symbol", [])
-  val s1 = Phi_Tool_Symbol.mk_symbol "Test_Term_Codec.alpha"
-  val s2 = Phi_Tool_Symbol.mk_symbol "Test_Term_Codec.beta"
-  val t = Abs ("x", TFree ("'a", ["HOL.type"]),
+  val symT = Type (\<^unchecked_name>\<open>SSymb.symbol\<close>, [])
+  val s1 = Phi_Tool_Symbol.mk_symbol \<^unchecked_name>\<open>Test_Term_Codec.alpha\<close>
+  val s2 = Phi_Tool_Symbol.mk_symbol \<^unchecked_name>\<open>Test_Term_Codec.beta\<close>
+  val t = Abs ("x", TFree ("'a", [\<^unchecked_name>\<open>HOL.type\<close>]),
             Const ("f", TVar (("'b", 3), []) --> symT) $ Bound 0 $ s2
               $ Var (("v", 2), symT) $ Free ("y", symT) $ s1)
 
@@ -41,9 +41,9 @@ in
   val _ = assert "BytesIO round trip" (bytes_rt t = t)
   val _ = assert "BinIO round trip" (binio_rt t = t)
   val _ = assert "symbol round trip"
-            (Phi_Tool_Symbol.dest_symbol (bytes_rt s2) = SOME "Test_Term_Codec.beta")
+            (Phi_Tool_Symbol.dest_symbol (bytes_rt s2) = SOME \<^unchecked_name>\<open>Test_Term_Codec.beta\<close>)
   val _ = assert "wire carries the identifier"
-            (String.isSubstring "Test_Term_Codec.beta" wire andalso not (String.isSubstring "SSymb" wire))
+            (String.isSubstring \<^unchecked_name>\<open>Test_Term_Codec.beta\<close> wire andalso not (String.isSubstring "SSymb" wire))
 end
 \<close>
 

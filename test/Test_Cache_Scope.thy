@@ -31,16 +31,16 @@ fun constituents_of_const thy const =
   map #1 (#2 (Universal_Key.thm_constituents (Context.Theory thy)
                 (Thm.assume (Thm.global_cterm_of thy const))))
 
-val (thy_a, const_a) = mk_foo "UK_Cache_A.Foo"
+val (thy_a, const_a) = mk_foo \<^unchecked_name>\<open>UK_Cache_A.Foo\<close>
 val names_a = constituents_of_const thy_a const_a          (* writes the cache entry *)
 
 val _ =
   check "A's constituents do not name A"
-    (member (op =) names_a "UK_Cache_A.Foo")
+    (member (op =) names_a \<^unchecked_name>\<open>UK_Cache_A.Foo\<close>)
 
 (* Beginning B collides on the base name Foo and forks.  The entry A just wrote
    names a theory of base name Foo, so the purge must drop it. *)
-val (thy_b, const_b) = mk_foo "UK_Cache_B.Foo"
+val (thy_b, const_b) = mk_foo \<^unchecked_name>\<open>UK_Cache_B.Foo\<close>
 val _ =
   check "B did not fork the cache off A"
     (Universal_Key.cache_scope_id thy_b <> Universal_Key.cache_scope_id thy_a)
@@ -49,10 +49,10 @@ val names_b = constituents_of_const thy_b const_b
 
 val _ =
   check "B read A's cached constituents back -- the fork did not purge the entry"
-    (not (member (op =) names_b "UK_Cache_A.Foo"))
+    (not (member (op =) names_b \<^unchecked_name>\<open>UK_Cache_A.Foo\<close>))
 val _ =
   check "B's constituents do not name B"
-    (member (op =) names_b "UK_Cache_B.Foo")
+    (member (op =) names_b \<^unchecked_name>\<open>UK_Cache_B.Foo\<close>)
 
 (* The entry that survives a purge must be the one naming no colliding theory:
    Pure is a constituent of both propositions and its base name is not Foo. *)

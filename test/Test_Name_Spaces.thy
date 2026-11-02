@@ -1,18 +1,22 @@
 (*
-  The two measurements the fix plan (§A.9) requires to be re-derived rather than
-  quoted.  Both are pinned as assertions: batch output is not shown by
+  Parts 1-2: the two measurements the fix plan (§A.9) requires to be re-derived
+  rather than quoted.  Part 3: a theory from a heap carries no constituents cache.
+  Part 4: experience_constituents keeps only the maximal constituent, here the
+  unfinished theory.  All are pinned as assertions: batch output is not shown by
   `isabelle build`, so a number that is only printed is a number nobody reads.
 *)
 theory Test_Name_Spaces
   imports Isabelle_RPC.Remote_Procedure_Calling "HOL-Library.Multiset"
 begin
 
+definition rpc_test_dep :: "nat \<Rightarrow> nat" where "rpc_test_dep n = Suc n"
+
 ML \<open>
 local
 
 val context = Context.Theory \<^theory>
 
-(* 1. hash_of_long prefers Thy_Info's registry; key_of_ns_entity keeps using
+(* 1. hash_of_long prefers Build's registry; key_of_ns_entity keeps using
       resolve_theory.  Over Main's cone the two must name the same theory value —
       if they ever did not, one long name would carry two content hashes.
       Measured 2026-08-12: 99 theories, 0 disagreements. *)
@@ -20,7 +24,7 @@ val main_cone = Theory.nodes_of \<^theory>\<open>Main\<close> |> map Context.the
 
 val disagreements =
   filter (fn long =>
-    case Thy_Info.lookup_theory long of
+    case Build.lookup_theory long of
       NONE => true
     | SOME thy =>
         Context.theory_identifier thy
@@ -29,7 +33,7 @@ val disagreements =
 
 val _ =
   if null disagreements then ()
-  else error ("Test_Name_Spaces: Thy_Info and resolve_theory disagree on " ^
+  else error ("Test_Name_Spaces: Build and resolve_theory disagree on " ^
               string_of_int (length disagreements) ^ " of " ^
               string_of_int (length main_cone) ^ " theories of Main's cone: " ^
               commas_quote disagreements)
@@ -58,6 +62,19 @@ val _ =
 val _ =
   if is_none (Universal_Key.cache_scope_id \<^theory>\<open>List\<close>) then ()
   else error "Test_Name_Spaces: a theory loaded from the heap carries a constituents cache"
+
+(* 4. experience_constituents keeps only the maximal constituent theories, resolved
+      against the context.  The unfinished theory is in no registry (Build commits
+      a theory only when its ROOT theories section finishes, build.ML:185-187 in
+      schedule_theories), so a registry lookup cannot place it above HOL.Nat and
+      keeps both. *)
+val _ =
+  (case Context_Callbacks.experience_constituents (Context.Proof \<^context>)
+          ["rpc_test_dep (Suc ?n)"] of
+    [(name, _)] =>
+      if name = Context.theory_long_name \<^theory> then ()
+      else error ("Test_Name_Spaces: the maximal constituent is " ^ quote name)
+  | cs => error ("Test_Name_Spaces: not one maximal constituent: " ^ commas_quote (map #1 cs)))
 
 in
 val _ = writeln "Test_Name_Spaces: all checks passed"

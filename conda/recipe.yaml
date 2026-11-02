@@ -189,7 +189,7 @@ requirements:
     # Bounded to the Isabelle SERIES this session is written against -- the base package
     # keeps a constant name at a per-release version, so unbounded would let conda pair
     # this with a future Isabelle it was never built for.
-    - isabelle >=2025.2,<2025.3
+    - isabelle >=2026,<2026.1
     # ROOT:1 `session Isabelle_RPC = Performant_Isabelle_ML +`.  The bound names the
     # performant-ml series this session is built and tested against; it moved from
     # 0.1.x to 0.2.x with isabelle-rpc 0.5.0, together with every sibling package

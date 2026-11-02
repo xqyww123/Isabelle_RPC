@@ -62,7 +62,7 @@ end
 
 structure Inner_Syntax_Error : INNER_SYNTAX_ERROR = struct
 
-val sentinel_id = "Minilang.inner_syntax"
+val sentinel_id = \<^unchecked_name>\<open>Minilang.inner_syntax\<close>
 
 (* --- positioned input --------------------------------------------------- *)
 

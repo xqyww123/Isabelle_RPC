@@ -11,8 +11,11 @@ ML \<open>
 local
 fun assert msg b = if b then () else error ("Test_Entity_Catalog: " ^ msg)
 
-val consts = ["HOL.True", "HOL.False", "HOL.conj", "HOL.disj", "HOL.implies",
-              "HOL.Not", "HOL.All", "HOL.Ex", "HOL.eq", "HOL.If"]
+val consts = [\<^const_name>\<open>HOL.True\<close>, \<^const_name>\<open>HOL.False\<close>,
+              \<^const_name>\<open>HOL.conj\<close>, \<^const_name>\<open>HOL.disj\<close>,
+              \<^const_name>\<open>HOL.implies\<close>, \<^const_name>\<open>HOL.Not\<close>,
+              \<^const_name>\<open>HOL.All\<close>, \<^const_name>\<open>HOL.Ex\<close>,
+              \<^const_name>\<open>HOL.eq\<close>, \<^const_name>\<open>HOL.If\<close>]
 fun entry name =
   {uk = #1 (Universal_Key.key_of_constant (Context.Proof \<^context>) name), name = name,
    is_local = false}
@@ -43,7 +46,7 @@ val _ = assert "re-delivery of [4, 10)"
 (* n > length is a protocol error, raised before anything is interned *)
 val _ =
   (case Exn.capture_body (fn () =>
-      Entity_Catalog.answer catalog 11 [entry "HOL.undefined"] []) of
+      Entity_Catalog.answer catalog 11 [entry \<^const_name>\<open>HOL.undefined\<close>] []) of
     Exn.Exn (ERROR msg) => assert ("the protocol error names synced_length: " ^ msg)
                              (String.isSubstring "synced_length 11" msg)
   | Exn.Exn exn => error ("Test_Entity_Catalog: not ERROR: " ^ Runtime.exn_message exn)
@@ -51,8 +54,8 @@ val _ =
 val _ = assert "nothing was interned" (Entity_Catalog.length catalog = 10)
 
 (* the intern key is (uk, name, is_local): the same uk twice more (D6) *)
-val true_local = {uk = #uk (nth ten 0), name = "HOL.True", is_local = true}
-val alias = {uk = #uk (nth ten 0), name = "HOL.True_alias", is_local = false}
+val true_local = {uk = #uk (nth ten 0), name = \<^const_name>\<open>HOL.True\<close>, is_local = true}
+val alias = {uk = #uk (nth ten 0), name = \<^unchecked_name>\<open>HOL.True_alias\<close>, is_local = false}
 val _ = assert "is_local = true is another entry" (Entity_Catalog.intern catalog true_local = 10)
 val _ = assert "another name is another entry" (Entity_Catalog.intern catalog alias = 11)
 val _ = assert "an interned entry keeps its index" (Entity_Catalog.intern catalog (nth ten 0) = 0)

@@ -89,19 +89,13 @@ signature CONTEXT_CALLBACKS = sig
   val static_context_unpacker : Context.generic -> context_unpacker
 
   (* Exported utilities for building caches externally *)
-  (* A Name_Space entry, spelled out because `Name_Space.entry` is not an
-     exported type: the NAME_SPACE signature declares the_entry's result
-     inline.  Declared ONCE here so the record is not hand-copied per val and
-     kept in step with Pure by hand. *)
-  type name_space_entry = {pos: Position.T, serial: serial, group: serial,
-    suppress: bool list, theory_long_name: string, concealed: bool}
   (* THE shared spelling of "fetch the fact space's name-space entry" (NONE if
      absent).  The fact space is derived from the Facts.T PARAMETER -- which
      space a caller passes is its whole scoping decision (e.g. the global
      space rejects proof-local labels with no test written anywhere).  No
      guards live here: accessible_entry_of_fact adds the concealed/hidden
      test, and is_infra_thm already carries it. *)
-  val entry_of_fact : Facts.T -> string -> name_space_entry option
+  val entry_of_fact : Facts.T -> string -> Name_Space.entry option
   (* The resolver: one (kind, name) in a context, resolved by name only -- no
      infra filter, no rule-kind membership test.  A member of a dynamic fact
      has no declaration: pos ("", 0, 0).  NONE when the name does not resolve,
@@ -110,9 +104,9 @@ signature CONTEXT_CALLBACKS = sig
     {uk: Universal_Key.universal_key, name: string, pos: def_pos, is_local: bool} option
   (* THE accessibility test of every enumeration: the entry is neither
      concealed nor hidden in its space *)
-  val is_accessible : Name_Space.T -> string -> name_space_entry -> bool
+  val is_accessible : Name_Space.T -> string -> Name_Space.entry -> bool
   (* entry_of_fact, NONE also when the fact is not accessible *)
-  val accessible_entry_of_fact : Facts.T -> string -> name_space_entry option
+  val accessible_entry_of_fact : Facts.T -> string -> Name_Space.entry option
   val parse_patterns : Context.generic -> string list * string list -> term list * typ list * string list
   val mk_name_filter : string list -> string -> bool
   (* First arg = the expensive-match budget (caps full-prop subterm matching to bound
@@ -252,17 +246,12 @@ fun resolve_name _ _ (Fixed nm) _ = SOME (Thm_Name.print nm)
       end
 
 
-(* See the signature: Name_Space.entry spelled out once, because Pure does not
-   export the type. *)
-type name_space_entry = {pos: Position.T, serial: serial, group: serial,
-  suppress: bool list, theory_long_name: string, concealed: bool}
-
 (* THE shared spelling of "fetch the fact space's name-space entry"; the fact
    space passed in is the caller's whole scoping decision (signature comment). *)
-fun entry_of_fact facts name : name_space_entry option =
+fun entry_of_fact facts name : Name_Space.entry option =
   try (Name_Space.the_entry (Facts.space_of facts)) name
 
-fun is_accessible space name (entry : name_space_entry) =
+fun is_accessible space name (entry : Name_Space.entry) =
   not (#concealed entry orelse Long_Name.is_hidden (Name_Space.intern space name))
 
 fun accessible_entry_of_fact facts name =
@@ -271,7 +260,7 @@ fun accessible_entry_of_fact facts name =
   | NONE => NONE)
 
 (* proof-context-local: no theory owns the fact's entry *)
-fun is_local_entry (e : name_space_entry) = #theory_long_name e = ""
+fun is_local_entry (e : Name_Space.entry) = #theory_long_name e = ""
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry's
    position.  File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
@@ -294,7 +283,7 @@ fun entry_of_name context (kind, name) =
         val pos =
           if Facts.is_dynamic facts full_name then ("", 0, 0)
           else (case entry_of_fact facts full_name of
-                  SOME e => entry_def_pos (#pos e)
+                  SOME e => entry_def_pos (Name_Space.entry_pos e)
                 | NONE => ("", 0, 0))
       in SOME {uk = rekey uk thm, name = disp_name, pos = pos, is_local = not is_global} end
     fun rule key_of' _ thm = key_of' NONE context thm
@@ -1191,8 +1180,12 @@ fun experience_constituents context (pattern_strs : string list)
                          (#2 (Universal_Key.compute_constituents context t)))
            term_pats Symtab.empty
     val consts = Symtab.dest tab
-    (* resolve each theory (unresolvable -> keep, can't compare); keep maximal *)
-    val items = map (fn (n, h) => (n, h, try Thy_Info.get_theory n)) consts
+    (* resolve each theory against the context, not a process-wide registry: every
+       constituent is the context's theory or one of its ancestors, including the
+       unfinished theory itself and theories no registry holds (loaded from source
+       by PIDE, or of a theories section still being built).  Unresolvable -> keep,
+       cannot compare.  Keep the maximal ones. *)
+    val items = map (fn (n, h) => (n, h, try (Theory_Hash.resolve_theory context) n)) consts
     fun is_max (ni, _, SOME ti) =
           not (exists (fn (nj, _, tj_opt) =>
                  nj <> ni andalso
@@ -1204,7 +1197,7 @@ fun experience_constituents context (pattern_strs : string list)
 fun make_experience_constituents_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Experience.constituents",
+    name = \<^unchecked_name>\<open>Experience.constituents\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, unpackList unpackString),
     ret_schema = packList (packPair (packString, packBytes)),
@@ -1247,7 +1240,7 @@ fun experience_hit_rates context (query_pat_strs : string list)
 fun make_experiences_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.experiences",
+    name = \<^unchecked_name>\<open>Context.experiences\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack,
                    unpackPair (unpackList unpackString,
@@ -1271,7 +1264,7 @@ fun loaded_theory_hashes context : Theory_Hash.hash list =
 fun make_loaded_theory_hashes_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.loaded_theory_hashes",
+    name = \<^unchecked_name>\<open>Context.loaded_theory_hashes\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = ctxt_unpack,
     ret_schema = packList packBytes,
@@ -1281,7 +1274,7 @@ fun make_loaded_theory_hashes_callback (ctxt_unpack : context_unpacker)
 
 fun make_constants_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  mk_enumeration_callback "Context.constants" ctxt_unpack
+  mk_enumeration_callback \<^unchecked_name>\<open>Context.constants\<close> ctxt_unpack
     (fn (context, (target_thy_opt, the_theory_only, exclude,
                     _, type_pat_strs, theories_include, name_contains, limit, _, _)) =>
       let
@@ -1403,7 +1396,7 @@ fun make_thm_like_callback cb_name key_of mk_live filter_opt cache_opt
    fact name. *)
 fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  make_thm_like_callback "Context.theorems" (Universal_Key.key_of_theorem' NONE)
+  make_thm_like_callback \<^unchecked_name>\<open>Context.theorems\<close> (Universal_Key.key_of_theorem' NONE)
     (fn {ctx = _, thy, facts, snapshot} =>
        let val uncached = case snapshot of
                NONE => Facts.dest_static false [] facts
@@ -1420,7 +1413,7 @@ fun make_theorems_callback filter_opt cache_opt (ctxt_unpack : context_unpacker)
 
 fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  mk_enumeration_callback "Context.types" ctxt_unpack
+  mk_enumeration_callback \<^unchecked_name>\<open>Context.types\<close> ctxt_unpack
     (fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -1434,7 +1427,7 @@ fun make_types_callback filter_opt (ctxt_unpack : context_unpacker)
 
 fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  mk_enumeration_callback "Context.classes" ctxt_unpack
+  mk_enumeration_callback \<^unchecked_name>\<open>Context.classes\<close> ctxt_unpack
     (fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -1448,7 +1441,7 @@ fun make_classes_callback filter_opt (ctxt_unpack : context_unpacker)
 
 fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  mk_enumeration_callback "Context.locales" ctxt_unpack
+  mk_enumeration_callback \<^unchecked_name>\<open>Context.locales\<close> ctxt_unpack
     (fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -1463,7 +1456,7 @@ fun make_locales_callback filter_opt (ctxt_unpack : context_unpacker)
 fun make_theorem_collection_callback collection_member_thms filter_opt
     (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  mk_enumeration_callback "Context.theorem_collection" ctxt_unpack
+  mk_enumeration_callback \<^unchecked_name>\<open>Context.theorem_collection\<close> ctxt_unpack
     (fn (context, (target_thy_opt, the_theory_only, exclude,
                              term_pat_strs, type_pat_strs,
                              theories_include, name_contains, limit, _, _)) =>
@@ -1527,7 +1520,7 @@ fun make_theorem_collection_callback collection_member_thms filter_opt
 
 fun make_methods_callback filter_opt (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
-  mk_enumeration_callback "Context.methods" ctxt_unpack
+  mk_enumeration_callback \<^unchecked_name>\<open>Context.methods\<close> ctxt_unpack
     (fn (context, (target_thy_opt, the_theory_only, exclude, _, _, theories_include, name_contains, limit, _, _)) =>
       let
         val ctx = resolve_ctx context target_thy_opt
@@ -1542,7 +1535,7 @@ fun make_methods_callback filter_opt (ctxt_unpack : context_unpacker)
 fun make_theory_long_name_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.the_theory_long_name",
+    name = \<^unchecked_name>\<open>Context.the_theory_long_name\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = ctxt_unpack,
     ret_schema = packString,
@@ -1554,7 +1547,7 @@ fun make_theory_long_name_callback (ctxt_unpack : context_unpacker)
 fun make_entries_of_names_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.entries_of_names",
+    name = \<^unchecked_name>\<open>Context.entries_of_names\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack,
                    unpackList (unpackPair (Universal_Key.unpack_entity_kind, unpackString))),
@@ -1569,7 +1562,7 @@ fun make_entries_of_names_callback (ctxt_unpack : context_unpacker)
 fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
     : Remote_Procedure_Calling.callback' =
   Remote_Procedure_Calling.mk_callback {
-    name = "Context.theory_long_name_and_path",
+    name = \<^unchecked_name>\<open>Context.theory_long_name_and_path\<close>,
     on_interrupt = Remote_Procedure_Calling.Reraise,
     arg_schema = unpackPair (ctxt_unpack, unpackString),
     ret_schema = packPair (packString, packString),
@@ -1652,16 +1645,16 @@ fun make_rules_callback cb_name key_of extract_net name_pred shape_ok
     filter_opt cache_opt ctxt_unpack
 in
 fun make_introduction_rules_callback extract_net name_pred shape_ok =
-  make_rules_callback "Context.introduction_rules"
+  make_rules_callback \<^unchecked_name>\<open>Context.introduction_rules\<close>
     Universal_Key.key_of_introduction_rule' extract_net name_pred shape_ok
 fun make_elimination_rules_callback extract_net name_pred shape_ok =
-  make_rules_callback "Context.elimination_rules"
+  make_rules_callback \<^unchecked_name>\<open>Context.elimination_rules\<close>
     Universal_Key.key_of_elimination_rule' extract_net name_pred shape_ok
 fun make_induction_rules_callback extract_net name_pred shape_ok =
-  make_rules_callback "Context.induction_rules"
+  make_rules_callback \<^unchecked_name>\<open>Context.induction_rules\<close>
     Universal_Key.key_of_induction_rule' extract_net name_pred shape_ok
 fun make_case_split_rules_callback extract_net name_pred shape_ok =
-  make_rules_callback "Context.case_split_rules"
+  make_rules_callback \<^unchecked_name>\<open>Context.case_split_rules\<close>
     Universal_Key.key_of_case_split_rule' extract_net name_pred shape_ok
 end
 

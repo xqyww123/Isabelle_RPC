@@ -293,8 +293,9 @@ set (`sexpr`, `pretty`, `typed_pretty`, plus `typed-nv_pretty` for types) and er
   `Printer.show_types_nv` lines are commented out), and `type_sort` does not actually show
   sorts.
 - `print_term`/`print_typ` force `show_markup = true` and reconstruct display text from the
-  inner-syntax XML. That path carries an Isabelle2025-2 compatibility layer (transparent
-  wrappers, `entity kind="fixed"`) and is brittle against markup changes.
+  inner-syntax XML. That path depends on the exact markup Isabelle emits (transparent
+  wrappers, `entity kind="fixed"`, the nested `entity` elements Isabelle2026 emits for a
+  name with several positions) and is brittle against markup changes.
 
 **Floating type variables.** A type variable occurring in no term variable's type — reachable
 only through a polymorphic `Const` — is invisible under the type-suppressing default. E.g.
