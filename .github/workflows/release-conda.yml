@@ -215,7 +215,7 @@ jobs:
           echo "CH=$CH" >> "$GITHUB_ENV"
           ls -l "$CH/noarch/"
 
-      - name: "Install it -- local channel for US, conda.qiyuan.me for the base isabelle"
+      - name: "Install it -- local channel for US, conda-ci.qiyuan.me for the base isabelle"
         run: |
           set -euo pipefail
           # Unlike the base repo we have no local `isabelle` artifact to solve against, so
@@ -226,7 +226,7 @@ jobs:
           # this package run-depends on python and five python libraries, none of which
           # live on conda.qiyuan.me.  Dropping it makes the solve fail outright.
           conda create -y -n v \
-            -c "file://$CH" -c https://conda.qiyuan.me -c conda-forge --override-channels \
+            -c "file://$CH" -c https://conda-ci.qiyuan.me -c conda-forge --override-channels \
             "file://$CH::isabelle-rpc"
           conda activate v
           conda list isabelle
@@ -344,7 +344,7 @@ jobs:
   # This logic was validated against the live channel first, by
   # isabelle-packaging-ci's smoke-logic-probe.
   smoke:
-    name: "Smoke: conda install from conda.qiyuan.me (${{ matrix.os }})"
+    name: "Smoke: conda install from conda-ci.qiyuan.me (${{ matrix.os }})"
     needs: [build, publish]
     # always() overrides the default skipped-needs propagation: with smoke_only the
     # publish job is skipped (dry_run) and smoke tests the build of this VERSION and
@@ -370,13 +370,13 @@ jobs:
         with:
           auto-update-conda: true
 
-      - name: "conda install -c https://conda.qiyuan.me isabelle-rpc"
+      - name: "conda install -c https://conda-ci.qiyuan.me isabelle-rpc"
         run: |
           set -euo pipefail
           # Pinned to this VERSION and build_number: by bare name conda would install
           # another build whenever this one cannot be solved.
           conda create -y -n t \
-            -c https://conda.qiyuan.me -c conda-forge --override-channels \
+            -c https://conda-ci.qiyuan.me -c conda-forge --override-channels \
             "isabelle-rpc==${{ needs.build.outputs.version }}=*_${{ inputs.build_number || '0' }}"
           conda activate t
           conda list isabelle-rpc
