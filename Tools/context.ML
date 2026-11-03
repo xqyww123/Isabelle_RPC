@@ -48,12 +48,15 @@
 *)
 
 signature CONTEXT_CALLBACKS = sig
-  (* Definition position: (file_path, line, symbol_offset).
-     file_path is the standardized absolute path (empty string if unknown).
+  (* Definition position on the wire: (file_path, line, symbol_offset).
+     file_path is the standardized absolute path (empty string if unknown or not
+     convertible, e.g. an undefined variable or an illegal character).
      line is the 1-based line number (0 if unknown).
-     symbol_offset is the Isabelle symbol offset from file start (0 if unknown). *)
+     symbol_offset is the Isabelle symbol offset from file start (0 if unknown).
+     A position carrying only a PIDE command id packs as ("", 0, 0). *)
   type def_pos = string * int * int
-  val pack_pos : def_pos MessagePackBinIO.Pack.packer
+  (* packs a Position.T as its def_pos; never raises *)
+  val pack_pos : Position.T MessagePackBinIO.Pack.packer
 
   (* Name of a cached theorem entry. `Fixed`: a static fact's name+index
      (stable). `Member_of_Dynamic`: a member of a dynamic collection, carrying
@@ -97,11 +100,13 @@ signature CONTEXT_CALLBACKS = sig
      test, and is_infra_thm already carries it. *)
   val entry_of_fact : Facts.T -> string -> Name_Space.entry option
   (* The resolver: one (kind, name) in a context, resolved by name only -- no
-     infra filter, no rule-kind membership test.  A member of a dynamic fact
-     has no declaration: pos ("", 0, 0).  NONE when the name does not resolve,
+     infra filter, no rule-kind membership test.  pos is the declaration's raw
+     Position.T (an entity of a PIDE node carries only a command id there; the
+     caller may resolve it, pack_pos flattens it).  A member of a dynamic fact
+     has no declaration: Position.none.  NONE when the name does not resolve,
      and for a fixed variable asked as a constant. *)
   val entry_of_name : Context.generic -> Universal_Key.entity_kind * string ->
-    {uk: Universal_Key.universal_key, name: string, pos: def_pos, is_local: bool} option
+    {uk: Universal_Key.universal_key, name: string, pos: Position.T, is_local: bool} option
   (* THE accessibility test of every enumeration: the entry is neither
      concealed nor hidden in its space *)
   val is_accessible : Name_Space.T -> string -> Name_Space.entry -> bool
@@ -264,10 +269,12 @@ fun is_local_entry (e : Name_Space.entry) = #theory_long_name e = ""
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry's
    position.  File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
-   Returns ("", 0, 0) when the position is unknown (e.g. ID-based positions from live PIDE). *)
+   Returns ("", 0, 0) when the position is unknown (e.g. ID-based positions from live PIDE).
+   Total: a file Path.explode or the expansion rejects packs as "", so nothing raises while a
+   reply is written. *)
 fun entry_def_pos pos =
   let val file = the_default "" (Position.file_of pos)
-      val file' = if file = "" then "" else File.standard_path (Path.explode file)
+      val file' = if file = "" then "" else the_default "" (try (File.standard_path o Path.explode) file)
   in (file',
       the_default 0 (Position.line_of pos),
       the_default 0 (Position.offset_of pos))
@@ -281,16 +288,16 @@ fun entry_of_name context (kind, name) =
           Universal_Key.key_of_theorem NONE context name
         val facts = Context.cases Global_Theory.facts_of Proof_Context.facts_of context
         val pos =
-          if Facts.is_dynamic facts full_name then ("", 0, 0)
+          if Facts.is_dynamic facts full_name then Position.none
           else (case entry_of_fact facts full_name of
-                  SOME e => entry_def_pos (Name_Space.entry_pos e)
-                | NONE => ("", 0, 0))
+                  SOME e => Name_Space.entry_pos e
+                | NONE => Position.none)
       in SOME {uk = rekey uk thm, name = disp_name, pos = pos, is_local = not is_global} end
     fun rule key_of' _ thm = key_of' NONE context thm
     fun name_space key_of =
       (case key_of context name of
         (uk, full_name, SOME pos) =>
-          SOME {uk = uk, name = full_name, pos = entry_def_pos pos, is_local = false}
+          SOME {uk = uk, name = full_name, pos = pos, is_local = false}
       | (_, _, NONE) => NONE)
   in
     (case kind of
@@ -1117,7 +1124,7 @@ val arg_schema = unpackTuple10 (unpackOption unpackString, unpackBool,
       unpackString (* target_type, "" = no filter; only used by induction/case-split rules *),
       unpackInt (* synced_length *))
 
-val pack_pos = packTuple3 (packString, packInt, packInt)
+val pack_pos = packTuple3 (packString, packInt, packInt) o entry_def_pos
 
 (* An entity enumeration callback: its catalog is made here, once per application,
    and lives as long as the callback; `body` returns the results and warnings. *)

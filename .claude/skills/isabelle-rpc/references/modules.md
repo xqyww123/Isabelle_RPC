@@ -250,11 +250,14 @@ because silently ignoring a goal pattern would write a wrong experience record.
 
 **By-name resolution.** The resolver `entry_of_name : Context.generic -> entity_kind * string ->
 {uk, name, pos, is_local} option` resolves one name of one kind by name only: no infra filter,
-no rule-kind membership test. A dynamic-collection member has `pos = ("", 0, 0)`. It is `NONE`
-when the name does not resolve, and for a fixed variable asked as a constant. The callback
-`Context.entries_of_names` (`make_entries_of_names_callback : context_unpacker -> callback'`)
-takes `(ctxt, [(kind, name)])` and returns one `(uk, name, pos, is_local) option` per item, in
-order. It touches no enumeration callback.
+no rule-kind membership test. `pos` is the declaration's raw `Position.T`: an entity of a PIDE
+node carries only a command id there, which an ML caller can still resolve. A dynamic-collection
+member has `pos = Position.none`. It is `NONE` when the name does not resolve, and for a fixed
+variable asked as a constant. The callback `Context.entries_of_names`
+(`make_entries_of_names_callback : context_unpacker -> callback'`) takes `(ctxt, [(kind, name)])`
+and returns one `(uk, name, pos, is_local) option` per item, in order, with `pos` flattened by
+`pack_pos` to the `def_pos` triple `(file, line, offset)`: total, an unknown, id-only or
+unconvertible file packs as `""`. It touches no enumeration callback.
 
 **Experience memory.** `Experience.constituents` maps goal patterns to the maximal antichain
 of defining theories (Python XORs those hashes into the key prefix). `Context.experiences`
