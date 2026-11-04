@@ -30,7 +30,6 @@ dependencies = [
     "msgpack",
     "platformdirs",
     "watchdog",
-    "xxhash",
 ]
 
 [project.urls]

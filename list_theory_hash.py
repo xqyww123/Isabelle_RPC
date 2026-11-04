@@ -5,30 +5,18 @@ Usage:
   python list_theory_hash.py HOL.List
 """
 import argparse
-import threading
-import time
 import sys
 import asyncio
 
-import Isabelle_RPC_Host
 from IsaREPL import Client
 
 parser = argparse.ArgumentParser(description="List theory hashes for a theory and its dependencies")
 parser.add_argument("theory", help="Theory name (e.g., HOL.List)")
 parser.add_argument("--repl-addr", default="127.0.0.1:6666", help="Isa-REPL server address")
-parser.add_argument("--rpc-addr", default="127.0.0.1:27182", help="RPC host address")
 parser.add_argument("--session", default="HOL", help="Session qualifier for theory name resolution")
 args = parser.parse_args()
 
-logger = Isabelle_RPC_Host.mk_logger_(args.rpc_addr, None)
-
-# Launch RPC host in daemon thread (needed for Theory_Hash.hash_of xxhash128 RPC)
-rpc_thread = threading.Thread(
-    target=Isabelle_RPC_Host.launch_server_,
-    args=(args.rpc_addr, logger), daemon=True)
-rpc_thread.start()
-time.sleep(1)
-
+# No RPC host: Theory_Hash computes every hash in Isabelle/ML.
 async def main():
     async with Client(args.repl_addr, args.session, timeout=None) as c:
         print("Loading theories...", file=sys.stderr, flush=True)

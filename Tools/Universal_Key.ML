@@ -305,7 +305,8 @@ type caching_key = entity * theory_long_name
 type universal_key = Word8Vector.vector
 val hasher = Hashers.bitvec
 
-val resolve_theory = Theory_Hash.resolve_theory
+fun resolve_theory context name =
+  Theory.resolve_theory (Context.proof_of context) (name, Position.none)
 
 (* --- Cache --- *)
 

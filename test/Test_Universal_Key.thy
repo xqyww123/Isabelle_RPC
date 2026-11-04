@@ -9,9 +9,9 @@
   `Foo.t` and `Foo.c`.
 
   Everything here stays inside those WIP theories: their hashes are FNV of their
-  long names (theory_hash.ML), so no test here needs the Python RPC host that
-  Theory_Hash.hash_of uses for loaded theories.  Test_Cache_Scope covers what
-  cannot be reached without one.
+  long names (Performant_Isabelle_ML's theory_hash.ML), so no test here needs the
+  native library that Theory_Hash.hash_of uses for loaded theories.
+  Test_Cache_Scope covers what cannot be reached without it.
 *)
 theory Test_Universal_Key
   imports Isabelle_RPC.Remote_Procedure_Calling

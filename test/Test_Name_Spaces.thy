@@ -28,7 +28,8 @@ val disagreements =
       NONE => true
     | SOME thy =>
         Context.theory_identifier thy
-          <> Context.theory_identifier (Theory_Hash.resolve_theory context long))
+          <> Context.theory_identifier
+               (Theory.resolve_theory (Context.proof_of context) (long, Position.none)))
   main_cone
 
 val _ =

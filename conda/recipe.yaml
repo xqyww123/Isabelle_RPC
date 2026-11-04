@@ -196,10 +196,9 @@ requirements:
     # (auto-sledgehammer needs 0.2.0's Performant_Isabelle_HOL session, so a 0.1.x
     # cap here would leave isabelle-minilang, which needs both, unsolvable).
     - isabelle-performant-ml >=0.2.0,<0.3.0
-    # The five pyproject dependencies under their CONDA names, which differ from PyPI's:
+    # The four pyproject dependencies under their CONDA names, which differ from PyPI's:
     #   lmdb    -> python-lmdb     (conda `lmdb` is the C library)
     #   msgpack -> msgpack-python
-    #   xxhash  -> python-xxhash   (conda `xxhash` is the C library)
     #
     # Note the failure mode is NOT an unsolvable package -- it is worse.  Naming the C
     # library resolves fine, installs green, and dies at `import lmdb` at run time.  A
@@ -214,7 +213,6 @@ requirements:
     - msgpack-python
     - platformdirs
     - watchdog
-    - python-xxhash
 
 tests:
   - python:

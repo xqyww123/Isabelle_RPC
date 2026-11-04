@@ -17,13 +17,12 @@ Two vocabularies, opposite directions:
 | `call_heartbeat_callback` | `rpc.py:404` | `unit → string`. Demo: calls back into ML `isabelle_heartbeat`. |
 | `generate_uuids` | `rpc.py:429` | `int → bytes list` (16-byte each). |
 | `run_python` | `run_python.py:22` | `string → string option`. Unsandboxed `exec`. |
-| `Theory_Hash.store` | `theory_hash.py:66` | `(hash * string) list → unit`. Persists to LMDB. |
-| `xxhash128_theory` | `theory_hash.py:77` | `(string * string * hash list) → hash`. xxhash128 of long name ++ NUL ++ file bytes ++ parent hashes, LSB of byte 0 cleared. |
+| `Theory_Hash.store` | `theory_hash.py:64` | `(hash * string) list → unit`. Persists to LMDB. |
 | `position.offset_to_line_column` | `position.py:537` | `(file, symbol_offset) → (line, ascii_column)` |
 | `position.line_column_to_offset` | `position.py:548` | `(file, line, column) → symbol_offset` |
 
 ML-side wrappers: `Remote_Procedure_Calling.heartbeat_cmd` / `.load_cmd` / `.call_heartbeat_callback_cmd`,
-`UUID.generate_cmd`, `Run_Python.run` / `.run_with`, `Theory_Hash.store_theory_hash`.
+`UUID.generate_cmd`, `Run_Python.run` / `.run_with`, `Theory_Hash_Store.store_theory_hash`.
 
 `run_python` wraps the source in `async def __aexec__(connection): …` and awaits it, so the
 source may use `await` and `return`. `connection` is the only injected name. It passes
@@ -39,7 +38,8 @@ Registered via `Theory.setup (Context.theory_map (register_global_callback …))
 | `position.symbol_explode` | `RPC.ML:430` | `string → string list`. Isabelle symbol split. |
 | `log` | `tracing.ML:24` | `(int, string) → unit`. Level `0=TRACING 1=WARNING 2=WRITELN`. |
 | `dialogue` | `dialogue.ML:10` | `(string, string list) → string`. Blocks on a PIDE click. |
-| `Theory_Hash.theory_name_of` | `theory_hash.ML:194` | `bytes → string option`. Reverse hash lookup; `None` if not hashed in this runtime. |
+| `Theory_Hash.theory_name_of` | `theory_hash.ML:51` | `bytes → string option`. Reverse hash lookup; `None` if not hashed in this runtime. |
+| `Theory_Hash.process_serial_of` | `theory_hash.ML:68` | `bytes → (string * int) option`. The (process id, theory serial) behind a hash. |
 
 The `log` level encoding is duplicated in `Connection.LogType` (`rpc.py:183-187`) and must
 stay `0/1/2`; `Isabelle_Log.unpack_log_type` raises `Unpack` on anything else.

@@ -4,9 +4,9 @@
   alpha-variant keeps a key of its own; a theorem key and a rule key of one
   proposition are kept apart by their tag.
 
-  Kept apart from Test_Universal_Key because it cannot avoid the Python RPC host:
-  keying a theorem reads the hashes of its theories, Pure's included (see
-  Test_Cache_Scope).
+  Kept apart from Test_Universal_Key because it needs Performant_Isabelle_ML's
+  native library: keying a theorem reads the hashes of its theories, Pure's
+  included (see Test_Cache_Scope).
 *)
 theory Test_Thm_Key_Cache
   imports Isabelle_RPC.Remote_Procedure_Calling

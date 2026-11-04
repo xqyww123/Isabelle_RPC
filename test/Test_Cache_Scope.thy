@@ -3,11 +3,12 @@
   item 5): a fork must not let the forking theory read the entries the colliding
   theory wrote.
 
-  Kept apart from Test_Universal_Key because it cannot avoid the Python RPC host.
-  The cache is only written by thm_constituents, which needs a thm; a thm's
-  proposition has type `prop`, which Pure declares; and Theory_Hash.hash_of takes
-  its RPC branch for any loaded theory, Pure included.  There is no proposition
-  that avoids Pure.
+  Kept apart from Test_Universal_Key because it needs Performant_Isabelle_ML's
+  native library (library/native/build).  The cache is only written by
+  thm_constituents, which needs a thm; a thm's proposition has type `prop`, which
+  Pure declares; and Theory_Hash.hash_of hashes any loaded theory, Pure included,
+  by its persistent branch (the native xxh128 of the theory's file).  There is no
+  proposition that avoids Pure.
 *)
 theory Test_Cache_Scope
   imports Isabelle_RPC.Remote_Procedure_Calling
@@ -60,11 +61,11 @@ val _ =
   check "Pure is not a constituent of either proposition"
     (member (op =) names_a "Pure" andalso member (op =) names_b "Pure")
 
-(* And the RPC branch really did run: a persistent hash is xxhash128 of the file,
-   computed by the Python host.  If this ever reports false, the test has quietly
-   stopped covering the branch every AFP theory takes. *)
+(* And the persistent branch really did run: a persistent hash is xxhash128 of the
+   file, computed natively by XXHash.  If this ever reports false, the test has
+   quietly stopped covering the branch every AFP theory takes. *)
 val _ =
-  check "Pure was hashed by the WIP branch, so no RPC round trip happened"
+  check "Pure was hashed by the WIP branch, so the persistent (xxh128) branch was not exercised"
     (Theory_Hash.is_persistent (Theory_Hash.hash_of \<^theory>\<open>Pure\<close>))
 
 in

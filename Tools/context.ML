@@ -318,7 +318,8 @@ fun entry_of_name context (kind, name) =
 fun resolve_ctx context target_thy_opt =
   case target_thy_opt of
     NONE => context
-  | SOME name => Context.Theory (Theory_Hash.resolve_theory context name)
+  | SOME name =>
+      Context.Theory (Theory.resolve_theory (Context.proof_of context) (name, Position.none))
 
 (* Debug: return (key, name) pairs instead of just keys.
    Uncomment pack_key_name, dedup_key_names, and the SOME(..., name) lines below,
@@ -1192,7 +1193,9 @@ fun experience_constituents context (pattern_strs : string list)
        unfinished theory itself and theories no registry holds (loaded from source
        by PIDE, or of a theories section still being built).  Unresolvable -> keep,
        cannot compare.  Keep the maximal ones. *)
-    val items = map (fn (n, h) => (n, h, try (Theory_Hash.resolve_theory context) n)) consts
+    val ctxt = Context.proof_of context
+    val items =
+      map (fn (n, h) => (n, h, try (Theory.resolve_theory ctxt) (n, Position.none))) consts
     fun is_max (ni, _, SOME ti) =
           not (exists (fn (nj, _, tj_opt) =>
                  nj <> ni andalso
@@ -1575,13 +1578,10 @@ fun make_theory_long_name_and_path_callback (ctxt_unpack : context_unpacker)
     ret_schema = packPair (packString, packString),
     function = fn (context, name) =>
       let
-        val thy = Theory_Hash.resolve_theory context name
-        val thy_name = Context.theory_long_name thy
-        val master_dir = Resources.master_directory thy
-        val thy_base = Long_Name.base_name thy_name
-        val thy_file = Path.ext "thy" (master_dir + Path.basic thy_base)
-        val file_path = File.platform_path (File.full_path master_dir thy_file)
-      in (thy_name, file_path) end,
+        val thy = Theory.resolve_theory (Context.proof_of context) (name, Position.none)
+      in
+        (Context.theory_long_name thy, File.platform_path (Theory_Hash.get_theory_path thy))
+      end,
     timeout = NONE
   }
 

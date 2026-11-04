@@ -1,6 +1,6 @@
 ---
 name: isabelle-rpc
-description: How to use Isabelle_RPC — call async Python procedures from Isabelle/ML over MessagePack/TCP, and call back into ML from Python. Covers the command/callback API, the multiplexed wire protocol, procedure registration, and the Tools/ modules (Universal_Key, context queries, Theory_Hash, RPC_Pretty, Inner_Syntax_Error, position/unicode).
+description: How to use Isabelle_RPC — call async Python procedures from Isabelle/ML over MessagePack/TCP, and call back into ML from Python. Covers the command/callback API, the multiplexed wire protocol, procedure registration, and the Tools/ modules (Universal_Key, context queries, Theory_Hash_Store, RPC_Pretty, Inner_Syntax_Error, position/unicode).
 ---
 
 # Isabelle_RPC: call Python from Isabelle/ML

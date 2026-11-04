@@ -62,7 +62,7 @@ Also `read` / `write` / `write_error` / `write_error'` for raw stream access, an
 ## `Term_Digest : TERM_DIGEST` — lives in Performant_Isabelle_ML (`library/term_digest.ML`)
 
 Relocated to the base session; in scope here because `Remote_Procedure_Calling` imports it.
-`theory_hash.ML` and `Universal_Key.ML` build on it.
+`Theory_Hash` and `Universal_Key.ML` build on it.
 
 FNV-1a structural hashing, pure ML, no I/O. 64-bit `digest` and 128-bit
 `digest128 = Word64.word * Word64.word`.
@@ -84,33 +84,51 @@ val digest128_to_array : digest128 -> Word8Array.array
   (name hints are not unique across dynamic-collection members). Anonymous thms hash
   `Thm.prop_of` uncached.
 
-## `Tools/theory_hash.ML` — `Theory_Hash : THEORY_HASH`
+## `Theory_Hash : THEORY_HASH` — lives in Performant_Isabelle_ML (`library/theory_hash.ML`)
 
-16-byte content hash of a theory. `type hash = Word8Vector.vector`.
+16-byte content hash of a theory. `type hash = Word8Vector.vector`. Computed in ML, no RPC.
 
 ```sml
 exception Cannot_Hash of theory
 val hash_of : theory -> hash
-val hash_of_short : Context.generic -> string -> string * hash
+val hash_of_long : Context.generic -> string -> hash
 val theory_of : hash -> theory option
 val is_persistent : hash -> bool
-val resolve_theory : Context.generic -> string -> theory
-val store_theory_hash : theory -> unit
+val hasher : hash -> word
 val to_hex : hash -> string
+val process_id : unit -> string
+val get_theory_path : theory -> Path.T
 ```
 
 Two schemes, distinguished by the **LSB of byte 0**:
 
 | bit | scheme | meaning |
 | --- | --- | --- |
-| `0` | xxhash128 of long name ++ NUL ++ `.thy` bytes + parent hashes, computed in Python over RPC | persistent (from a heap image) |
+| `0` | xxhash128 of long name ++ NUL ++ `.thy` bytes + parent hashes, through `XXHash` (native) | persistent (from a heap image) |
 | `1` | FNV-1a-128 of the long theory name, computed locally | transient (live in jEdit) |
 
-- **`hash_of` may block on RPC** for the persistent branch. Never call it while holding a lock.
+- The persistent branch needs Performant_Isabelle_ML's native library: without it (or with one
+  built before `xxhash.c`) `hash_of` raises an ERROR naming `library/native/build <platform>`.
 - Its memo key is `Context.theory_identifier` — a runtime-local int. The reverse map
   `theory_of` only knows theories hashed in the current process, so Python's
   `theory_name_of` can legitimately return `None`.
-- Python: `theory_hash.py` — `is_persistent`, `theory_xxhash128`, `async theory_name_of`,
+- Name lookup is `Theory.resolve_theory : Proof.context -> string * Position.T -> theory`
+  (Performant_Isabelle_ML reopens `Theory`): `Theory.check`, except that the context's own
+  unfinished theory is found; long name iff the name contains a dot.
+
+## `Tools/theory_hash.ML` — `Theory_Hash_Store : THEORY_HASH_STORE`
+
+```sml
+val store_theory_hash : theory -> unit
+```
+
+For a theory and all its ancestors, sends (hash, long name) to Python, which records them in
+the registry `theory_hash.lmdb`. Also registers the global callbacks
+`Theory_Hash.theory_name_of` and `Theory_Hash.process_serial_of`. A structure of its own, not a
+second `Theory_Hash`: ML tables merge first-parent-wins, so a same-name structure here would be
+lost by theories whose first parent reaches Performant_Isabelle_ML but not Isabelle_RPC.
+
+- Python: `theory_hash.py` — `is_persistent`, `async theory_name_of`,
   and a 1 GiB LMDB store at `paths.semantic_DB_dir()/theory_hash.lmdb` — the same
   directory the semantic-embedding databases live in, honouring `SEMANTIC_DB_DIR`.
 
