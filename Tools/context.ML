@@ -49,11 +49,11 @@
 
 signature CONTEXT_CALLBACKS = sig
   (* Definition position on the wire: (file_path, line, symbol_offset).
-     file_path is the standardized absolute path (empty string if unknown or not
-     convertible, e.g. an undefined variable or an illegal character).
+     file_path is the standardized absolute path, or "" when the position has no usable
+     file (none, an undefined variable, an illegal character); line and symbol_offset then
+     carry no meaning, except that a command-id position keeps its offset.
      line is the 1-based line number (0 if unknown).
-     symbol_offset is the Isabelle symbol offset from file start (0 if unknown).
-     A position carrying only a PIDE command id packs as ("", 0, 0). *)
+     symbol_offset is the Isabelle symbol offset from file start (0 if unknown). *)
   type def_pos = string * int * int
   (* packs a Position.T as its def_pos; never raises *)
   val pack_pos : Position.T MessagePackBinIO.Pack.packer
@@ -269,7 +269,7 @@ fun is_local_entry (e : Name_Space.entry) = #theory_long_name e = ""
 
 (* Extract definition position (file, line, symbol_offset) from a Name_Space entry's
    position.  File paths are expanded (e.g. ~~/src/HOL/HOL.thy → /path/to/Isabelle/src/HOL/HOL.thy).
-   Returns ("", 0, 0) when the position is unknown (e.g. ID-based positions from live PIDE).
+   ("", 0, 0) for Position.none; a position with no file keeps its line and offset.
    Total: a file Path.explode or the expansion rejects packs as "", so nothing raises while a
    reply is written. *)
 fun entry_def_pos pos =
