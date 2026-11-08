@@ -206,10 +206,11 @@ requirements:
     - isabelle >=2026,<2026.1
     # ROOT:1 `session Isabelle_RPC = Performant_Isabelle_ML +`.  The bound names the
     # performant-ml series this session is built and tested against; it moved from
-    # 0.1.x to 0.2.x with isabelle-rpc 0.5.0, together with every sibling package
-    # (auto-sledgehammer needs 0.2.0's Performant_Isabelle_HOL session, so a 0.1.x
-    # cap here would leave isabelle-minilang, which needs both, unsolvable).
-    - isabelle-performant-ml >=0.2.0,<0.3.0
+    # 0.1.x to 0.2.x with isabelle-rpc 0.5.0, and to 0.3.x with isabelle-rpc 0.6.0:
+    # 0.3.0 is the first release with Theory_Hash and Theory.resolve_theory, which this
+    # session now uses.  isabelle-rpc 0.5.x keeps its own Theory_Hash and caps
+    # performant-ml at <0.3.0, so conda never pairs it with the moved one.
+    - isabelle-performant-ml >=0.3.0,<0.4.0
     # The four pyproject dependencies under their CONDA names, which differ from PyPI's:
     #   lmdb    -> python-lmdb     (conda `lmdb` is the C library)
     #   msgpack -> msgpack-python
