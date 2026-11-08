@@ -1,13 +1,7 @@
 # Module map
 
-`Remote_Procedure_Calling.thy` loads the ML files in this order — later ones depend on
-earlier ones:
-
-```
-RPC.ML  UUID.ML  theory_hash.ML  Universal_Key.ML  entity_catalog.ML
-config.ML  pretty.ML  inner_syntax_error.ML  context.ML
-run_python.ML  tracing.ML  dialogue.ML
-```
+`Remote_Procedure_Calling.thy` loads the ML files of `Tools/` in the order of its `ML_file`
+lines; later ones depend on earlier ones.
 
 ---
 
@@ -377,6 +371,37 @@ See `references/registry.md` for the `Config.lookup` wire contract.
   the global `log` callback.
 - `dialogue.ML` — global `dialogue` callback via `Active.dialog_text`. Blocks on `Future.join`.
 - `Run_Python` — `val run : string -> string option`, `val run_with : callback' list -> string -> string option`.
+
+## `Tools/pide_loader.ML` — `PIDE_Loader : PIDE_LOADER`, with `src/scala/pide_loader.scala`
+
+Loads theories from source through the PIDE document of a `PIDE_Loader.Session` (Scala; the
+`isabelle REPL` tool's session is one), as Isabelle/jEdit does. Its read interface is
+`Build`'s, over one scope: the heap theories and the pinned theories (loaded cleanly, held
+for the rest of the process).
+
+```sml
+val use_theories : string -> Path.T -> string list -> theory list  (* qualifier, master dir, imports *)
+val all_theories : unit -> string list
+val lookup_theory : string -> theory option   (* by long name; never loads *)
+val defined_theory : string -> bool
+val get_theory : string -> theory
+val init_theory : Options.update_pos -> theory -> Toplevel.init   (* header options, `condition` *)
+val with_theory_options : (Toplevel.state -> 'a) -> Toplevel.state -> 'a   (* f st under st's theory options *)
+val is_document_message : Properties.T -> bool   (* the message carries a document exec id *)
+```
+
+- `use_theories` answers an all-heap import list in ML; otherwise one Scala call answers every
+  import in request order. A file is read once per process and named by its folder
+  (`S.<name>` for a folder of a known session `S`, else `Draft.<name>`); two files with one
+  long name are refused.
+- Every function that may call Scala (`use_theories`, `lookup_theory`/`defined_theory`/
+  `get_theory` on a memo miss, `all_theories`, the init function of `init_theory`) must never
+  run on the protocol thread: a protocol command handler forks first.
+- Without a `PIDE_Loader.Session` (jEdit, `isabelle build`) the lookups cover the heap only
+  and `use_theories` of a non-heap theory fails naming the requirement.
+- Inside such a process `Build.get_theory` sees only heap theories; use `PIDE_Loader`.
+- `with_theory_options f st` runs `f st` under the theory options of `st`. Wrap each step,
+  not a loop of steps: a loop keeps the options of the state it started from.
 
 ---
 

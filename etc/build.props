@@ -4,6 +4,7 @@ no_build = true
 requirements = \
   env:ISABELLE_SCALA_JAR
 sources = \
-  src/scala/frontend_identity.scala
+  src/scala/frontend_identity.scala \
+  src/scala/pide_loader.scala
 services = \
   isabelle.isabelle_rpc.RPC_Functions

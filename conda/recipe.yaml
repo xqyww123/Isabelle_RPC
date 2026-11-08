@@ -68,21 +68,33 @@ build:
       mkdir -p "$dest"
       cp -a "$SRC_DIR/ROOT"                        "$dest/"
       cp -a "$SRC_DIR/Remote_Procedure_Calling.thy" "$dest/"
-      # Tools/ wholesale rather than the 12 ML_file lines: enumerating them is how an
+      # Tools/ wholesale rather than the 13 ML_file lines: enumerating them is how an
       # indirectly-referenced file gets silently dropped.  The one extra file this pulls
       # in, list_theory_hash_app.ML, belongs to List_Theory_Hash_App.thy which we do not
       # ship; nothing loads it, so carrying it is harmless and cheaper than being clever.
       cp -a "$SRC_DIR/Tools"                        "$dest/"
+      # The Scala component, wholesale: etc/settings puts lib/isabelle_rpc.jar on Isabelle's
+      # classpath, etc/build.props declares it (no_build) with its service, etc/options
+      # declares isabelle_rpc_dialogue, src/scala/ is what build.props names under
+      # `sources`.  Without them the dialogue silently falls back to "no responder", and
+      # the session does not build: Tools/pide_loader.ML names its Scala functions with the
+      # checked \<^scala> antiquotation.
+      cp -a "$SRC_DIR/etc" "$SRC_DIR/lib" "$SRC_DIR/src" "$dest/"
       find "$dest" -name '*~' -delete            # editor backups must not ship
 
       # contrib/ exists in the repo but is EMPTY -- deliberately not copied.
       test -f "$dest/ROOT"
       test -f "$dest/Tools/run_python.ML"         # the ML->Python bridge; without it the
                                                   # session cannot launch the host at all
+      test -f "$dest/lib/isabelle_rpc.jar"
+      test -f "$dest/etc/options"
+      test -f "$dest/etc/build.props"
 
       # --- etc/settings: tell Isabelle WHICH python runs the RPC host ---------------
       #
-      # Written HERE rather than kept in the source tree, because "$COMPONENT/../.." is
+      # Appended to the repository's etc/settings (its ISABELLE_RPC_HOME, ISABELLE_RPC_JAR
+      # and classpath lines come first).  This block is written HERE rather than kept in
+      # the source tree, because "$COMPONENT/../.." is
       # only meaningful for the conda layout ($PREFIX/share/isabelle-rpc); in a developer
       # checkout the component is the repo itself and that path is nonsense.
       #
@@ -113,9 +125,7 @@ build:
       # would silently override both -- closing the very escape hatch that RPC.ML's error
       # message tells the user to reach for, and breaking anyone whose host lives in a
       # different interpreter from the env's own (a mixed pip/conda install).
-      mkdir -p "$dest/etc"
-      printf '%s\n' \
-        '# -*- shell-script -*- :mode=shellscript:' \
+      { cat "$SRC_DIR/etc/settings"; printf '%s\n' \
         '# Which interpreter runs the Isabelle_RPC Python host.  See conda/recipe.yaml.' \
         '# Only a DEFAULT: an explicit ISABELLE_RPC_PYTHON always wins.' \
         'if [ -z "$ISABELLE_RPC_PYTHON" ]; then' \
@@ -126,10 +136,14 @@ build:
         '    ISABELLE_RPC_PYTHON="$ISABELLE_RPC_CONDA_PREFIX/bin/python"' \
         '  fi' \
         '  unset ISABELLE_RPC_CONDA_PREFIX' \
-        'fi' \
-        > "$dest/etc/settings"
+        'fi'; } > "$dest/etc/settings"
 
       test -f "$dest/etc/settings"
+      # The shipped etc/settings BEGINS with the repository's, byte for byte: its classpath
+      # line is what the bug of 0.5.x lacked, and a later `>` that overwrites the copy
+      # would pass every file-existence check above.
+      cmp -n "$(wc -c < "$SRC_DIR/etc/settings")" "$SRC_DIR/etc/settings" "$dest/etc/settings" \
+        || { echo "::error::etc/settings does not begin with the repository's etc/settings"; exit 1; }
       # The file bash will source must not carry a CR, on any build host.
       ! grep -q $'\r' "$dest/etc/settings" \
         || { echo "::error::etc/settings contains a carriage return"; exit 1; }

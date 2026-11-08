@@ -141,6 +141,9 @@ jobs:
             share/isabelle-rpc/ROOT \
             share/isabelle-rpc/Remote_Procedure_Calling.thy \
             share/isabelle-rpc/Tools/run_python.ML \
+            share/isabelle-rpc/lib/isabelle_rpc.jar \
+            share/isabelle-rpc/etc/options \
+            share/isabelle-rpc/etc/build.props \
             python-scripts/.isabelle-rpc-post-link.sh \
             python-scripts/.isabelle-rpc-pre-unlink.sh \
             python-scripts/.isabelle-rpc-post-link.bat \
@@ -244,7 +247,10 @@ jobs:
         run: |
           set -euo pipefail
           conda activate v
-          isabelle build -v Isabelle_RPC
+          # -D: every session the installed ROOT declares, so the ROOT ships only sessions
+          # whose sources ship.  The build needs the jar on the classpath (the checked
+          # \<^scala> names of Tools/pide_loader.ML), i.e. the shipped etc/settings.
+          isabelle build -v -D "$CONDA_PREFIX/share/isabelle-rpc"
 
       - name: "...and the PYTHON half works -- the whole reason this is noarch: python"
         run: |

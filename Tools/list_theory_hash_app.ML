@@ -3,7 +3,7 @@ val _ = REPL_Server.register_app \<^unchecked_name>\<open>Theory_Hash.list\<clos
   let
     val thy_name = let val (ret, cin') = doUnpack unpackString (!cin)
                    in cin := cin'; ret end
-    val thy = Build.get_theory thy_name
+    val thy = PIDE_Loader.get_theory thy_name
     val entries = Theory.nodes_of thy
       |> map (fn t => (Context.theory_long_name t, Theory_Hash.hash_of t))
   in

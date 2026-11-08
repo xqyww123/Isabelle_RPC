@@ -53,4 +53,10 @@ object Frontend_Identity extends Scala.Fun("isabelle_rpc.frontend_identity", thr
   }
 }
 
-class RPC_Functions extends Scala.Functions(Frontend_Identity)
+class RPC_Functions extends Scala.Functions(
+  Frontend_Identity,
+  PIDE_Loader.Use_Theories_Fun,
+  PIDE_Loader.Pinned_Theory_Fun,
+  PIDE_Loader.Pinned_Theories_Fun,
+  PIDE_Loader.Loader_Check_Fun,
+  PIDE_Loader.Eval_Conditions_Fun)

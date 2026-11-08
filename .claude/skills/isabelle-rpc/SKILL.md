@@ -1,6 +1,6 @@
 ---
 name: isabelle-rpc
-description: How to use Isabelle_RPC — call async Python procedures from Isabelle/ML over MessagePack/TCP, and call back into ML from Python. Covers the command/callback API, the multiplexed wire protocol, procedure registration, and the Tools/ modules (Universal_Key, context queries, Theory_Hash_Store, RPC_Pretty, Inner_Syntax_Error, position/unicode).
+description: How to use Isabelle_RPC — call async Python procedures from Isabelle/ML over MessagePack/TCP, and call back into ML from Python. Covers the command/callback API, the multiplexed wire protocol, procedure registration, and the Tools/ modules (Universal_Key, context queries, Theory_Hash_Store, RPC_Pretty, Inner_Syntax_Error, PIDE_Loader, position/unicode). PIDE_Loader loads theories through the PIDE document and looks them up by name (heap and loaded theories) inside an `isabelle REPL` process; use it there instead of `Build.get_theory`.
 ---
 
 # Isabelle_RPC: call Python from Isabelle/ML
@@ -192,6 +192,9 @@ treat a cancellation as a failure (CALLBACK_MECHANISM.md, Error Handling).
 - **`run_python` is an unsandboxed `exec`** of ML-supplied source in the host process.
 - **`dialogue` returns `None`** unless Isabelle/jEdit is attached (Isa-REPL, `isabelle build`, VSCode, headless PIDE, bare ML) — distinct from the user declining. VSCode could answer when its client renders HTML output, but the probe does not check that, so it counts as no responder. It blocks only with jEdit attached, or under the `present` policy.
 - **The pooled connection is heartbeated** before reuse; a dead one purges the whole pool.
+- **Theory lookups inside an `isabelle REPL` process**: theories loaded at run time are not in
+  `Build`'s registry. Use `PIDE_Loader.get_theory` / `lookup_theory` (heap and loaded theories),
+  and never call them on the protocol thread (`references/modules.md`, `Tools/pide_loader.ML`).
 
 ## Where to look next
 

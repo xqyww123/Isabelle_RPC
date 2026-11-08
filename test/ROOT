@@ -1,0 +1,21 @@
+(* Kept out of the top-level ROOT, which the conda package ships without this directory:
+   a ROOT declaring a session whose directory is missing breaks every `isabelle build`
+   in that environment (PACKAGING_RULES.md, "ROOT exposure").
+
+   Run from the repository root, with this checkout registered (isabelle components -u .):
+       isabelle build -d test Isabelle_RPC_Test
+   -d . instead of registering fails with "Bad scala_function": the session needs
+   lib/isabelle_rpc.jar on Isabelle's classpath, and -d does not put it there. *)
+
+session Isabelle_RPC_Test = "HOL-Library" +
+  sessions Isabelle_RPC
+  theories
+    Test_Universal_Key
+    Test_Name_Spaces
+    Test_Cache_Scope
+    Test_Term_Codec
+    Test_Callback_Argument
+    Test_Entity_Catalog
+    Test_Thm_Key_Cache
+    Test_Print_Term
+    Test_PIDE_Loader
