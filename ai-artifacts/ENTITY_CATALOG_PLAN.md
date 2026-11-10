@@ -8,13 +8,18 @@ tests were written, then removed. Every item of the three plan reviews is
 ruled or applied (§11); the plan text was last reviewed at rev 5. The
 LIVE-pass bug found at step 0 was fixed by the link-layer session
 (Semantic_Embedding `6d0ad1b`, 2026-11-01). Hashes and paths here are those
-of the Isabelle2025-2 code, before the Isabelle2026 port.
-- RESUME HERE (last updated 2026-11-10):
+of the Isabelle2025-2 code, before the Isabelle2026 port. "The scratchpad"
+below is the session scratchpad, archived as
+`~/archive/claude-scratchpad/1595227b-scratchpad-2026-11-10.tar.zst`.
+- RESUME HERE (last updated 2026-11-10): nothing left to do.
   - Owner's answers (2026-11-10): no memory write; Status line rewritten
-    and this plan committed (approved); archive the scratchpad when the work
-    ends; push (Isa-Mini `19843e1` and MLML `da4778f9` were already on origin
-    by then). Pending: the owner asked what `test_entity_mirror.py` is (see
-    the open question below).
+    and this plan committed (Isabelle_RPC `87f8a24`, pushed); MLML's
+    Isabelle_RPC pointer is neither committed nor pushed; Isa-Mini `19843e1`
+    and MLML `da4778f9` were already on origin; `test_entity_mirror.py` stays
+    uncommitted; the scratchpad archived (6,191 entries and 149,072,309
+    bytes, matching the source, which was then deleted). The link-layer
+    session was asked to update the status of
+    `BUG_LIVE_PASS_INFRA_FILTER_CONTEXT.md` (it still reads "open").
   - REASSIGNED (2026-10-29, relayed by the link-layer session "Isabelle
     jEdit 语义搜索面板", quoting the owner "LIVE bug 由你负责"): that session
     owns the LIVE-pass bug and designs its fix together with retiring the
@@ -51,13 +56,11 @@ of the Isabelle2025-2 code, before the Isabelle2026 port.
     pass. COMMITTED (owner-approved "批准提交"): Isa-Mini `19843e1` (the 5
     `Tests/*.yml` only), MLML `da4778f9` (only the Isa-Mini pointer,
     `e2d732f` → `19843e1`); on origin by 2026-11-10.
-  - Open question to the owner:
-    - `test_entity_mirror.py` (§8.3 tests) stays uncommitted (not approved);
-      reconsider? (R2: the lock and the two protocol checks have no committed
-      direct test; cross-call catalog reuse within a `by aoa` is covered by it
-      only.) Still passes on 2026-11-10.
-  - Archive the scratchpad (`~/archive/claude-scratchpad/`, .tar.zst) once
-    this work ends (owner-approved 2026-11-10).
+  - `test_entity_mirror.py` (§8.3 tests) stays uncommitted (owner,
+    2026-10-27, confirmed 2026-11-10), although review item R2 noted that the
+    lock and the two protocol checks have no committed direct test and that
+    cross-call catalog reuse within a `by aoa` is covered by it only. Still
+    passes on 2026-11-10.
   - Done (2026-10-28, 17:36 +08): §8.5 for stage C, the real runs; §6.2 holds
     the measured numbers. Run 17:04–17:30, all three proved, 4.90 USD; torn
     down (sampler.stop, stop_servers.sh, the Naproche orphan killed). Files in
