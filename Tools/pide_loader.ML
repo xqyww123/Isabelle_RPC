@@ -34,7 +34,8 @@ struct
 
 (* theory values of pinned nodes, by long name: they never change, names are unique *)
 
-val pinned = Synchronized.var "PIDE_Loader.pinned" (Symtab.empty: theory Symtab.table);
+val pinned =
+  Synchronized.var \<^unchecked_name>\<open>PIDE_Loader.pinned\<close> (Symtab.empty: theory Symtab.table);
 
 (*(theory, node, command): node = "" for a heap theory*)
 val decode_loaded = YXML.parse_body #> let open XML.Decode in triple string string int end;
@@ -76,7 +77,7 @@ fun on_plain_thread f =
   else
     Thread_Attributes.uninterruptible_body (fn run =>
       let
-        val result = Future.promise_name "PIDE_Loader.use_theories" I;
+        val result = Future.promise_name \<^unchecked_name>\<open>PIDE_Loader.use_theories\<close> I;
         val thread =
           Isabelle_Thread.fork (Isabelle_Thread.params "PIDE_Loader") (fn () =>
             Future.fulfill_result result (Exn.capture_body (Future.interruptible_task f)));
