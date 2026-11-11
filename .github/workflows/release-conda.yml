@@ -292,8 +292,7 @@ jobs:
   # assumption), and the daemon-thread leak guard (both firing and disarm).
   # Gate for publish: a red leg here must block the release.
   #
-  # macOS legs: macos-13 is RETIRED and queues forever (runner-images #13402) -- the
-  # Intel leg must be macos-15-intel; arm is macos-15.
+  # No macOS leg: its runners are too slow (owner, 2026-11-11).
   attached_tests:
     name: "Attached-host tests (${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
@@ -301,7 +300,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
